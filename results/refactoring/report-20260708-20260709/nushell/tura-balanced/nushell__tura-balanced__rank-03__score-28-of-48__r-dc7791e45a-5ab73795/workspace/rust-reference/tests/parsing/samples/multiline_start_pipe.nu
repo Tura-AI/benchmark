@@ -1,2 +1,0 @@
-echo "four"
-| str length

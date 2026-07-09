@@ -1,2 +1,0 @@
-echo "hi" |
-str length

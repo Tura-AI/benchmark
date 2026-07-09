@@ -1,2 +1,0 @@
-echo "how" |
-str length

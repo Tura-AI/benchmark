@@ -1,2 +1,0 @@
-echo "one"
-| str length

@@ -1,1 +1,0 @@
-echo "hello" | str length
