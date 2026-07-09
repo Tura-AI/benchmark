@@ -1,0 +1,10 @@
+import { chromium, devices } from '@playwright/test';
+const browser = await chromium.launch();
+const desktop = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+await desktop.goto('http://127.0.0.1:3015/', { waitUntil: 'networkidle' });
+await desktop.screenshot({ path: '.tura/screens/desktop-storefront.png', fullPage: true });
+const mobileContext = await browser.newContext(devices['Pixel 5']);
+const mobile = await mobileContext.newPage();
+await mobile.goto('http://127.0.0.1:3015/', { waitUntil: 'networkidle' });
+await mobile.screenshot({ path: '.tura/screens/mobile-storefront.png', fullPage: true });
+await browser.close();

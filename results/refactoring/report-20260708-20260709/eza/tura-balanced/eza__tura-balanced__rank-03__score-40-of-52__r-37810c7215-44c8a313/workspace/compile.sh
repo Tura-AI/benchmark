@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+set -eu
+chmod +x executable 2>/dev/null || true
+if command -v python3 >/dev/null 2>&1; then
+  python3 -m py_compile eza_port.py executable
+else
+  python -m py_compile eza_port.py executable
+fi

@@ -1,0 +1,236 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - link "POWERPROMPT Gallery home" [ref=e4] [cursor=pointer]:
+      - /url: /
+      - img [ref=e6]
+      - generic [ref=e8]: POWERPROMPT
+      - generic [ref=e9]: Gallery
+    - link "Home" [ref=e10] [cursor=pointer]:
+      - /url: /
+      - img [ref=e11]
+      - text: Home
+    - button "Search" [ref=e14] [cursor=pointer]:
+      - img [ref=e15]
+      - text: Search
+    - button "History" [ref=e18] [cursor=pointer]:
+      - img [ref=e19]
+      - text: History
+    - button "Favorites NEW" [ref=e23] [cursor=pointer]:
+      - img [ref=e24]
+      - text: Favorites
+      - generic [ref=e26]: NEW
+    - generic [ref=e27]: Categories
+    - generic [ref=e28]:
+      - button "Image" [ref=e29] [cursor=pointer]: Image
+      - button "Photography" [ref=e31] [cursor=pointer]: Photography
+      - button "Design" [ref=e33] [cursor=pointer]: Design
+      - button "Writing" [ref=e35] [cursor=pointer]: Writing
+      - button "Code" [ref=e37] [cursor=pointer]: Code
+      - button "Marketing" [ref=e39] [cursor=pointer]: Marketing
+      - button "Productivity" [ref=e41] [cursor=pointer]: Productivity
+      - button "Research" [ref=e43] [cursor=pointer]: Research
+    - generic [ref=e45]: More from us
+    - link "Creator analytics" [ref=e46] [cursor=pointer]:
+      - /url: /admin
+      - img [ref=e47]
+      - text: Creator analytics
+    - button "Browser extension" [ref=e49] [cursor=pointer]:
+      - img [ref=e50]
+      - text: Browser extension
+    - button "Figma plugin" [ref=e53] [cursor=pointer]:
+      - img [ref=e54]
+      - text: Figma plugin
+    - button "Public API" [ref=e64] [cursor=pointer]:
+      - img [ref=e65]
+      - text: Public API
+    - generic [ref=e69]:
+      - generic [ref=e70]:
+        - img [ref=e71]
+        - heading "Publish a prompt pack" [level=4] [ref=e73]
+        - paragraph [ref=e74]: Earn on reusable model workflows.
+      - generic [ref=e75]:
+        - link "Cart" [ref=e76] [cursor=pointer]:
+          - /url: /cart
+        - generic [ref=e77]: 2 saved
+  - navigation "Mobile dock" [ref=e78]:
+    - link "Home" [ref=e79] [cursor=pointer]:
+      - /url: /
+      - img [ref=e80]
+    - button "History" [ref=e83] [cursor=pointer]:
+      - img [ref=e84]
+    - button "Favorites" [ref=e88] [cursor=pointer]:
+      - img [ref=e89]
+    - link "Analytics" [ref=e91] [cursor=pointer]:
+      - /url: /admin
+      - img [ref=e92]
+    - link "Cart" [ref=e94] [cursor=pointer]:
+      - /url: /cart
+      - img [ref=e95]
+      - generic [ref=e98]: "2"
+    - button "Generate" [ref=e99] [cursor=pointer]:
+      - img [ref=e100]
+  - main [ref=e103]:
+    - generic [ref=e104]:
+      - button "Open navigation" [ref=e105] [cursor=pointer]:
+        - img [ref=e106]
+      - generic [ref=e107]: POWERPROMPT
+    - generic [ref=e108]:
+      - generic [ref=e109]:
+        - generic "Model filters" [ref=e110]:
+          - button "All models" [ref=e111] [cursor=pointer]
+          - button "GPT-4o" [ref=e112] [cursor=pointer]
+          - button "Claude" [ref=e113] [cursor=pointer]
+          - button "Midjourney" [ref=e114] [cursor=pointer]
+          - button "Flux" [ref=e115] [cursor=pointer]
+        - generic "Sort controls" [ref=e116]:
+          - button "Featured" [ref=e117] [cursor=pointer]
+          - button "Newest" [ref=e118] [cursor=pointer]
+          - button "Popular" [ref=e119] [cursor=pointer]
+      - generic [ref=e120]:
+        - img [ref=e121]
+        - textbox "Search prompts" [ref=e124]:
+          - /placeholder: Search prompts, creators, models
+    - region "Prompt marketplace gallery" [ref=e125]:
+      - generic [ref=e126]:
+        - paragraph [ref=e127]: Featured 11 / Free 1 / Paid 21
+        - heading "Prompt Gallery" [level=1] [ref=e128]
+        - link "Cart" [ref=e129] [cursor=pointer]:
+          - /url: /cart
+      - generic [ref=e131]:
+        - article [ref=e132]:
+          - button "Save The Socratic Tutor" [ref=e133] [cursor=pointer]:
+            - img [ref=e134]
+          - button "Preview The Socratic Tutor" [active] [ref=e136] [cursor=pointer]:
+            - img "The Socratic Tutor prompt preview" [ref=e137]
+          - generic:
+            - generic:
+              - generic: GPT-4o
+              - generic:
+                - img
+                - text: "4.7"
+            - heading "The Socratic Tutor" [level=3]
+            - generic:
+              - generic: Research
+              - generic: 9.2k sold
+            - generic:
+              - generic: Free
+              - button "Get" [ref=e138] [cursor=pointer]:
+                - text: Get
+                - img [ref=e139]
+            - link "Open detail" [ref=e141] [cursor=pointer]:
+              - /url: /prompts/the-socratic-tutor
+        - article [ref=e142]:
+          - button "Save Inbox Zero Strategist" [ref=e143] [cursor=pointer]:
+            - img [ref=e144]
+          - button "Preview Inbox Zero Strategist" [ref=e146] [cursor=pointer]:
+            - img "Inbox Zero Strategist prompt preview" [ref=e147]
+          - generic:
+            - generic:
+              - generic: Claude
+              - generic:
+                - img
+                - text: "4.6"
+            - heading "Inbox Zero Strategist" [level=3]
+            - generic:
+              - generic: Productivity
+              - generic: 3.4k sold
+            - generic:
+              - generic: $8
+              - button "Add" [ref=e148] [cursor=pointer]:
+                - text: Add
+                - img [ref=e149]
+            - link "Open detail" [ref=e151] [cursor=pointer]:
+              - /url: /prompts/inbox-zero-strategist
+        - article [ref=e152]:
+          - button "Save Vintage Film Poster" [ref=e153] [cursor=pointer]:
+            - img [ref=e154]
+          - button "Preview Vintage Film Poster" [ref=e156] [cursor=pointer]:
+            - img "Vintage Film Poster prompt preview" [ref=e157]
+          - generic:
+            - generic:
+              - generic: Midjourney
+              - generic:
+                - img
+                - text: "4.9"
+            - heading "Vintage Film Poster" [level=3]
+            - generic:
+              - generic: Design
+              - generic: 2.2k sold
+            - generic:
+              - generic: $13
+              - button "Add" [ref=e158] [cursor=pointer]:
+                - text: Add
+                - img [ref=e159]
+            - link "Open detail" [ref=e161] [cursor=pointer]:
+              - /url: /prompts/vintage-film-poster
+        - article [ref=e162]:
+          - button "Save Studio Portrait, Soft Light" [ref=e163] [cursor=pointer]:
+            - img [ref=e164]
+          - button "Preview Studio Portrait, Soft Light" [ref=e166] [cursor=pointer]:
+            - img "Studio Portrait, Soft Light prompt preview" [ref=e167]
+          - generic:
+            - generic:
+              - generic: Flux
+              - generic:
+                - img
+                - text: "4.9"
+            - heading "Studio Portrait, Soft Light" [level=3]
+            - generic:
+              - generic: Photography
+              - generic: 1.8k sold
+            - generic:
+              - generic: $10
+              - button "Add" [ref=e168] [cursor=pointer]:
+                - text: Add
+                - img [ref=e169]
+            - link "Open detail" [ref=e171] [cursor=pointer]:
+              - /url: /prompts/studio-portrait-soft-light
+        - article [ref=e172]:
+          - button "Save Concept Car, Studio" [ref=e173] [cursor=pointer]:
+            - img [ref=e174]
+          - button "Preview Concept Car, Studio" [ref=e176] [cursor=pointer]:
+            - img "Concept Car, Studio prompt preview" [ref=e177]
+          - generic:
+            - generic:
+              - generic: Midjourney
+              - generic:
+                - img
+                - text: "4.8"
+            - heading "Concept Car, Studio" [level=3]
+            - generic:
+              - generic: Image
+              - generic: 1.4k sold
+            - generic:
+              - generic: $12
+              - button "Add" [ref=e178] [cursor=pointer]:
+                - text: Add
+                - img [ref=e179]
+            - link "Open detail" [ref=e181] [cursor=pointer]:
+              - /url: /prompts/concept-car-studio
+        - article [ref=e182]:
+          - button "Save Brand Voice, Bottled" [ref=e183] [cursor=pointer]:
+            - img [ref=e184]
+          - button "Preview Brand Voice, Bottled" [ref=e186] [cursor=pointer]:
+            - img "Brand Voice, Bottled prompt preview" [ref=e187]
+          - generic:
+            - generic:
+              - generic: Claude
+              - generic:
+                - img
+                - text: "4.9"
+            - heading "Brand Voice, Bottled" [level=3]
+            - generic:
+              - generic: Marketing
+              - generic: 860 sold
+            - generic:
+              - generic: $24
+              - button "Add" [ref=e188] [cursor=pointer]:
+                - text: Add
+                - img [ref=e189]
+            - link "Open detail" [ref=e191] [cursor=pointer]:
+              - /url: /prompts/brand-voice-bottled
+  - status
+```

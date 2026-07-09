@@ -1,0 +1,14 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+const page = await browser.newPage();
+page.on('console', msg => console.log('console', msg.type(), msg.text()));
+page.on('pageerror', err => console.log('pageerror', err.message));
+await page.goto('http://127.0.0.1:3000/', { waitUntil: 'networkidle' });
+console.log('url', page.url());
+console.log('buttons', await page.getByRole('button', { name: /Preview/ }).count());
+await page.getByRole('button', { name: /Preview/ }).first().click();
+await page.waitForTimeout(500);
+console.log('dialogs', await page.getByRole('dialog').count());
+console.log('lightbox', await page.locator('.lightbox').count());
+console.log('bodyClass', await page.locator('body').getAttribute('class'));
+await browser.close();

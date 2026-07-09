@@ -1,0 +1,591 @@
+#!/usr/bin/env python3
+import fnmatch
+import os
+import stat
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+VERSION_TEXT = "eza - A modern, maintained replacement for ls\nv0.23.3 [+git]\nhttps://github.com/eza-community/eza\n"
+
+HELP_TEXT = """Usage:
+  eza [options] [files...]
+
+META OPTIONS
+  -?, --help                 show list of command-line options
+  -v, --version              show version of eza
+
+DISPLAY OPTIONS
+  -1, --oneline              display one entry per line
+  -l, --long                 display extended file metadata as a table
+  -G, --grid                 display entries as a grid (default)
+  -x, --across               sort the grid across, rather than downwards
+  -R, --recurse              recurse into directories
+  -T, --tree                 recurse into directories as a tree
+  -X, --dereference          dereference symbolic links when displaying information
+  -F, --classify=WHEN        display type indicator by file names (always, auto, never)
+  --colo[u]r=WHEN            when to use terminal colours (always, auto, never)
+  --icons=WHEN               when to display icons (always, auto, never)
+  --absolute                 display entries with their absolute path (on, follow, off)
+  -w, --width COLS           set screen width in columns
+
+FILTERING AND SORTING OPTIONS
+  -a, --all                  show hidden and 'dot' files
+  -A, --almost-all           equivalent to --all
+  -d, --treat-dirs-as-files  list directories as files; don't list their contents
+  -D, --only-dirs            list only directories
+  -f, --only-files           list only files
+  --show-symlinks            explicitly show symbolic links
+  --no-symlinks              do not show symbolic links
+  -L, --level DEPTH          limit the depth of recursion
+  -r, --reverse              reverse the sort order
+  -s, --sort SORT_FIELD      which field to sort by
+  --group-directories-first  list directories before other files
+  --group-directories-last   list directories after other files
+  -I, --ignore-glob GLOBS    glob patterns of files to ignore
+
+LONG VIEW OPTIONS
+  -b, --binary               list file sizes with binary prefixes
+  -B, --bytes                list file sizes in bytes
+  -g, --group                list each file's group
+  -h, --header               add a header row to each column
+  -H, --links                list each file's number of hard links
+  -i, --inode                list each file's inode number
+  -S, --blocksize            show size of allocated file system blocks
+  -t, --time FIELD           which timestamp field to list
+  --time-style               how to format timestamps
+  -o, --octal-permissions    list each file's permission in octal format
+  --no-permissions           suppress the permissions field
+  --no-filesize              suppress the filesize field
+  --no-user                  suppress the user field
+  --no-time                  suppress the time field
+  --stdin                    read file names from stdin
+"""
+
+VALID_SORTS = {
+    "name", "Name", "extension", "Extension", "size", "type", "created",
+    "modified", "accessed", "changed", "inode", "none", "date", "time",
+    "old", "new",
+}
+
+
+def out(text: str) -> None:
+    sys.stdout.buffer.write(text.encode("utf-8"))
+
+
+def err_out(text: str) -> None:
+    sys.stderr.buffer.write(text.encode("utf-8"))
+VALUE_OPTS = {
+    "--icons", "--classify", "--color", "--colour", "--absolute", "--width",
+    "--level", "--sort", "--ignore-glob", "--time", "--time-style",
+    "--color-scale", "--colour-scale", "--color-scale-mode", "--colour-scale-mode",
+}
+SHORT_WITH_VALUE = {"L", "s", "I", "t", "w"}
+KNOWN_LONG = {
+    "--help", "--version", "--oneline", "--long", "--grid", "--across",
+    "--recurse", "--tree", "--dereference", "--no-quotes", "--absolute",
+    "--follow-symlinks", "--color", "--colour", "--color-scale", "--colour-scale",
+    "--color-scale-mode", "--colour-scale-mode", "--all", "--almost-all",
+    "--treat-dirs-as-files", "--list-dirs", "--level", "--reverse", "--sort",
+    "--ignore-glob", "--git-ignore", "--group-directories-first",
+    "--group-directories-last", "--only-dirs", "--only-files", "--no-symlinks",
+    "--show-symlinks", "--binary", "--bytes", "--group", "--smart-group",
+    "--header", "--links", "--inode", "--mounts", "--numeric", "--flags",
+    "--blocksize", "--time", "--modified", "--accessed", "--created", "--changed",
+    "--time-style", "--total-size", "--octal-permissions", "--no-permissions",
+    "--no-filesize", "--no-user", "--no-time", "--stdin", "--git", "--no-git",
+    "--git-repos", "--git-repos-no-status", "--icons", "--classify", "--hyperlink",
+}
+
+
+@dataclass
+class Options:
+    long: bool = False
+    tree: bool = False
+    recurse: bool = False
+    treat_dirs: bool = False
+    only_dirs: bool = False
+    only_files: bool = False
+    show_symlinks: bool = False
+    no_symlinks: bool = False
+    all_count: int = 0
+    reverse: bool = False
+    dirs_first: bool = False
+    dirs_last: bool = False
+    sort: str = "name"
+    level: int | None = None
+    icons: str = "never"
+    classify: str = "never"
+    absolute: str = "off"
+    stdin: bool = False
+    no_perms: bool = False
+    no_size: bool = False
+    no_user: bool = False
+    no_time: bool = False
+    header: bool = False
+    bytes_size: bool = False
+    binary: bool = False
+    inode: bool = False
+    links: bool = False
+    blocksize: bool = False
+    octal: bool = False
+    ignore_globs: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Entry:
+    path: Path
+    name: str
+    display_path: str | None = None
+    synthetic_dir: bool = False
+
+    def lstat(self):
+        return os.lstat(self.path)
+
+    def stat(self):
+        return os.stat(self.path)
+
+    def exists(self):
+        return os.path.lexists(self.path)
+
+    def is_link(self):
+        return os.path.islink(self.path)
+
+    def is_dir(self):
+        try:
+            return os.path.isdir(self.path) and not os.path.islink(self.path)
+        except OSError:
+            return False
+    def points_to_dir(self):
+        try:
+            return os.path.isdir(self.path)
+        except OSError:
+            return False
+    def is_file_kind(self):
+        return not self.is_dir()
+
+
+def err(msg: str) -> int:
+    err_out(f"eza: {msg}\n")
+    return 3
+
+
+def split_long(arg: str):
+    if "=" in arg:
+        k, v = arg.split("=", 1)
+        return k, v
+    return arg, None
+
+
+def parse(argv: list[str]):
+    opts = Options()
+    paths: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            paths.extend(argv[i + 1:])
+            break
+        if arg.startswith("--") and arg != "--":
+            key, val = split_long(arg)
+            if key not in KNOWN_LONG:
+                return None, None, err(f"Unknown argument {key}")
+            if key in VALUE_OPTS and val is None:
+                if key in {"--icons", "--classify", "--color", "--colour", "--absolute", "--color-scale", "--colour-scale"}:
+                    val = {"--absolute": "on"}.get(key, "auto")
+                else:
+                    i += 1
+                    if i >= len(argv):
+                        return None, None, err(f"Missing value for argument {key}")
+                    val = argv[i]
+            elif key not in VALUE_OPTS and val is not None:
+                return None, None, err(f"Argument {key} doesn't take a value")
+            if key == "--sort" and val not in VALID_SORTS:
+                err_out(f"eza: Option --sort (-s) has no \"{val}\" setting (choices: name, Name, size, extension, Extension, modified, changed, accessed, created, inode, type, none)\n")
+                return None, None, 3
+            if key == "--help":
+                out(HELP_TEXT)
+                return None, None, 0
+            if key == "--version":
+                out(VERSION_TEXT)
+                return None, None, 0
+            apply_long(opts, key, val)
+            i += 1
+            continue
+        if arg.startswith("-") and arg != "-":
+            j = 1
+            while j < len(arg):
+                ch = arg[j]
+                if ch in SHORT_WITH_VALUE:
+                    val = arg[j + 1:]
+                    if not val:
+                        i += 1
+                        if i >= len(argv):
+                            return None, None, err(f"Missing value for argument -{ch}")
+                        val = argv[i]
+                    ok = apply_short(opts, ch, val)
+                    if ok is not None:
+                        return None, None, ok
+                    break
+                ok = apply_short(opts, ch, None)
+                if ok is not None:
+                    return None, None, ok
+                j += 1
+            i += 1
+            continue
+        paths.append(arg)
+        i += 1
+    if opts.stdin and not paths:
+        sep = os.environ.get("EZA_STDIN_SEPARATOR") or os.environ.get("EXA_STDIN_SEPARATOR") or "\n"
+        paths = [p for p in sys.stdin.read().split(sep) if p]
+    if not paths:
+        paths = ["."]
+    return opts, paths, None
+
+
+def apply_short(opts: Options, ch: str, val: str | None):
+    mapping = {
+        "1": "oneline", "l": "long", "G": "grid", "R": "recurse", "T": "tree",
+        "X": "deref", "a": "all", "A": "almost", "d": "treat", "D": "only_dirs",
+        "f": "only_files", "r": "reverse", "b": "binary", "B": "bytes", "g": "group",
+        "h": "header", "H": "links", "i": "inode", "S": "blocksize", "m": "modified",
+        "u": "accessed", "U": "created", "o": "octal", "?": "help", "v": "version",
+        "x": "across", "n": "numeric", "M": "mounts", "O": "flags", "F": "classify",
+    }
+    if ch not in mapping and ch not in SHORT_WITH_VALUE:
+        return err(f"Unknown argument -{ch}")
+    if ch == "?":
+        out(HELP_TEXT); return 0
+    if ch == "v":
+        out(VERSION_TEXT); return 0
+    if ch == "l": opts.long = True
+    elif ch == "R": opts.recurse = True
+    elif ch == "T": opts.tree = True; opts.recurse = True
+    elif ch == "a": opts.all_count += 1
+    elif ch == "A": opts.all_count = max(opts.all_count, 1)
+    elif ch == "d": opts.treat_dirs = True
+    elif ch == "D": opts.only_dirs = True
+    elif ch == "f": opts.only_files = True
+    elif ch == "r": opts.reverse = True
+    elif ch == "B": opts.bytes_size = True
+    elif ch == "b": opts.binary = True
+    elif ch == "h": opts.header = True
+    elif ch == "H": opts.links = True
+    elif ch == "i": opts.inode = True
+    elif ch == "S": opts.blocksize = True
+    elif ch == "o": opts.octal = True
+    elif ch == "F": opts.classify = val or "auto"
+    elif ch == "L":
+        try: opts.level = int(val or "")
+        except ValueError: return err(f"Invalid number '{val}'")
+    elif ch == "s":
+        if val not in VALID_SORTS: return err(f"Invalid value '{val}' for argument --sort")
+        opts.sort = val or "name"
+    elif ch == "I": opts.ignore_globs.extend((val or "").split("|"))
+    elif ch == "w" or ch in {"G", "x", "g", "m", "u", "U", "n", "M", "O", "X"}:
+        pass
+    return None
+
+
+def apply_long(opts: Options, key: str, val: str | None):
+    if key == "--long": opts.long = True
+    elif key == "--recurse": opts.recurse = True
+    elif key == "--tree": opts.tree = True; opts.recurse = True
+    elif key in {"--all", "--almost-all"}: opts.all_count += 1
+    elif key in {"--treat-dirs-as-files", "--list-dirs"}: opts.treat_dirs = True
+    elif key == "--only-dirs": opts.only_dirs = True
+    elif key == "--only-files": opts.only_files = True
+    elif key == "--show-symlinks": opts.show_symlinks = True
+    elif key == "--no-symlinks": opts.no_symlinks = True
+    elif key == "--reverse": opts.reverse = True
+    elif key == "--group-directories-first": opts.dirs_first = True; opts.dirs_last = False
+    elif key == "--group-directories-last": opts.dirs_last = True; opts.dirs_first = False
+    elif key == "--sort" and val in VALID_SORTS: opts.sort = val or "name"
+    elif key == "--level":
+        try: opts.level = int(val or "")
+        except ValueError: opts.level = 0
+        opts.recurse = True
+    elif key == "--icons": opts.icons = val or "auto"
+    elif key == "--classify": opts.classify = val or "auto"
+    elif key == "--absolute": opts.absolute = val or "on"
+    elif key == "--stdin": opts.stdin = True
+    elif key == "--no-permissions": opts.no_perms = True
+    elif key == "--no-filesize": opts.no_size = True
+    elif key == "--no-user": opts.no_user = True
+    elif key == "--no-time": opts.no_time = True
+    elif key == "--header": opts.header = True
+    elif key == "--bytes": opts.bytes_size = True
+    elif key == "--binary": opts.binary = True
+    elif key == "--inode": opts.inode = True
+    elif key == "--links": opts.links = True
+    elif key == "--blocksize": opts.blocksize = True
+    elif key == "--octal-permissions": opts.octal = True
+    elif key == "--ignore-glob": opts.ignore_globs.extend((val or "").split("|"))
+
+
+def visible_name(name: str, opts: Options) -> bool:
+    if opts.all_count == 0 and (name.startswith(".") or (os.name == "nt" and name.startswith("_"))):
+        return False
+    return not any(fnmatch.fnmatch(name, g) for g in opts.ignore_globs if g)
+
+
+def list_dir(path: Path, opts: Options) -> list[Entry]:
+    out: list[Entry] = []
+    if opts.all_count >= 2:
+        out.append(Entry(path / ".", ".", synthetic_dir=True))
+        out.append(Entry(path / "..", "..", synthetic_dir=True))
+    try:
+        names = os.listdir(path)
+    except OSError as e:
+        raise e
+    for name in names:
+        if visible_name(name, opts):
+            out.append(Entry(path / name, name))
+    return filter_entries(sort_entries(out, opts), opts)
+
+
+def filter_entries(entries: list[Entry], opts: Options) -> list[Entry]:
+    out = []
+    for e in entries:
+        is_link = e.is_link()
+        is_dir = e.points_to_dir() if is_link else e.is_dir()
+        if opts.no_symlinks and is_link:
+            continue
+        if opts.only_dirs and not is_dir:
+            if not (opts.show_symlinks and is_link):
+                continue
+        if opts.only_files and (is_dir or (is_link and not opts.show_symlinks)):
+            continue
+        out.append(e)
+    return out
+
+
+def sort_key(e: Entry, opts: Options):
+    try:
+        st = e.lstat()
+    except OSError:
+        st = None
+    name = e.name.lower() if opts.sort != "Name" else e.name
+    ext = Path(e.name).suffix.lower().lstrip(".")
+    if opts.dirs_first or opts.dirs_last:
+        d = 0 if e.points_to_dir() else 1
+        if opts.dirs_last: d = 1 - d
+    else:
+        d = 0
+    s = opts.sort
+    if s in {"none"}:
+        return (d, 0)
+    if s in {"size"}:
+        k = st.st_size if st else 0
+    elif s in {"extension", "Extension"}:
+        k = ext if s == "extension" else Path(e.name).suffix.lstrip(".")
+    elif s in {"modified", "date", "time", "old", "new"}:
+        k = st.st_mtime if st else 0
+    elif s == "accessed":
+        k = st.st_atime if st else 0
+    elif s == "created":
+        k = st.st_ctime if st else 0
+    elif s == "inode":
+        k = st.st_ino if st else 0
+    elif s == "type":
+        k = (0 if e.points_to_dir() else 1, ext, name)
+    else:
+        k = name
+    return (d, k, name)
+
+
+def sort_entries(entries: list[Entry], opts: Options) -> list[Entry]:
+    if opts.sort == "none":
+        res = entries[:]
+    else:
+        res = sorted(entries, key=lambda e: sort_key(e, opts))
+    if opts.reverse:
+        res.reverse()
+    return res
+
+
+def icon(e: Entry) -> str:
+    if e.points_to_dir():
+        return ""
+    low = e.name.lower()
+    ext = low.rsplit(".", 1)[-1] if "." in low else ""
+    if ext in {"jpg", "jpeg", "png", "gif", "webp", "bmp"}: return ""
+    if ext == "svg": return "󰕙"
+    if ext in {"rs", "c", "h", "py", "js", "ts", "go"}: return "" if ext in {"c", "h"} else ""
+    if ext in {"txt", "md"}: return ""
+    if ext == "log": return ""
+    return "󰡯"
+
+
+def classify(e: Entry, opts: Options) -> str:
+    if opts.classify not in {"always", "auto"}:
+        return ""
+    try:
+        mode = e.lstat().st_mode
+    except OSError:
+        return ""
+    if e.points_to_dir() and not e.is_link(): return "/"
+    if mode & stat.S_IXUSR: return "*"
+    return ""
+
+
+def name_display(e: Entry, opts: Options) -> str:
+    name = e.display_path or e.name
+    if opts.absolute != "off":
+        name = os.path.abspath(e.path)
+        if " " in name:
+            name = "'" + name.replace("'", "\\'") + "'"
+    elif " " in name and not (name.startswith("'") and name.endswith("'")):
+        name = "'" + name.replace("'", "\\'") + "'"
+    if opts.icons == "always":
+        name = f"{icon(e)} {name}"
+    name += classify(e, opts)
+    if e.is_link():
+        try:
+            name += " -> " + os.readlink(e.path)
+        except OSError:
+            pass
+    return name
+
+
+def perm_string(mode: int) -> str:
+    kind = "d" if stat.S_ISDIR(mode) else "l" if stat.S_ISLNK(mode) else "-"
+    bits = ""
+    for who in [(stat.S_IRUSR, stat.S_IWUSR, stat.S_IXUSR), (stat.S_IRGRP, stat.S_IWGRP, stat.S_IXGRP), (stat.S_IROTH, stat.S_IWOTH, stat.S_IXOTH)]:
+        bits += "r" if mode & who[0] else "-"
+        bits += "w" if mode & who[1] else "-"
+        bits += "x" if mode & who[2] else "-"
+    return kind + bits
+
+
+def size_string(n: int, opts: Options) -> str:
+    if opts.bytes_size:
+        return str(n)
+    if n < 1024:
+        return str(n)
+    units = ["K", "M", "G", "T"]
+    base = 1024 if opts.binary else 1000
+    x = float(n)
+    for u in units:
+        x /= base
+        if abs(x) < base:
+            return f"{x:.1f}{u}" if x < 10 else f"{x:.0f}{u}"
+    return str(n)
+
+
+def time_string(ts: float) -> str:
+    return time.strftime("%d %b %H:%M", time.localtime(ts)).lstrip("0")
+
+
+def long_display(e: Entry, opts: Options) -> str:
+    try:
+        st = e.lstat()
+    except OSError as ex:
+        return f"<{e.path}: {ex}>"
+    cols = []
+    if opts.inode: cols.append(str(st.st_ino))
+    if opts.no_perms is False: cols.append(perm_string(st.st_mode))
+    if opts.octal: cols.append(oct(st.st_mode & 0o777)[2:])
+    if opts.links: cols.append(str(st.st_nlink))
+    if opts.blocksize: cols.append(str(getattr(st, "st_blocks", 0)))
+    if opts.no_size is False: cols.append(size_string(st.st_size, opts))
+    if opts.no_user is False: cols.append(str(getattr(st, "st_uid", "")))
+    if opts.no_time is False: cols.append(time_string(st.st_mtime))
+    cols.append(name_display(e, opts))
+    return " ".join(c for c in cols if c != "")
+
+
+def render_entries(entries: list[Entry], opts: Options, prefix_parts: list[bool] | None = None) -> list[str]:
+    lines = []
+    for idx, e in enumerate(entries):
+        is_last = idx == len(entries) - 1
+        text = long_display(e, opts) if opts.long else name_display(e, opts)
+        if prefix_parts is not None:
+            pre = "".join("    " if last else "│   " for last in prefix_parts[:-1])
+            if prefix_parts:
+                pre += "└── " if is_last else "├── "
+            text = pre + text
+        lines.append(text)
+    return lines
+
+
+def should_descend(e: Entry, opts: Options, depth: int) -> bool:
+    if opts.level is not None and depth + 1 >= opts.level:
+        return False
+    if opts.treat_dirs:
+        return False
+    if e.is_link() and not opts.show_symlinks:
+        return False
+    return e.points_to_dir() and e.name not in {".", ".."}
+
+
+def walk_tree(path: Path, opts: Options, depth: int = 0, parts: list[bool] | None = None) -> list[str]:
+    parts = parts or []
+    entries = list_dir(path, opts)
+    lines = []
+    for idx, e in enumerate(entries):
+        is_last = idx == len(entries) - 1
+        pre = "".join("    " if last else "│   " for last in parts)
+        pre += "└── " if is_last else "├── "
+        lines.append(pre + (long_display(e, opts) if opts.long else name_display(e, opts)))
+        if should_descend(e, opts, depth):
+            lines.extend(walk_tree(e.path, opts, depth + 1, parts + [is_last]))
+    return lines
+
+
+def list_path(raw: str, opts: Options, multi: bool) -> tuple[list[str], int]:
+    p = Path(raw)
+    if not os.path.lexists(p):
+        err_out(f"\"{raw}\": 系统找不到指定的文件。 (os error 2)\n")
+        return [], 2
+    if p.is_dir() and not opts.treat_dirs:
+        if opts.level == 0:
+            return [], 0
+        if opts.tree:
+            head = str(p)
+            lines = [head]
+            lines.extend(walk_tree(p, opts, 0, []))
+            return lines, 0
+        entries = list_dir(p, opts)
+        lines = render_entries(entries, opts)
+        if opts.recurse:
+            for e in entries:
+                if should_descend(e, opts, 0):
+                    sub, _ = list_path(str(e.path), opts, True)
+                    if sub:
+                        lines.append("")
+                        shown = str(e.path)
+                        if raw == "." and not shown.startswith("."):
+                            shown = ".\\" + shown
+                        lines.append(f"{shown}:")
+                        lines.extend(sub)
+        return lines, 0
+    e = Entry(p, p.name or raw, raw)
+    return [long_display(e, opts) if opts.long else name_display(e, opts)], 0
+
+
+def main(argv: list[str]) -> int:
+    parsed = parse(argv)
+    opts, paths, done = parsed
+    if done is not None:
+        return done
+    all_lines: list[str] = []
+    status = 0
+    multi = len(paths) > 1
+    for idx, path in enumerate(paths):
+        if idx and all_lines:
+            all_lines.append("")
+        if multi:
+            all_lines.append(f"{path}:")
+        lines, st = list_path(path, opts, multi)
+        status = max(status, st)
+        all_lines.extend(lines)
+    if all_lines:
+        out("\n".join(all_lines) + "\n")
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
