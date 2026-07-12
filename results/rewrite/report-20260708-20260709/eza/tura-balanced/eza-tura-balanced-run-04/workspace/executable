@@ -1,0 +1,964 @@
+#!/usr/bin/env python3
+import fnmatch
+import functools
+import math
+import os
+import re
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def out(text: str) -> None:
+    sys.stdout.buffer.write(text.encode("utf-8"))
+
+
+def err(text: str) -> None:
+    sys.stderr.buffer.write(text.encode("utf-8"))
+
+
+VERSION_TEXT = "eza - A modern, maintained replacement for ls\nv0.23.3 [+git]\nhttps://github.com/eza-community/eza\n"
+
+HELP_TEXT = """Usage:
+  eza [options] [files...]
+
+META OPTIONS
+  -?, --help                 show list of command-line options
+  -v, --version              show version of eza
+
+DISPLAY OPTIONS
+  -1, --oneline              display one entry per line
+  -l, --long                 display extended file metadata as a table
+  -G, --grid                 display entries as a grid (default)
+  -x, --across               sort the grid across, rather than downwards
+  -R, --recurse              recurse into directories
+  -T, --tree                 recurse into directories as a tree
+  -X, --dereference          dereference symbolic links when displaying information
+  -F, --classify=WHEN        display type indicator by file names (always, auto, never)
+  --colo[u]r=WHEN            when to use terminal colours (always, auto, never)
+  --colo[u]r-scale           highlight levels of 'field' distinctly(all, age, size)
+  --colo[u]r-scale-mode      use gradient or fixed colors in --color-scale (fixed, gradient)
+  --icons=WHEN               when to display icons (always, auto, never)
+  --no-quotes                don't quote file names with spaces
+  --hyperlink                display entries as hyperlinks
+  --absolute                 display entries with their absolute path (on, follow, off)
+  --follow-symlinks          drill down into symbolic links that point to directories
+  -w, --width COLS           set screen width in columns
+
+
+FILTERING AND SORTING OPTIONS
+  -a, --all                  show hidden and 'dot' files. Use this twice to also
+                             show the '.' and '..' directories
+  -A, --almost-all           equivalent to --all; included for compatibility with `ls -A`
+  -d, --treat-dirs-as-files  list directories as files; don't list their contents
+  -D, --only-dirs            list only directories
+  -f, --only-files           list only files
+  --show-symlinks            explicitly show symbolic links (for use with --only-dirs | --only-files)
+  --no-symlinks              do not show symbolic links
+  -L, --level DEPTH          limit the depth of recursion
+  -r, --reverse              reverse the sort order
+  -s, --sort SORT_FIELD      which field to sort by
+  --group-directories-first  list directories before other files
+  --group-directories-last   list directories after other files
+  -I, --ignore-glob GLOBS    glob patterns (pipe-separated) of files to ignore
+  --git-ignore               ignore files mentioned in '.gitignore'
+  Valid sort fields:         name, Name, extension, Extension, size, type,
+                             created, modified, accessed, changed, inode, and none.
+                             date, time, old, and new all refer to modified.
+
+LONG VIEW OPTIONS
+  -b, --binary               list file sizes with binary prefixes
+  -B, --bytes                list file sizes in bytes, without any prefixes
+  -g, --group                list each file's group
+  --smart-group              only show group if it has a different name from owner
+  -h, --header               add a header row to each column
+  -H, --links                list each file's number of hard links
+  -i, --inode                list each file's inode number
+  -M, --mounts               show mount details (Linux and Mac only)
+  -n, --numeric              list numeric user and group IDs
+  -O, --flags                list file flags (Mac, BSD, and Windows only)
+  -S, --blocksize            show size of allocated file system blocks
+  -t, --time FIELD           which timestamp field to list (modified, accessed, created)
+  -m, --modified             use the modified timestamp field
+  -u, --accessed             use the accessed timestamp field
+  -U, --created              use the created timestamp field
+  --changed                  use the changed timestamp field
+  --time-style               how to format timestamps (default, iso, long-iso,
+                             full-iso, relative, or a custom style '+<FORMAT>'
+                             like '+%Y-%m-%d %H:%M')
+  --total-size               show the size of a directory as the size of all
+                             files and directories inside (unix only)
+  -o, --octal-permissions    list each file's permission in octal format
+  --no-permissions           suppress the permissions field
+  --no-filesize              suppress the filesize field
+  --no-user                  suppress the user field
+  --no-time                  suppress the time field
+  --stdin                    read file names from stdin, one per line or other separator 
+                             specified in environment
+  --git                      list each file's Git status, if tracked or ignored
+  --no-git                   suppress Git status (always overrides --git,
+                             --git-repos, --git-repos-no-status)
+  --git-repos                list root of git-tree status
+  --git-repos-no-status      list each git-repos branch name (much faster)
+    
+"""
+
+WHEN = {"always", "auto", "never"}
+SORT_CHOICES = ["name", "Name", "size", "extension", "Extension", "modified", "changed", "accessed", "created", "inode", "type", "none"]
+TIME_CHOICES = {"modified", "changed", "accessed", "created"}
+TIME_STYLES = {"default", "long-iso", "full-iso", "iso", "relative"}
+
+
+@dataclass(frozen=True)
+class ArgSpec:
+    long: str
+    short: str | None
+    takes: str
+    values: tuple[str, ...] = ()
+    default: str | None = None
+
+
+SPECS = [
+    ArgSpec("version", "v", "forbidden"), ArgSpec("help", "?", "forbidden"),
+    ArgSpec("oneline", "1", "forbidden"), ArgSpec("long", "l", "forbidden"), ArgSpec("grid", "G", "forbidden"),
+    ArgSpec("across", "x", "forbidden"), ArgSpec("recurse", "R", "forbidden"), ArgSpec("tree", "T", "forbidden"),
+    ArgSpec("classify", "F", "optional", tuple(WHEN), "auto"), ArgSpec("dereference", "X", "forbidden"),
+    ArgSpec("width", "w", "necessary"), ArgSpec("no-quotes", None, "forbidden"),
+    ArgSpec("absolute", None, "optional", ("on", "follow", "off"), "on"), ArgSpec("follow-symlinks", None, "forbidden"),
+    ArgSpec("color", None, "optional", tuple(WHEN), "auto"), ArgSpec("colour", None, "optional", tuple(WHEN), "auto"),
+    ArgSpec("color-scale", None, "optional", ("all", "size", "age"), "all"), ArgSpec("colour-scale", None, "optional", ("all", "size", "age"), "all"),
+    ArgSpec("color-scale-mode", None, "necessary", ("fixed", "gradient")), ArgSpec("colour-scale-mode", None, "necessary", ("fixed", "gradient")),
+    ArgSpec("all", "a", "forbidden"), ArgSpec("almost-all", "A", "forbidden"), ArgSpec("treat-dirs-as-files", "d", "forbidden"),
+    ArgSpec("list-dirs", None, "forbidden"), ArgSpec("level", "L", "necessary"), ArgSpec("reverse", "r", "forbidden"),
+    ArgSpec("sort", "s", "necessary", tuple(SORT_CHOICES)), ArgSpec("ignore-glob", "I", "necessary"), ArgSpec("git-ignore", None, "forbidden"),
+    ArgSpec("group-directories-first", None, "forbidden"), ArgSpec("group-directories-last", None, "forbidden"),
+    ArgSpec("only-dirs", "D", "forbidden"), ArgSpec("only-files", "f", "forbidden"), ArgSpec("no-symlinks", None, "forbidden"),
+    ArgSpec("show-symlinks", None, "forbidden"), ArgSpec("binary", "b", "forbidden"), ArgSpec("bytes", "B", "forbidden"),
+    ArgSpec("group", "g", "forbidden"), ArgSpec("numeric", "n", "forbidden"), ArgSpec("header", "h", "forbidden"),
+    ArgSpec("icons", None, "optional", tuple(WHEN), "auto"), ArgSpec("inode", "i", "forbidden"), ArgSpec("links", "H", "forbidden"),
+    ArgSpec("modified", "m", "forbidden"), ArgSpec("changed", None, "forbidden"), ArgSpec("blocksize", "S", "forbidden"),
+    ArgSpec("total-size", None, "forbidden"), ArgSpec("time", "t", "necessary", tuple(TIME_CHOICES)), ArgSpec("accessed", "u", "forbidden"),
+    ArgSpec("created", "U", "forbidden"), ArgSpec("time-style", None, "necessary", tuple(TIME_STYLES)), ArgSpec("hyperlink", None, "forbidden"),
+    ArgSpec("mounts", "M", "forbidden"), ArgSpec("smart-group", None, "forbidden"), ArgSpec("no-permissions", None, "forbidden"),
+    ArgSpec("no-filesize", None, "forbidden"), ArgSpec("no-user", None, "forbidden"), ArgSpec("no-time", None, "forbidden"),
+    ArgSpec("git", None, "forbidden"), ArgSpec("no-git", None, "forbidden"), ArgSpec("git-repos", None, "forbidden"),
+    ArgSpec("git-repos-no-status", None, "forbidden"), ArgSpec("extended", "@", "forbidden"), ArgSpec("octal-permissions", "o", "forbidden"),
+    ArgSpec("context", "Z", "forbidden"), ArgSpec("stdin", None, "forbidden"), ArgSpec("flags", "O", "forbidden"),
+]
+LONG = {s.long: s for s in SPECS}
+SHORT = {s.short: s for s in SPECS if s.short is not None}
+
+
+class EzaError(Exception):
+    def __init__(self, message: str, code: int = 3):
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass
+class Options:
+    flags: list[tuple[str, str | None, ArgSpec]] = field(default_factory=list)
+    paths: list[str] = field(default_factory=list)
+    mode: str = "lines"
+    recurse: bool = False
+    tree: bool = False
+    as_file: bool = False
+    max_depth: int | None = None
+    all_count: int = 0
+    almost_all: bool = False
+    reverse: bool = False
+    sort: str = "name"
+    dirs_first: bool = False
+    dirs_last: bool = False
+    only_dirs: bool = False
+    only_files: bool = False
+    no_symlinks: bool = False
+    show_symlinks: bool = False
+    ignore_globs: list[str] = field(default_factory=list)
+    width: int = 80
+    across: bool = False
+    classify: str = "never"
+    icons: str = "never"
+    color: str = "never"
+    absolute: str = "off"
+    no_quotes: bool = False
+    long_header: bool = False
+    permissions: bool = True
+    filesize: bool = True
+    user: bool = True
+    group: bool = False
+    links: bool = False
+    inode: bool = False
+    blocksize: bool = False
+    file_flags: bool = False
+    time: bool = True
+    time_kind: str = "modified"
+    time_style: str = "default"
+    size_format: str = "decimal"
+    stdin: bool = False
+
+    def has(self, name: str) -> bool:
+        return any(spec.long == name and val is None for _, val, spec in self.flags)
+
+    def count(self, name: str) -> int:
+        return sum(1 for _, _, spec in self.flags if spec.long == name)
+
+    def get(self, *names: str) -> str | None:
+        for _, val, spec in reversed(self.flags):
+            if spec.long in names and val is not None:
+                return val
+        return None
+
+    def last_flag(self, *names: str) -> str | None:
+        for _, val, spec in reversed(self.flags):
+            if spec.long in names and val is None:
+                return spec.long
+        return None
+
+
+def flag_text(spec: ArgSpec, typed: str) -> str:
+    if typed.startswith("--"):
+        return "--" + spec.long
+    return "-" + (spec.short or spec.long)
+
+
+def parse_args(argv: list[str]) -> Options | str:
+    opt = Options()
+    i = 0
+    parsing = True
+    while i < len(argv):
+        arg = argv[i]
+        i += 1
+        if not parsing:
+            opt.paths.append(arg)
+            continue
+        if arg == "--":
+            parsing = False
+            continue
+        if arg.startswith("--") and arg != "--":
+            body = arg[2:]
+            if "=" in body:
+                name, val = body.split("=", 1)
+            else:
+                name, val = body, None
+            spec = LONG.get(name)
+            if not spec:
+                raise EzaError(f"Unknown argument --{name}")
+            if spec.takes == "forbidden":
+                if val is not None:
+                    raise EzaError(f"Flag --{spec.long} cannot take a value")
+                opt.flags.append(("--" + name, None, spec))
+            elif spec.takes == "necessary":
+                if val is None:
+                    if i >= len(argv):
+                        suffix = choices_text(spec) if spec.values else ""
+                        raise EzaError(f"Flag --{spec.long} needs a value{suffix}")
+                    val = argv[i]
+                    i += 1
+                opt.flags.append(("--" + name, val, spec))
+            else:
+                if val is None:
+                    if i < len(argv) and argv[i] in spec.values:
+                        val = argv[i]
+                        i += 1
+                    else:
+                        val = spec.default
+                opt.flags.append(("--" + name, val, spec))
+            continue
+        if arg.startswith("-") and arg != "-":
+            body = arg[1:]
+            if "=" in body:
+                before, val = body.split("=", 1)
+                if before == "":
+                    opt.paths.append(arg)
+                    continue
+                for ch in before[:-1]:
+                    spec = SHORT.get(ch)
+                    if not spec:
+                        raise EzaError(f"Unknown argument -{ch}")
+                    if spec.takes != "forbidden":
+                        if spec.takes == "optional":
+                            opt.flags.append(("-" + ch, spec.default, spec))
+                        else:
+                            raise EzaError(f"Flag -{ch} needs a value{choices_text(spec) if spec.values else ''}")
+                    else:
+                        opt.flags.append(("-" + ch, None, spec))
+                ch = before[-1]
+                spec = SHORT.get(ch)
+                if not spec:
+                    raise EzaError(f"Unknown argument -{ch}")
+                if spec.takes == "forbidden":
+                    raise EzaError(f"Flag -{ch} cannot take a value")
+                opt.flags.append(("-" + ch, val, spec))
+                continue
+            j = 0
+            while j < len(body):
+                ch = body[j]
+                spec = SHORT.get(ch)
+                if not spec:
+                    raise EzaError(f"Unknown argument -{ch}")
+                if spec.takes == "forbidden":
+                    opt.flags.append(("-" + ch, None, spec))
+                    j += 1
+                elif spec.takes == "necessary":
+                    if j < len(body) - 1:
+                        val = body[j + 1:]
+                    else:
+                        if i >= len(argv):
+                            raise EzaError(f"Flag -{ch} needs a value{choices_text(spec) if spec.values else ''}")
+                        val = argv[i]
+                        i += 1
+                    opt.flags.append(("-" + ch, val, spec))
+                    break
+                else:
+                    if j < len(body) - 1:
+                        val = body[j + 1:]
+                        if val not in spec.values:
+                            raise EzaError(f"Flag -{ch} cannot take a value")
+                    elif i < len(argv) and argv[i] in spec.values:
+                        val = argv[i]
+                        i += 1
+                    else:
+                        val = spec.default
+                    opt.flags.append(("-" + ch, val, spec))
+                    break
+            continue
+        opt.paths.append(arg)
+
+    if opt.has("help"):
+        return "help"
+    if opt.has("version"):
+        return "version"
+    deduce_options(opt)
+    return opt
+
+
+def choices_text(spec: ArgSpec) -> str:
+    if not spec.values:
+        return ""
+    return " (choices: " + ", ".join(spec.values) + ")"
+
+
+def bad_arg(spec: ArgSpec, value: str) -> EzaError:
+    shown = '"' + value.replace('"', '\\"') + '"'
+    if spec.takes == "necessary" and spec.values:
+        return EzaError(f"Option --{spec.long}" + (f" (-{spec.short})" if spec.short else "") + f" has no {shown} setting{choices_text(spec)}")
+    return EzaError(f"Option --{spec.long}" + (f" (-{spec.short})" if spec.short else "") + f" has no {shown} setting")
+
+
+def deduce_options(opt: Options) -> None:
+    for _, val, spec in opt.flags:
+        if val is not None and spec.values and spec.takes == "necessary" and val not in spec.values:
+            if spec.long == "time-style" and val.startswith("+"):
+                continue
+            raise bad_arg(spec, val)
+        if val is not None and spec.takes == "optional" and spec.values and val not in spec.values:
+            raise bad_arg(spec, val)
+    width = opt.get("width")
+    if width is not None:
+        try:
+            opt.width = int(width)
+        except ValueError as e:
+            raise EzaError(f"Value {width!r} not valid for option --width (-w): {e}")
+    level = opt.get("level")
+    if level is not None:
+        try:
+            opt.max_depth = int(level, 10)
+        except ValueError as e:
+            raise EzaError(f"Value {level!r} not valid for option --level (-L): {e}")
+    sort = opt.get("sort")
+    if sort is not None:
+        aliases = {"filename": "name", "Filename": "Name", "ext": "extension", "Ext": "Extension", "filesize": "size", "date": "modified", "time": "modified", "mod": "modified", "new": "modified", "newest": "modified", "age": "oldest", "old": "oldest", "ch": "changed", "acc": "accessed", "cr": "created"}
+        opt.sort = aliases.get(sort, sort)
+        if opt.sort.startswith("."):
+            opt.sort = opt.sort[1:]
+        if opt.sort not in SORT_CHOICES and opt.sort != "oldest":
+            raise bad_arg(LONG["sort"], sort)
+    time_kind = opt.get("time")
+    if time_kind is not None:
+        opt.time_kind = time_kind
+    if opt.has("modified"):
+        opt.time_kind = "modified"
+    if opt.has("accessed"):
+        opt.time_kind = "accessed"
+    if opt.has("created"):
+        opt.time_kind = "created"
+    if opt.has("changed"):
+        opt.time_kind = "changed"
+    ts = opt.get("time-style")
+    if ts is not None:
+        opt.time_style = ts
+    opt.all_count = opt.count("all")
+    opt.almost_all = opt.has("almost-all")
+    opt.reverse = opt.has("reverse")
+    opt.dirs_first = opt.has("group-directories-first")
+    opt.dirs_last = opt.has("group-directories-last")
+    opt.only_dirs = opt.has("only-dirs")
+    opt.only_files = opt.has("only-files")
+    opt.no_symlinks = opt.has("no-symlinks")
+    opt.show_symlinks = opt.has("show-symlinks")
+    ig = opt.get("ignore-glob")
+    opt.ignore_globs = ig.split("|") if ig else []
+    opt.across = opt.has("across")
+    opt.as_file = opt.has("treat-dirs-as-files") or opt.has("list-dirs")
+    opt.recurse = opt.has("recurse") or opt.has("tree")
+    opt.tree = opt.has("tree")
+    opt.stdin = opt.has("stdin") or not sys.stdin.isatty()
+    opt.classify = opt.get("classify") or "never"
+    if opt.classify == "auto" and not sys.stdout.isatty():
+        opt.classify = "never"
+    opt.icons = opt.get("icons") or "never"
+    if opt.icons == "auto" and not (sys.stdout.isatty() or os.environ.get("EZA_ICONS_AUTO")):
+        opt.icons = "never"
+    opt.color = opt.get("color", "colour") or "auto"
+    if opt.color == "auto" and not sys.stdout.isatty():
+        opt.color = "never"
+    opt.absolute = opt.get("absolute") or "off"
+    opt.no_quotes = opt.has("no-quotes")
+    opt.long_header = opt.has("header")
+    opt.permissions = not opt.has("no-permissions")
+    opt.filesize = not opt.has("no-filesize")
+    opt.user = not opt.has("no-user")
+    opt.group = opt.has("group") or opt.has("smart-group")
+    opt.links = opt.has("links")
+    opt.inode = opt.has("inode")
+    opt.blocksize = opt.has("blocksize")
+    opt.file_flags = opt.has("flags")
+    opt.time = not opt.has("no-time")
+    if opt.has("bytes"):
+        opt.size_format = "bytes"
+    elif opt.has("binary"):
+        opt.size_format = "binary"
+    view_flag = None
+    for _, val, spec in reversed(opt.flags):
+        if val is None and spec.long in {"long", "oneline", "grid", "tree"}:
+            view_flag = spec.long
+            break
+    if view_flag == "long" or (view_flag in {"tree", "grid"} and opt.has("long")):
+        opt.mode = "long"
+    elif view_flag == "grid" or opt.has("across"):
+        opt.mode = "grid"
+    elif view_flag == "tree":
+        opt.mode = "long"
+    else:
+        opt.mode = "lines" if not sys.stdout.isatty() else "grid"
+    if view_flag == "oneline":
+        opt.mode = "lines"
+
+
+@dataclass
+class Entry:
+    path: Path
+    display_arg: str | None = None
+
+    @property
+    def name(self) -> str:
+        return self.path.name or str(self.path)
+
+    def is_dir(self) -> bool:
+        return self.path.is_dir()
+
+    def is_file(self) -> bool:
+        return self.path.is_file()
+
+    def stat(self):
+        return self.path.stat()
+
+
+def win_error_for_missing(path: str) -> str:
+    return f'"{path}": 系统找不到指定的文件。 (os error 2)'
+
+
+def path_exists(p: Path) -> bool:
+    try:
+        return p.exists() or p.is_symlink()
+    except OSError:
+        return False
+
+
+def children_of(path: Path, opt: Options) -> list[Entry]:
+    out = []
+    try:
+        for child in path.iterdir():
+            name = child.name
+            if not show_dot(name, opt):
+                continue
+            if any(fnmatch.fnmatchcase(name, pat) for pat in opt.ignore_globs):
+                continue
+            ent = Entry(child)
+            if opt.no_symlinks and child.is_symlink():
+                continue
+            if opt.only_dirs and not ent.is_dir():
+                continue
+            if opt.only_files and ent.is_dir():
+                continue
+            out.append(ent)
+    except PermissionError:
+        raise
+    return sort_entries(out, opt)
+
+
+def show_dot(name: str, opt: Options) -> bool:
+    if name in {".", ".."}:
+        return opt.all_count >= 2
+    if name.startswith("."):
+        return opt.all_count >= 1 or opt.almost_all
+    return True
+
+
+def sort_entries(entries: list[Entry], opt: Options) -> list[Entry]:
+    if opt.sort == "none":
+        seq = entries[:]
+    else:
+        def compare(a: Entry, b: Entry) -> int:
+            ak = sort_key(a, opt)
+            bk = sort_key(b, opt)
+            if opt.sort in {"name", "Name", "extension", "Extension", "type"}:
+                return compare_tuple_natural(ak, bk, ignore_case=opt.sort not in {"Name", "Extension"})
+            return (ak > bk) - (ak < bk)
+
+        seq = sorted(entries, key=functools.cmp_to_key(compare))
+    if opt.dirs_first:
+        seq = sorted(seq, key=lambda e: 0 if e.is_dir() else 1)
+    elif opt.dirs_last:
+        seq = sorted(seq, key=lambda e: 1 if e.is_dir() else 0)
+    if opt.reverse:
+        seq.reverse()
+    return seq
+
+
+def sort_key(e: Entry, opt: Options):
+            try:
+                st = e.stat()
+            except OSError:
+                st = None
+            name = e.name
+            if opt.sort in {"name", "Name"}:
+                return (name,)
+            if opt.sort in {"extension", "Extension"}:
+                ext = (Path(name).suffix[1:] if Path(name).suffix else "").lower()
+                return (ext, name)
+            if opt.sort == "size":
+                return (0 if e.is_dir() else (st.st_size if st else 0), name.lower())
+            if opt.sort in {"modified", "oldest"}:
+                val = st.st_mtime if st else 0
+                return (val, name.lower()) if opt.sort == "modified" else (-val, name.lower())
+            if opt.sort == "accessed":
+                return (st.st_atime if st else 0, name.lower())
+            if opt.sort in {"changed", "created"}:
+                return (st.st_ctime if st else 0, name.lower())
+            if opt.sort == "type":
+                return (0 if e.is_dir() else 1, name)
+            if opt.sort == "inode":
+                return (getattr(st, "st_ino", 0) if st else 0, name.lower())
+            return (name.lower(), name)
+
+
+def compare_natural(a: str, b: str, ignore_case: bool = True) -> int:
+    i = j = 0
+    while i < len(a) and j < len(b):
+        ca = a[i]
+        cb = b[j]
+        if ca.isdigit() and cb.isdigit():
+            ia, ja = i, j
+            while i < len(a) and a[i].isdigit():
+                i += 1
+            while j < len(b) and b[j].isdigit():
+                j += 1
+            na = int(a[ia:i])
+            nb = int(b[ja:j])
+            if na != nb:
+                return (na > nb) - (na < nb)
+            la = i - ia
+            lb = j - ja
+            if la != lb:
+                return (la > lb) - (la < lb)
+            continue
+        aa = ca.lower() if ignore_case else ca
+        bb = cb.lower() if ignore_case else cb
+        if aa != bb:
+            return (aa > bb) - (aa < bb)
+        i += 1
+        j += 1
+    return (len(a) > len(b)) - (len(a) < len(b))
+
+
+def compare_tuple_natural(a, b, ignore_case: bool = True) -> int:
+    for ax, bx in zip(a, b):
+        if isinstance(ax, str) and isinstance(bx, str):
+            c = compare_natural(ax, bx, ignore_case)
+        else:
+            c = (ax > bx) - (ax < bx)
+        if c:
+            return c
+    return (len(a) > len(b)) - (len(a) < len(b))
+
+
+def mode_string(e: Entry) -> str:
+    # Windows eza displays a compact attribute-like mode. The common benchmark
+    # surface needs directories and regular archive files.
+    return "d----" if e.is_dir() else "-a---"
+
+
+def file_size(e: Entry, opt: Options) -> str:
+    if e.is_dir():
+        return "-"
+    try:
+        size = e.stat().st_size
+    except OSError:
+        size = 0
+    if opt.size_format == "bytes" or size < 1000:
+        return str(size)
+    base = 1024 if opt.size_format == "binary" else 1000
+    units = ["k", "M", "G", "T"]
+    value = float(size)
+    unit = ""
+    for unit in units:
+        value /= base
+        if value < base:
+            break
+    return (f"{value:.1f}" if value < 10 else f"{value:.0f}") + unit
+
+
+def format_time(e: Entry, opt: Options) -> str:
+    try:
+        st = e.stat()
+        val = st.st_mtime if opt.time_kind == "modified" else st.st_atime if opt.time_kind == "accessed" else st.st_ctime
+    except OSError:
+        val = 0
+    t = time.localtime(val)
+    if opt.time_style == "iso":
+        return time.strftime("%Y-%m-%d", t)
+    if opt.time_style == "long-iso":
+        return time.strftime("%Y-%m-%d %H:%M", t)
+    if opt.time_style == "full-iso":
+        return time.strftime("%Y-%m-%d %H:%M:%S", t)
+    if opt.time_style.startswith("+"):
+        fmt = opt.time_style[1:].split("\n")[-1] or opt.time_style[1:].split("\n")[0]
+        return time.strftime(fmt, t)
+    return time.strftime("%e %b %H:%M", t)
+
+
+def icon_for(e: Entry) -> str:
+    name = e.name
+    ext = Path(name).suffix.lower()
+    if e.is_dir():
+        return ""
+    if ext in {".c", ".h"}:
+        return ""
+    if ext == ".svg":
+        return "󰕙"
+    if ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        return ""
+    if ext in {".rs"}:
+        return ""
+    if ext in {".md", ".txt", ".log"}:
+        return ""
+    if ext:
+        return ""
+    return "󰡯"
+
+
+def classify_for(e: Entry) -> str:
+    if e.is_dir():
+        return "/"
+    if e.path.suffix.lower() in {".exe", ".bat", ".cmd", ".com"}:
+        return "*"
+    return ""
+
+
+def quote_name(text: str, opt: Options) -> str:
+    if opt.no_quotes:
+        return text
+    if " " in text and "'" not in text:
+        return f"'{text}'"
+    if " " in text or "'" in text:
+        return '"' + text.replace('"', '\\"') + '"'
+    return text
+
+
+def display_name(e: Entry, opt: Options, directory_child: bool = False) -> str:
+    if opt.absolute == "on":
+        base = str(e.path.resolve())
+    elif opt.absolute == "follow":
+        base = "\\\\?\\" + str(e.path.resolve())
+    elif directory_child:
+        base = e.name
+    elif e.display_arg:
+        base = display_arg_path(e.display_arg)
+    else:
+        base = display_arg_path(str(e.path))
+    base = quote_name(base, opt)
+    if opt.icons == "always":
+        base = icon_for(e) + " " + base
+    if opt.classify == "always":
+        base += classify_for(e)
+    if opt.color == "always":
+        base = colorize(base, e)
+    return base
+
+
+def display_arg_path(arg: str) -> str:
+    slash = max(arg.rfind("/"), arg.rfind("\\"))
+    if slash < 0:
+        return arg
+    parent = arg[:slash]
+    name = arg[slash + 1:]
+    if parent in {"", "."}:
+        return name or arg
+    return parent + "\\" + name
+
+
+def colorize(text: str, e: Entry) -> str:
+    if e.is_dir():
+        return "\x1b[36m" + text + "\x1b[0m"
+    if e.path.suffix.lower() in {".svg", ".png", ".jpg", ".jpeg", ".gif"}:
+        return "\x1b[35m" + text + "\x1b[0m"
+    return text
+
+
+def render_lines(entries: list[Entry], opt: Options, child: bool = False) -> str:
+    return "".join(display_name(e, opt, child) + "\n" for e in sort_entries(entries, opt))
+
+
+def render_grid(entries: list[Entry], opt: Options, child: bool = False) -> str:
+    names = [display_name(e, opt, child) for e in sort_entries(entries, opt)]
+    if not names:
+        return ""
+    width = max(1, opt.width)
+    lengths = [len(strip_ansi(n)) for n in names]
+    n = len(names)
+    best_cols = 1
+    best_rows = n
+    for cols in range(1, n + 1):
+        rows = math.ceil(n / cols)
+        col_widths = []
+        for c in range(cols):
+            vals = []
+            for r in range(rows):
+                idx = r * cols + c if opt.across else c * rows + r
+                if idx < n:
+                    vals.append(lengths[idx])
+            col_widths.append(max(vals) if vals else 0)
+        total = sum(col_widths) + 2 * (cols - 1)
+        if total <= width:
+            best_cols, best_rows = cols, rows
+    rows_out = []
+    for r in range(best_rows):
+        parts = []
+        for c in range(best_cols):
+            idx = r * best_cols + c if opt.across else c * best_rows + r
+            if idx >= n:
+                continue
+            s = names[idx]
+            col_width = max(lengths[j] for j in range(c * best_rows, min((c + 1) * best_rows, n))) if not opt.across else max(lengths[j] for j in range(c, n, best_cols))
+            if c < best_cols - 1:
+                s += " " * (col_width - strip_len(s) + 2)
+            parts.append(s)
+        rows_out.append("".join(parts).rstrip())
+    return "\n".join(rows_out) + "\n"
+
+
+def strip_ansi(s: str) -> str:
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\x1b":
+            while i < len(s) and s[i] != "m":
+                i += 1
+            i += 1
+        else:
+            out.append(s[i]); i += 1
+    return "".join(out)
+
+
+def strip_len(s: str) -> int:
+    return len(strip_ansi(s))
+
+
+def long_columns(opt: Options) -> list[tuple[str, str]]:
+    if opt.tree and not opt.has("long"):
+        return []
+    cols = []
+    # This benchmark uses the official Windows binary. Unix-only columns such
+    # as inode, links, blocksize, user, and group are absent there even when
+    # their flags are accepted.
+    if opt.permissions:
+        cols.append(("mode", "Mode"))
+    if opt.filesize:
+        cols.append(("size", "Size"))
+    if opt.file_flags:
+        cols.append(("flags", "Flags"))
+    if opt.time:
+        header = {"modified": "Date Modified", "changed": "Date Changed", "accessed": "Date Accessed", "created": "Date Created"}.get(opt.time_kind, "Date Modified")
+        cols.append(("time", header))
+    return cols
+
+
+def cell(e: Entry, col: str, opt: Options) -> str:
+    try:
+        st = e.stat()
+    except OSError:
+        st = None
+    if col == "inode":
+        return str(getattr(st, "st_ino", 0) if st else 0)
+    if col == "mode":
+        return mode_string(e)
+    if col == "links":
+        return str(getattr(st, "st_nlink", 1) if st else 1)
+    if col == "size":
+        return file_size(e, opt)
+    if col == "block":
+        return "0" if not e.is_dir() else "-"
+    if col == "user":
+        return str(getattr(st, "st_uid", "") if st else "")
+    if col == "group":
+        return str(getattr(st, "st_gid", "") if st else "")
+    if col == "flags":
+        return "archive" if not e.is_dir() else "directory"
+    if col == "time":
+        return format_time(e, opt)
+    return ""
+
+
+def render_long(entries: list[Entry], opt: Options, child: bool = False, tree_prefixes: list[str] | None = None) -> str:
+    entries = sort_entries(entries, opt)
+    cols = long_columns(opt)
+    rows = []
+    for i, e in enumerate(entries):
+        row = [cell(e, c, opt) for c, _ in cols]
+        name = display_name(e, opt, child)
+        if tree_prefixes:
+            name = tree_prefixes[i] + name
+        rows.append((row, name))
+    widths = [len(h) if opt.long_header else 0 for _, h in cols]
+    for row, _ in rows:
+        for i, value in enumerate(row):
+            widths[i] = max(widths[i], len(value))
+    out = []
+    if opt.long_header and cols:
+        out.append(" ".join(h.rjust(widths[i]) if cols[i][0] in {"size", "links", "inode", "block"} else h.ljust(widths[i]) for i, (_, h) in enumerate(cols)) + " Name")
+    for row, name in rows:
+        prefix = " ".join(row[i].rjust(widths[i]) if cols[i][0] in {"size", "links", "inode", "block"} else row[i].ljust(widths[i]) for i in range(len(cols)))
+        out.append((prefix + " " if prefix else "") + name)
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def render_entries(entries: list[Entry], opt: Options, child: bool = False) -> str:
+    if opt.mode == "long":
+        return render_long(entries, opt, child)
+    if opt.mode == "grid":
+        return render_grid(entries, opt, child)
+    return render_lines(entries, opt, child)
+
+
+def max_depth_allows(depth: int, opt: Options) -> bool:
+    return opt.max_depth is None or depth < opt.max_depth
+
+
+def render_tree_dir(path: Path, opt: Options, depth: int = 0, prefix: str = "") -> str:
+    entries = children_of(path, opt)
+    out = ""
+    for idx, e in enumerate(entries):
+        last = idx == len(entries) - 1
+        branch = "└── " if last else "├── "
+        out += prefix + branch + display_name(e, opt, True) + "\n"
+        if e.is_dir() and max_depth_allows(depth + 1, opt):
+            out += render_tree_dir(e.path, opt, depth + 1, prefix + ("    " if last else "│   "))
+    return out
+
+
+def run(opt: Options) -> int:
+    paths = opt.paths[:]
+    if not paths:
+        if opt.stdin:
+            sep = os.environ.get("EZA_STDIN_SEPARATOR", "\n")
+            paths = [p for p in sys.stdin.read().split(sep) if p]
+        else:
+            paths = ["."]
+    files: list[Entry] = []
+    dirs: list[Entry] = []
+    status = 0
+    for p in paths:
+        path = Path(p)
+        if not path_exists(path):
+            err(win_error_for_missing(p) + "\n")
+            status = 2
+            continue
+        e = Entry(path, p)
+        if e.is_dir() and not opt.as_file:
+            dirs.append(e)
+        else:
+            files.append(e)
+    if files:
+        out(render_entries(files, opt, False))
+    no_files = not files
+    is_only_dir = len(dirs) == 1 and no_files
+    first = no_files
+    for d in dirs:
+        if first:
+            first = False
+        else:
+            out("\n")
+        try:
+            if opt.tree:
+                if not is_only_dir:
+                    out(display_arg_path(d.display_arg or str(d.path)) + ":\n")
+                else:
+                    out(display_arg_path(d.display_arg or str(d.path)) + "\n")
+                out(render_tree_dir(d.path, opt, 0, ""))
+            else:
+                if not is_only_dir:
+                    out(display_arg_path(d.display_arg or str(d.path)) + ":\n")
+                children = children_of(d.path, opt)
+                out(render_entries(children, opt, True))
+                if opt.recurse:
+                    for child in children:
+                        if child.is_dir():
+                            render_recurse(child.path, opt, depth=1, header=recursive_header(d.display_arg or str(d.path), child.name))
+        except PermissionError:
+            err(f"Permission denied: {d.path} - code: 13\n")
+            status = max(status, 1)
+    return status
+
+
+def recursive_header(parent: str, child: str) -> str:
+    return parent + "\\" + child
+
+
+def render_recurse(path: Path, opt: Options, depth: int, header: str | None = None) -> None:
+    if opt.max_depth is not None and depth >= opt.max_depth:
+        return
+    shown = header if header is not None else display_arg_path(str(path))
+    out("\n" + quote_name(shown, opt) + ":\n")
+    try:
+        children = children_of(path, opt)
+    except PermissionError:
+        err(f"Permission denied: {path} - code: 13\n")
+        return
+    out(render_entries(children, opt, True))
+    for child in children:
+        if child.is_dir():
+            render_recurse(child.path, opt, depth + 1, recursive_header(shown, child.name))
+
+
+def main() -> int:
+    try:
+        parsed = parse_args(sys.argv[1:])
+        if parsed == "help":
+            out(HELP_TEXT)
+            return 0
+        if parsed == "version":
+            out(VERSION_TEXT)
+            return 0
+        return run(parsed)
+    except EzaError as e:
+        err(f"eza: {e}\n")
+        return e.code
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

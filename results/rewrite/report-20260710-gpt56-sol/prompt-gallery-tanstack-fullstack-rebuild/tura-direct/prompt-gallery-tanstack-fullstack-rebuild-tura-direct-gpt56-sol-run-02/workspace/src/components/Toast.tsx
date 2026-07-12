@@ -1,0 +1,3 @@
+import { useEffect, useState } from 'react'
+export function Toast(){const [message,setMessage]=useState('');useEffect(()=>{let timer:ReturnType<typeof setTimeout>;const onToast=(event:Event)=>{setMessage((event as CustomEvent<string>).detail);clearTimeout(timer);timer=setTimeout(()=>setMessage(''),2600)};window.addEventListener('powerprompt-toast',onToast);return()=>{window.removeEventListener('powerprompt-toast',onToast);clearTimeout(timer)}},[]);return <div className={`toast ${message?'visible':''}`} role="status" aria-live="polite">{message}</div>}
+export const notify=(message:string)=>window.dispatchEvent(new CustomEvent('powerprompt-toast',{detail:message}))

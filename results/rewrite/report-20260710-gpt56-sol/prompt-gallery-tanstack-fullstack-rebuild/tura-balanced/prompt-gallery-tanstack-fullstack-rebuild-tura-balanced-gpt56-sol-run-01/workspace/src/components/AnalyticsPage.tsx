@@ -1,0 +1,13 @@
+import { ArrowLeft, ArrowUpRight } from 'lucide-react'
+import { AppShell } from './AppShell'
+
+type Analytics = { overview: { revenue: number; orders: number; average_order_value: number; conversion_rate: number }; creators: Array<{ id: number; name: string; revenue: number; units: number }>; categories: Array<{ name: string; revenue: number; units: number }>; daily: Array<{ day: string; orders: number; revenue: number }> }
+
+export function AnalyticsPage({ data }: { data: Analytics }) {
+  const max = Math.max(...data.daily.map((day) => day.revenue), 1)
+  return <AppShell><main className="analytics-page"><a className="back-link" href="/"><ArrowLeft />Gallery</a><header><div><p className="eyebrow"><span />Creator workspace</p><h1>Sales, without the noise.</h1><p>Paid orders and marketplace sessions from the local store.</p></div><a href="/api/analytics" className="outline-button">JSON report<ArrowUpRight /></a></header>
+    <section className="metrics" aria-label="Sales overview"><article><span>Net marketplace revenue</span><strong>${Number(data.overview.revenue).toFixed(2)}</strong><small>Across all paid orders</small></article><article><span>Conversion rate</span><strong>{data.overview.conversion_rate}%</strong><small>Orders ÷ recorded sessions</small></article><article><span>Average order value</span><strong>${Number(data.overview.average_order_value).toFixed(2)}</strong><small>{data.overview.orders} completed orders</small></article></section>
+    <section className="trend-panel"><div><p className="eyebrow"><span />Daily sales</p><h2>Revenue trend</h2></div><div className="bars" aria-label="Daily revenue bars">{data.daily.map((day) => <div key={day.day} title={`${day.day}: $${day.revenue}`}><span style={{ height: `${Math.max(10, (day.revenue / max) * 100)}%` }} /><small>{day.day.slice(5)}</small></div>)}</div></section>
+    <div className="analytics-tables"><section><p className="eyebrow"><span />Creators</p><h2>Creator revenue</h2><div className="data-list">{data.creators.map((creator, index) => <div key={creator.id}><b>{String(index + 1).padStart(2, '0')}</b><span><strong>{creator.name}</strong><small>{creator.units} licenses</small></span><em>${creator.revenue.toFixed(2)}</em></div>)}</div></section><section><p className="eyebrow"><span />Categories</p><h2>Category revenue</h2><div className="data-list">{data.categories.map((category, index) => <div key={category.name}><b>{String(index + 1).padStart(2, '0')}</b><span><strong>{category.name}</strong><small>{category.units} licenses</small></span><em>${category.revenue.toFixed(2)}</em></div>)}</div></section></div>
+  </main></AppShell>
+}

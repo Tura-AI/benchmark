@@ -1,0 +1,21 @@
+import { expect, test } from '@playwright/test'
+
+test('storefront, detail, cart, and analytics render', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByRole('link', { name: /POWER PROMPT/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'GPT-4o' })).toBeVisible()
+  await page.getByRole('button', { name: 'GPT-4o' }).click()
+  await expect(page.getByText('Magazine Cover Maker').first()).toBeVisible()
+  await page.getByRole('button', { name: 'Search' }).first().click()
+  await page.getByPlaceholder('Portrait, code review, memo...').fill('memo')
+  await expect(page.getByText('Meeting -> Memo').first()).toBeVisible()
+  await page.goto('/prompt/cinematic-still-35mm')
+  await expect(page.getByRole('heading', { name: 'Cinematic Still, 35mm' })).toBeVisible()
+  await page.getByRole('button', { name: 'Add to Cart' }).click()
+  await expect(page.getByText('Added to Cart')).toBeVisible()
+  await page.goto('/cart')
+  await expect(page.getByRole('heading', { name: 'Cart' })).toBeVisible()
+  await page.goto('/admin')
+  await expect(page.getByText('Creator analytics')).toBeVisible()
+  await expect(page.getByText('Average order value')).toBeVisible()
+})

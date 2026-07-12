@@ -1,0 +1,593 @@
+# Page snapshot
+
+```yaml
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - link "POWERPROMPT Gallery home" [ref=e4] [cursor=pointer]:
+      - /url: /
+      - img [ref=e6]
+      - generic [ref=e8]: POWERPROMPT
+      - generic [ref=e9]: Gallery
+    - link "Home" [ref=e10] [cursor=pointer]:
+      - /url: /
+      - img [ref=e11]
+      - text: Home
+    - button "Search" [ref=e14] [cursor=pointer]:
+      - img [ref=e15]
+      - text: Search
+    - button "History" [ref=e18] [cursor=pointer]:
+      - img [ref=e19]
+      - text: History
+    - button "Favorites NEW" [ref=e23] [cursor=pointer]:
+      - img [ref=e24]
+      - text: Favorites
+      - generic [ref=e26]: NEW
+    - generic [ref=e27]: Categories
+    - generic [ref=e28]:
+      - button "Image" [ref=e29] [cursor=pointer]: Image
+      - button "Photography" [ref=e31] [cursor=pointer]: Photography
+      - button "Design" [ref=e33] [cursor=pointer]: Design
+      - button "Writing" [ref=e35] [cursor=pointer]: Writing
+      - button "Code" [ref=e37] [cursor=pointer]: Code
+      - button "Marketing" [ref=e39] [cursor=pointer]: Marketing
+      - button "Productivity" [ref=e41] [cursor=pointer]: Productivity
+      - button "Research" [ref=e43] [cursor=pointer]: Research
+    - generic [ref=e45]: More from us
+    - link "Creator analytics" [ref=e46] [cursor=pointer]:
+      - /url: /admin
+      - img [ref=e47]
+      - text: Creator analytics
+    - button "Browser extension" [ref=e49] [cursor=pointer]:
+      - img [ref=e50]
+      - text: Browser extension
+    - button "Figma plugin" [ref=e53] [cursor=pointer]:
+      - img [ref=e54]
+      - text: Figma plugin
+    - button "Public API" [ref=e64] [cursor=pointer]:
+      - img [ref=e65]
+      - text: Public API
+    - generic [ref=e69]:
+      - generic [ref=e70]:
+        - img [ref=e71]
+        - heading "Publish a prompt pack" [level=4] [ref=e73]
+        - paragraph [ref=e74]: Earn on reusable model workflows.
+      - generic [ref=e75]:
+        - link "Cart" [ref=e76] [cursor=pointer]:
+          - /url: /cart
+        - generic [ref=e77]: 2 saved
+  - main [ref=e78]:
+    - generic [ref=e79]:
+      - generic [ref=e80]:
+        - generic "Model filters" [ref=e81]:
+          - button "All models" [ref=e82] [cursor=pointer]
+          - button "GPT-4o" [ref=e83] [cursor=pointer]
+          - button "Claude" [ref=e84] [cursor=pointer]
+          - button "Midjourney" [ref=e85] [cursor=pointer]
+          - button "Flux" [ref=e86] [cursor=pointer]
+        - generic "Sort controls" [ref=e87]:
+          - button "Featured" [ref=e88] [cursor=pointer]
+          - button "Newest" [ref=e89] [cursor=pointer]
+          - button "Popular" [ref=e90] [cursor=pointer]
+      - generic [ref=e91]:
+        - img [ref=e92]
+        - textbox "Search prompts" [ref=e95]:
+          - /placeholder: Search prompts, creators, models
+    - region "Prompt marketplace gallery" [ref=e96]:
+      - generic [ref=e97]:
+        - paragraph [ref=e98]: Featured 11 / Free 1 / Paid 21
+        - heading "Prompt Gallery" [level=1] [ref=e99]
+        - link "Cart" [ref=e100] [cursor=pointer]:
+          - /url: /cart
+      - generic [ref=e101]:
+        - generic [ref=e102]:
+          - article [ref=e103]:
+            - button "Save The Socratic Tutor" [ref=e104] [cursor=pointer]:
+              - img [ref=e105]
+            - button "Preview The Socratic Tutor" [active] [ref=e107] [cursor=pointer]:
+              - img "The Socratic Tutor prompt preview" [ref=e108]
+            - generic:
+              - generic:
+                - generic: GPT-4o
+                - generic:
+                  - img
+                  - text: "4.7"
+              - heading "The Socratic Tutor" [level=3]
+              - paragraph: Never hands you the answer; leads you there with questions at exactly the right difficulty.
+              - generic:
+                - generic: Research
+                - generic: 9.2k sold
+              - generic:
+                - generic: Free
+                - button "Get" [ref=e109] [cursor=pointer]:
+                  - text: Get
+                  - img [ref=e110]
+              - link "Open detail" [ref=e112] [cursor=pointer]:
+                - /url: /prompts/the-socratic-tutor
+          - article [ref=e113]:
+            - button "Save Inbox Zero Strategist" [ref=e114] [cursor=pointer]:
+              - img [ref=e115]
+            - button "Preview Inbox Zero Strategist" [ref=e117] [cursor=pointer]:
+              - img "Inbox Zero Strategist prompt preview" [ref=e118]
+            - generic:
+              - generic:
+                - generic: Claude
+                - generic:
+                  - img
+                  - text: "4.6"
+              - heading "Inbox Zero Strategist" [level=3]
+              - paragraph: Triage, draft, and schedule a full inbox in one pass, sorted by what moves your week.
+              - generic:
+                - generic: Productivity
+                - generic: 3.4k sold
+              - generic:
+                - generic: $8
+                - button "Add" [ref=e119] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e120]
+              - link "Open detail" [ref=e122] [cursor=pointer]:
+                - /url: /prompts/inbox-zero-strategist
+          - article [ref=e123]:
+            - button "Save Vintage Film Poster" [ref=e124] [cursor=pointer]:
+              - img [ref=e125]
+            - button "Preview Vintage Film Poster" [ref=e127] [cursor=pointer]:
+              - img "Vintage Film Poster prompt preview" [ref=e128]
+            - generic:
+              - generic:
+                - generic: Midjourney
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "Vintage Film Poster" [level=3]
+              - paragraph: 70s grain, bold type, halftone, and one-sheets that look pulled from an archive.
+              - generic:
+                - generic: Design
+                - generic: 2.2k sold
+              - generic:
+                - generic: $13
+                - button "Add" [ref=e129] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e130]
+              - link "Open detail" [ref=e132] [cursor=pointer]:
+                - /url: /prompts/vintage-film-poster
+          - article [ref=e133]:
+            - button "Save Studio Portrait, Soft Light" [ref=e134] [cursor=pointer]:
+              - img [ref=e135]
+            - button "Preview Studio Portrait, Soft Light" [ref=e137] [cursor=pointer]:
+              - img "Studio Portrait, Soft Light prompt preview" [ref=e138]
+            - generic:
+              - generic:
+                - generic: Flux
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "Studio Portrait, Soft Light" [level=3]
+              - paragraph: Clean beauty light with a believable falloff. Looks shot, not rendered.
+              - generic:
+                - generic: Photography
+                - generic: 1.8k sold
+              - generic:
+                - generic: $10
+                - button "Add" [ref=e139] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e140]
+              - link "Open detail" [ref=e142] [cursor=pointer]:
+                - /url: /prompts/studio-portrait-soft-light
+          - article [ref=e143]:
+            - button "Save Concept Car, Studio" [ref=e144] [cursor=pointer]:
+              - img [ref=e145]
+            - button "Preview Concept Car, Studio" [ref=e147] [cursor=pointer]:
+              - img "Concept Car, Studio prompt preview" [ref=e148]
+            - generic:
+              - generic:
+                - generic: Midjourney
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Concept Car, Studio" [level=3]
+              - paragraph: Automotive design renders with believable studio reflections and a real sense of scale.
+              - generic:
+                - generic: Image
+                - generic: 1.4k sold
+              - generic:
+                - generic: $12
+                - button "Add" [ref=e149] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e150]
+              - link "Open detail" [ref=e152] [cursor=pointer]:
+                - /url: /prompts/concept-car-studio
+          - article [ref=e153]:
+            - button "Save Brand Voice, Bottled" [ref=e154] [cursor=pointer]:
+              - img [ref=e155]
+            - button "Preview Brand Voice, Bottled" [ref=e157] [cursor=pointer]:
+              - img "Brand Voice, Bottled prompt preview" [ref=e158]
+            - generic:
+              - generic:
+                - generic: Claude
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "Brand Voice, Bottled" [level=3]
+              - paragraph: Feed it three samples; get a reusable voice guide that writes anything in your exact tone.
+              - generic:
+                - generic: Marketing
+                - generic: 860 sold
+              - generic:
+                - generic: $24
+                - button "Add" [ref=e159] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e160]
+              - link "Open detail" [ref=e162] [cursor=pointer]:
+                - /url: /prompts/brand-voice-bottled
+        - generic [ref=e163]:
+          - article [ref=e164]:
+            - button "Save Meeting to Memo" [ref=e165] [cursor=pointer]:
+              - img [ref=e166]
+            - button "Preview Meeting to Memo" [ref=e168] [cursor=pointer]:
+              - img "Meeting to Memo prompt preview" [ref=e169]
+            - generic:
+              - generic:
+                - generic: Claude
+                - generic:
+                  - img
+                  - text: "4.7"
+              - heading "Meeting to Memo" [level=3]
+              - paragraph: "Turns a messy transcript into a crisp decision memo: owners, dates, and the thing that matters."
+              - generic:
+                - generic: Productivity
+                - generic: 5.1k sold
+              - generic:
+                - generic: $6
+                - button "Add" [ref=e170] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e171]
+              - link "Open detail" [ref=e173] [cursor=pointer]:
+                - /url: /prompts/meeting-to-memo
+          - article [ref=e174]:
+            - button "Save Magazine Cover Maker" [ref=e175] [cursor=pointer]:
+              - img [ref=e176]
+            - button "Preview Magazine Cover Maker" [ref=e178] [cursor=pointer]:
+              - img "Magazine Cover Maker prompt preview" [ref=e179]
+            - generic:
+              - generic:
+                - generic: GPT-4o
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Magazine Cover Maker" [level=3]
+              - paragraph: Drop in a photo and get a full cover system with masthead, cover lines, barcode, and layout notes.
+              - generic:
+                - generic: Design
+                - generic: 3.3k sold
+              - generic:
+                - generic: $14
+                - button "Add" [ref=e180] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e181]
+              - link "Open detail" [ref=e183] [cursor=pointer]:
+                - /url: /prompts/magazine-cover-maker
+          - article [ref=e184]:
+            - button "Save Ink Wash Warrior" [ref=e185] [cursor=pointer]:
+              - img [ref=e186]
+            - button "Preview Ink Wash Warrior" [ref=e188] [cursor=pointer]:
+              - img "Ink Wash Warrior prompt preview" [ref=e189]
+            - generic:
+              - generic:
+                - generic: Midjourney
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "Ink Wash Warrior" [level=3]
+              - paragraph: Sumi-e meets splash ink. Dramatic monochrome heroes with controlled negative space.
+              - generic:
+                - generic: Image
+                - generic: 2.1k sold
+              - generic:
+                - generic: $12
+                - button "Add" [ref=e190] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e191]
+              - link "Open detail" [ref=e193] [cursor=pointer]:
+                - /url: /prompts/ink-wash-warrior
+          - article [ref=e194]:
+            - button "Save Dreamy Bokeh Portrait" [ref=e195] [cursor=pointer]:
+              - img [ref=e196]
+            - button "Preview Dreamy Bokeh Portrait" [ref=e198] [cursor=pointer]:
+              - img "Dreamy Bokeh Portrait prompt preview" [ref=e199]
+            - generic:
+              - generic:
+                - generic: Flux
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Dreamy Bokeh Portrait" [level=3]
+              - paragraph: Creamy backgrounds, golden-hour warmth, eyes in razor focus. Pure mood.
+              - generic:
+                - generic: Photography
+                - generic: 1.7k sold
+              - generic:
+                - generic: $10
+                - button "Add" [ref=e200] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e201]
+              - link "Open detail" [ref=e203] [cursor=pointer]:
+                - /url: /prompts/dreamy-bokeh-portrait
+          - article [ref=e204]:
+            - button "Save Editorial Photo Grade" [ref=e205] [cursor=pointer]:
+              - img [ref=e206]
+            - button "Preview Editorial Photo Grade" [ref=e208] [cursor=pointer]:
+              - img "Editorial Photo Grade prompt preview" [ref=e209]
+            - generic:
+              - generic:
+                - generic: Flux
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "Editorial Photo Grade" [level=3]
+              - paragraph: Magazine-style color grading. Warm skin, deep shadow, that quiet print look without garish presets.
+              - generic:
+                - generic: Photography
+                - generic: 1.3k sold
+              - generic:
+                - generic: $11
+                - button "Add" [ref=e210] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e211]
+              - link "Open detail" [ref=e213] [cursor=pointer]:
+                - /url: /prompts/editorial-photo-grade
+          - article [ref=e214]:
+            - button "Save The Worldbuilder's Bible" [ref=e215] [cursor=pointer]:
+              - img [ref=e216]
+            - button "Preview The Worldbuilder's Bible" [ref=e218] [cursor=pointer]:
+              - img "The Worldbuilder's Bible prompt preview" [ref=e219]
+            - generic:
+              - generic:
+                - generic: GPT-4o
+                - generic:
+                  - img
+                  - text: "5.0"
+              - heading "The Worldbuilder's Bible" [level=3]
+              - paragraph: "Builds a consistent fictional world: geography, factions, history, and continuity."
+              - generic:
+                - generic: Writing
+                - generic: 720 sold
+              - generic:
+                - generic: $29
+                - button "Add" [ref=e220] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e221]
+              - link "Open detail" [ref=e223] [cursor=pointer]:
+                - /url: /prompts/the-worldbuilder-s-bible
+        - generic [ref=e224]:
+          - article [ref=e225]:
+            - button "Save Cinematic Still, 35mm" [ref=e226] [cursor=pointer]:
+              - img [ref=e227]
+            - button "Preview Cinematic Still, 35mm" [ref=e229] [cursor=pointer]:
+              - img "Cinematic Still, 35mm prompt preview" [ref=e230]
+            - generic:
+              - generic:
+                - generic: Midjourney
+                - generic:
+                  - img
+                  - text: "5.0"
+              - heading "Cinematic Still, 35mm" [level=3]
+              - paragraph: Film-grade stills with real lens language, focal length, grain, and lighting that reads as cinema.
+              - generic:
+                - generic: Image
+                - generic: 4.7k sold
+              - generic:
+                - generic: $9
+                - button "Add" [ref=e231] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e232]
+              - link "Open detail" [ref=e234] [cursor=pointer]:
+                - /url: /prompts/cinematic-still-35mm
+          - article [ref=e235]:
+            - button "Save Neon Street, Night" [ref=e236] [cursor=pointer]:
+              - img [ref=e237]
+            - button "Preview Neon Street, Night" [ref=e239] [cursor=pointer]:
+              - img "Neon Street, Night prompt preview" [ref=e240]
+            - generic:
+              - generic:
+                - generic: Flux
+                - generic:
+                  - img
+                  - text: "4.7"
+              - heading "Neon Street, Night" [level=3]
+              - paragraph: Rain-slick neon with real reflections and grain. That low-budget cyberpunk look, nailed.
+              - generic:
+                - generic: Photography
+                - generic: 2.6k sold
+              - generic:
+                - generic: $8
+                - button "Add" [ref=e241] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e242]
+              - link "Open detail" [ref=e244] [cursor=pointer]:
+                - /url: /prompts/neon-street-night
+          - article [ref=e245]:
+            - button "Save Watercolor Cityscape" [ref=e246] [cursor=pointer]:
+              - img [ref=e247]
+            - button "Preview Watercolor Cityscape" [ref=e249] [cursor=pointer]:
+              - img "Watercolor Cityscape prompt preview" [ref=e250]
+            - generic:
+              - generic:
+                - generic: Flux
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "Watercolor Cityscape" [level=3]
+              - paragraph: Loose, luminous washes with confident linework. Soft skies, busy streets.
+              - generic:
+                - generic: Image
+                - generic: 2k sold
+              - generic:
+                - generic: $9
+                - button "Add" [ref=e251] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e252]
+              - link "Open detail" [ref=e254] [cursor=pointer]:
+                - /url: /prompts/watercolor-cityscape
+          - article [ref=e255]:
+            - button "Save Product Shot, White BG" [ref=e256] [cursor=pointer]:
+              - img [ref=e257]
+            - button "Preview Product Shot, White BG" [ref=e259] [cursor=pointer]:
+              - img "Product Shot, White BG prompt preview" [ref=e260]
+            - generic:
+              - generic:
+                - generic: Flux
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Product Shot, White BG" [level=3]
+              - paragraph: Clean e-commerce hero shots with soft contact shadow. Drop-in ready for any storefront.
+              - generic:
+                - generic: Photography
+                - generic: 1.5k sold
+              - generic:
+                - generic: $9
+                - button "Add" [ref=e261] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e262]
+              - link "Open detail" [ref=e264] [cursor=pointer]:
+                - /url: /prompts/product-shot-white-bg
+          - article [ref=e265]:
+            - button "Save Senior Code Reviewer" [ref=e266] [cursor=pointer]:
+              - img [ref=e267]
+            - button "Preview Senior Code Reviewer" [ref=e269] [cursor=pointer]:
+              - img "Senior Code Reviewer prompt preview" [ref=e270]
+            - generic:
+              - generic:
+                - generic: Claude
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Senior Code Reviewer" [level=3]
+              - paragraph: Reviews your diff like a staff engineer, catches risk, suggests fixes, and explains the why.
+              - generic:
+                - generic: Code
+                - generic: 1.1k sold
+              - generic:
+                - generic: $18
+                - button "Add" [ref=e271] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e272]
+              - link "Open detail" [ref=e274] [cursor=pointer]:
+                - /url: /prompts/senior-code-reviewer
+        - generic [ref=e275]:
+          - article [ref=e276]:
+            - button "Save Anime Key Visual" [ref=e277] [cursor=pointer]:
+              - img [ref=e278]
+            - button "Preview Anime Key Visual" [ref=e280] [cursor=pointer]:
+              - img "Anime Key Visual prompt preview" [ref=e281]
+            - generic:
+              - generic:
+                - generic: Midjourney
+                - generic:
+                  - img
+                  - text: "5.0"
+              - heading "Anime Key Visual" [level=3]
+              - paragraph: Poster-grade key art with depth, light direction, and a real focal subject. Print at A2.
+              - generic:
+                - generic: Image
+                - generic: 3.9k sold
+              - generic:
+                - generic: $15
+                - button "Add" [ref=e282] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e283]
+              - link "Open detail" [ref=e285] [cursor=pointer]:
+                - /url: /prompts/anime-key-visual
+          - article [ref=e286]:
+            - button "Save The Cold-Email Closer" [ref=e287] [cursor=pointer]:
+              - img [ref=e288]
+            - button "Preview The Cold-Email Closer" [ref=e290] [cursor=pointer]:
+              - img "The Cold-Email Closer prompt preview" [ref=e291]
+            - generic:
+              - generic:
+                - generic: GPT-4o
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "The Cold-Email Closer" [level=3]
+              - paragraph: Cold emails that get replies. A tested four-line structure with subject-line variants baked in.
+              - generic:
+                - generic: Marketing
+                - generic: 2.3k sold
+              - generic:
+                - generic: $12
+                - button "Add" [ref=e292] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e293]
+              - link "Open detail" [ref=e295] [cursor=pointer]:
+                - /url: /prompts/the-cold-email-closer
+          - article [ref=e296]:
+            - button "Save Bug-to-Test Generator" [ref=e297] [cursor=pointer]:
+              - img [ref=e298]
+            - button "Preview Bug-to-Test Generator" [ref=e300] [cursor=pointer]:
+              - img "Bug-to-Test Generator prompt preview" [ref=e301]
+            - generic:
+              - generic:
+                - generic: GPT-4o
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Bug-to-Test Generator" [level=3]
+              - paragraph: Paste a bug report, get a failing test that reproduces it, plus the fix and edge cases.
+              - generic:
+                - generic: Code
+                - generic: 1.9k sold
+              - generic:
+                - generic: $15
+                - button "Add" [ref=e302] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e303]
+              - link "Open detail" [ref=e305] [cursor=pointer]:
+                - /url: /prompts/bug-to-test-generator
+          - article [ref=e306]:
+            - button "Save The Plot Doctor" [ref=e307] [cursor=pointer]:
+              - img [ref=e308]
+            - button "Preview The Plot Doctor" [ref=e310] [cursor=pointer]:
+              - img "The Plot Doctor prompt preview" [ref=e311]
+            - generic:
+              - generic:
+                - generic: Claude
+                - generic:
+                  - img
+                  - text: "4.9"
+              - heading "The Plot Doctor" [level=3]
+              - paragraph: "Diagnoses why your story stalls and prescribes the fix: stakes, pacing, and the scene you are dodging."
+              - generic:
+                - generic: Writing
+                - generic: 1.4k sold
+              - generic:
+                - generic: $16
+                - button "Add" [ref=e312] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e313]
+              - link "Open detail" [ref=e315] [cursor=pointer]:
+                - /url: /prompts/the-plot-doctor
+          - article [ref=e316]:
+            - button "Save Logo Sketch, Mono-line" [ref=e317] [cursor=pointer]:
+              - img [ref=e318]
+            - button "Preview Logo Sketch, Mono-line" [ref=e320] [cursor=pointer]:
+              - img "Logo Sketch, Mono-line prompt preview" [ref=e321]
+            - generic:
+              - generic:
+                - generic: Midjourney
+                - generic:
+                  - img
+                  - text: "4.8"
+              - heading "Logo Sketch, Mono-line" [level=3]
+              - paragraph: Single-weight line marks with real negative-space thinking. Vector-ready directions, fast.
+              - generic:
+                - generic: Design
+                - generic: 980 sold
+              - generic:
+                - generic: $13
+                - button "Add" [ref=e322] [cursor=pointer]:
+                  - text: Add
+                  - img [ref=e323]
+              - link "Open detail" [ref=e325] [cursor=pointer]:
+                - /url: /prompts/logo-sketch-mono-line
+  - status
+```
