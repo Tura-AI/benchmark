@@ -116,6 +116,14 @@ directory layout and schemas are part of the repository contract. New raw logs,
 temporary workspaces, downloaded repositories, and provider state belong under
 the ignored `raw/` or `.tura/` directories, not under `results/`.
 
+The public [current test-set record](doc/current-test-set-record.md) documents
+the July 2026 DeepSWE and design cohorts, recomputed results, source lineage,
+same-cohort boundaries, retained timeouts and severe token/round tails, the
+High-versus-Medium rationale, prompt-generation drift, compact-context and
+other missing ablations, design-link audits, and the next controlled
+experiments. Read it before quoting an aggregate result; the caveats are part
+of the result, not optional footnotes.
+
 All benchmark task, harness, and published artifact links use the canonical
 repository `https://github.com/Tura-AI/benchmark`. Tura CLI release and runtime
 metadata intentionally use `https://github.com/Tura-AI/tura`; those links refer
@@ -129,7 +137,7 @@ upstream benchmark or as a representative estimate beyond its declared task
 set.
 
 Published and compared results must follow the
-[Tura benchmark methodology](https://github.com/Tura-AI/tura/blob/main/docs/benchmark/benchmark-methodology.md):
+[benchmark methodology](doc/benchmark-methodology.md):
 
 - freeze and identify the benchmark revision, subset selection, task matrix,
   agent and model configuration, effort, timeout, replicate count, and execution
