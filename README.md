@@ -5,8 +5,6 @@ coding agents. It contains portable task definitions, agent and runtime
 configuration, benchmark runners, validation schemas, and published result
 artifacts for debug, rewrite, and design evaluations.
 
-Canonical repository: <https://github.com/Tura-AI/benchmark>
-
 ## Requirements
 
 - Node.js 20 or newer
