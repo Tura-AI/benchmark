@@ -1,0 +1,1 @@
+import{d as e,r as t}from"./index-DRMPEJUp.js";import{t as n}from"./components-DFQbdGam.js";var r=e();function i(){return(0,r.jsx)(n,{analytics:t.useLoaderData()})}export{i as component};
