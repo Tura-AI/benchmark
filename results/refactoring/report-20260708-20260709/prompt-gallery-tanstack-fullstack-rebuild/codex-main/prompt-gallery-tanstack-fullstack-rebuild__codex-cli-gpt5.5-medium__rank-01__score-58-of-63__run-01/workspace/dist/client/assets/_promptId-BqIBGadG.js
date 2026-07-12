@@ -1,2 +1,0 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["assets/_promptId-D98UVM-P.js","assets/market-CPfpX77f.js","assets/icons-CTw4rhNE.js","assets/Toast-BbvaEuFM.js"])))=>i.map(i=>d[i]);
-import{n as e,r as t,t as n}from"./preload-helper-bHCwOUCp.js";function r(e={}){if(e.isNotFound=!0,e.throw)throw e;return e}function i(e){return e?.isNotFound===!0}var a=t(`/prompts/$promptId`)({loader:({params:e})=>({promptId:Number(e.promptId)}),component:e(()=>n(()=>import(`./_promptId-D98UVM-P.js`),__vite__mapDeps([0,1,2,3])),`component`)});export{i as n,r,a as t};

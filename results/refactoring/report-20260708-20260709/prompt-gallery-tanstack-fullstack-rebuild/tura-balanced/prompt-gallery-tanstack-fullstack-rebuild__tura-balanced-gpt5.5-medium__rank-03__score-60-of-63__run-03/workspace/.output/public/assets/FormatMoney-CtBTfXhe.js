@@ -1,1 +1,0 @@
-import{f as e}from"./index-BGO9e2If.js";var t=e();function n({value:e}){return e===0?(0,t.jsx)(t.Fragment,{children:`Free`}):(0,t.jsx)(t.Fragment,{children:new Intl.NumberFormat(`en-US`,{style:`currency`,currency:`USD`,maximumFractionDigits:0}).format(e)})}export{n as t};

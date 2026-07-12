@@ -1,1 +1,0 @@
-import{_ as e,et as t,x as n}from"./market-CPfpX77f.js";var r=t(n(),1),i=e();function a({toast:e,onDone:t}){return(0,r.useEffect)(()=>{if(!e)return;let n=window.setTimeout(t,2200);return()=>window.clearTimeout(n)},[e,t]),(0,i.jsxs)(`div`,{className:`toast ${e?`show`:``}`,children:[(0,i.jsx)(`span`,{className:`toast-dot`}),(0,i.jsx)(`span`,{children:e?.text})]})}export{a as t};
