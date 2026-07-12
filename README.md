@@ -2,6 +2,8 @@
 
 Canonical repository: <https://github.com/Tura-AI/benchmark>
 
+Primary maintainer: Yohji Sakamoto (<yohji.sakamoto@gmail.com>)
+
 This repository is Tura's manual long-horizon evaluation subsystem. It
 keeps benchmark definitions separate from product tests and separates stable
 task data from reusable execution code, agent configuration, and generated run
@@ -88,6 +90,10 @@ npm run check
 `npm run check` runs formatting, TypeScript checks, all local tests, schema
 validation against published results, benchmark-link auditing, and Knip dead
 code analysis. It does not launch a live agent or consume provider quota.
+
+## License
+
+This repository is licensed under the [MIT License](LICENSE).
 
 ## Architecture
 
