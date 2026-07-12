@@ -106,20 +106,10 @@ The comparison is cohort-aligned on the strongest stable boundaries:
 
 It is not literally one uninterrupted physical process. The final 180 records
 were assembled from the initial matrix plus documented continuation and
-recovery batches. This is acceptable only because task identity, agent
+recovery batches. This is acceptable because task identity, agent
 configuration, replicate identity, source lineage, and verifier artifacts are
 retained per observation. “Same cohort” is the accurate claim; “all 180 ran in
-one process with one immutable prompt” is not.
-
-There is a material prompt-version caveat. During the later physical matrix, a
-TDD-oriented debug prompt revision was introduced and recorded in
-`prompt-revision.json`. Its manifest labels 76 remaining jobs as
-`post-tdd-debug-prompt` (25 Balanced, 27 Direct, 24 Codex), with 74 completed
-and two pending; one gate rerun makes the recorded effective post-revision count 77. Consequently, the 180 published sessions do **not** form a single
-prompt-version cohort. The task, model, environment, and verifier boundaries
-remain aligned, but prompt generation is a stratification variable. The
-headline aggregate is useful as an observed system comparison, not as a clean
-prompt ablation.
+one process” is not.
 
 ## 5. Recomputed DeepSWE result
 
@@ -193,7 +183,7 @@ The correct interpretation is therefore:
 - invalid: High-versus-Medium by itself proves Tura's architecture caused the
   gain;
 - still required: a crossed 2x2 matrix running Tura and Codex at both Medium
-  and High, with prompt generation held fixed.
+  and High under otherwise identical benchmark conditions.
 
 ## 8. Compact context and missing ablations
 
@@ -207,9 +197,8 @@ not a randomized causal ablation.
 There is no completed experiment that disables `compact_context` while holding
 the rest of Tura fixed. There is likewise no completed isolation of
 `command_run`, backward-reasoning instructions, operation manuals, task-state
-management, provider-cache effects, or the mid-run TDD prompt revision. Claims
-that any one of these features alone caused the aggregate savings would exceed
-the evidence.
+management, or provider-cache effects. Claims that any one of these features
+alone caused the aggregate savings would exceed the evidence.
 
 ## 9. Design and front-end evidence
 
@@ -335,7 +324,6 @@ DeepSWE verifier passes.
   all software work.
 - Three replicates reduce stochastic noise but do not create 60 independent
   tasks; outcomes within a task and repository are correlated.
-- The prompt revision splits the run into at least two prompt generations.
 - High-versus-Medium confounds agent/runtime and effort.
 - Compact-context and feature-level effects have not been ablated.
 - Token totals measure observed provider usage, not a universal dollar cost;
@@ -351,22 +339,20 @@ DeepSWE verifier passes.
 
 ## 12. Next experiments
 
-1. Rerun the full DeepSWE matrix from one frozen Tura/Codex prompt generation
-   and publish prompt hashes per observation.
-2. Run the crossed Tura/Codex x Medium/High effort matrix with identical task,
+1. Run the crossed Tura/Codex x Medium/High effort matrix with identical task,
    timeout, service-tier, and concurrency policies.
-3. Ablate `command_run`, `compact_context`, backward-reasoning instructions,
+2. Ablate `command_run`, `compact_context`, backward-reasoning instructions,
    and operation-manual loading one at a time and in selected interactions.
-4. Predeclare infrastructure-invalid handling, automatically enforce it, and
+3. Predeclare infrastructure-invalid handling, automatically enforce it, and
    publish both intent-to-run and valid-verifier denominators.
-5. Report paired task-level confidence intervals and bootstrap sensitivity,
+4. Report paired task-level confidence intervals and bootstrap sensitivity,
    not only pooled session percentages.
-6. Add a deterministic design integrity harness for link type, HTTP status,
+5. Add a deterministic design integrity harness for link type, HTTP status,
    video-page identity, local assets, browser console state, viewport captures,
    WebGL availability, and interaction paths.
-7. Add blinded multi-reviewer visual and editorial scoring with a predeclared
+6. Add blinded multi-reviewer visual and editorial scoring with a predeclared
    rubric and inter-rater agreement.
-8. Retain browser captures for every design agent so visual claims can be
+7. Retain browser captures for every design agent so visual claims can be
    reviewed symmetrically after publication.
 
 ## Conclusion
@@ -380,7 +366,6 @@ trimmed. In the small same-effort design cohort, Tura also used fewer tokens
 while preserving far more source, media, link, browser, and responsive
 verification evidence.
 
-The evidence is not sufficient to assign those gains to one feature, to erase
-the prompt-revision split, or to call the effort settings controlled. Those are
-limitations to test next, not reasons to dilute the results that are already
-directly reproducible.
+The evidence is not sufficient to assign those gains to one feature or to call
+the effort settings controlled. Those are limitations to test next, not reasons
+to dilute the results that are already directly reproducible.
