@@ -123,10 +123,10 @@ to the CLI itself, not to benchmark source code.
 
 ### Result-reporting discipline
 
-Result directories and manifests describe benchmark **subsets**, not curated
-local result groups. A subset is a fixed, disclosed selection of tasks; it must
-not be presented as the complete upstream benchmark or as a representative
-estimate beyond its declared task set.
+Result directories and manifests describe benchmark **subsets**. A subset is a
+fixed, disclosed selection of tasks; it must not be presented as the complete
+upstream benchmark or as a representative estimate beyond its declared task
+set.
 
 Published and compared results must follow the
 [Tura benchmark methodology](https://github.com/Tura-AI/tura/blob/main/docs/benchmark/benchmark-methodology.md):
