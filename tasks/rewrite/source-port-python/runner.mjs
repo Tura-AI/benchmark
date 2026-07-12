@@ -1,63 +1,122 @@
 #!/usr/bin/env node
-import assert from "node:assert/strict"
-import crypto from "node:crypto"
-import fs from "node:fs"
-import os from "node:os"
-import path from "node:path"
-import process from "node:process"
-import { spawn, spawnSync } from "node:child_process"
-import { performance } from "node:perf_hooks"
-import { fileURLToPath } from "node:url"
-import { agentEventStats, agentUsageFromJsonl, claudeCodeArgs, findClaudeExe, findPiExe, piAgentArgs } from "../../../lib/agent_cli.mjs"
-import { businessRunPaths, normalizeBusinessSummary } from "../../../lib/business_paths.mjs"
-import { codexTokenUsageReport, writeCodexTokenUsageArtifacts } from "../../../lib/codex_token_usage.mjs"
-import { endStream, isolatedProcessOptions, killProcessTree } from "../../../lib/process_helpers.mjs"
-import { parseGenericAgents } from "../../../lib/generic_agent_cli.mjs"
+import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import process from "node:process";
+import { spawn, spawnSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
+import {
+  agentEventStats,
+  agentUsageFromJsonl,
+  claudeCodeArgs,
+  findClaudeExe,
+  findPiExe,
+  piAgentArgs,
+} from "../../../lib/agent_cli.mjs";
+import {
+  businessRunPaths,
+  normalizeBusinessSummary,
+} from "../../../lib/business_paths.mjs";
+import {
+  codexTokenUsageReport,
+  writeCodexTokenUsageArtifacts,
+} from "../../../lib/codex_token_usage.mjs";
+import {
+  endStream,
+  isolatedProcessOptions,
+  killProcessTree,
+} from "../../../lib/process_helpers.mjs";
+import { parseGenericAgents } from "../../../lib/generic_agent_cli.mjs";
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url))
-const repoRoot = path.resolve(scriptDir, "..", "..", "..", "..")
-const homeDir = process.env.USERPROFILE || process.env.HOME || ""
-const runId = process.env.COMMAND_RUN_AGENT_RUN_ID || `source-port-suite-${Date.now()}`
-const baseRunPaths = businessRunPaths("project-rebuild-source-port", runId)
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(scriptDir, "..", "..", "..", "..");
+const homeDir = process.env.USERPROFILE || process.env.HOME || "";
+const runId =
+  process.env.COMMAND_RUN_AGENT_RUN_ID || `source-port-suite-${Date.now()}`;
+const baseRunPaths = businessRunPaths("project-rebuild-source-port", runId);
 const runPaths = businessRunPaths("project-rebuild-source-port", runId, {
   targetRoot: baseRunPaths.target_root,
-  runRoot: path.join(baseRunPaths.target_root, baseRunPaths.test_name, shortRunDirName(runId)),
-})
+  runRoot: path.join(
+    baseRunPaths.target_root,
+    baseRunPaths.test_name,
+    shortRunDirName(runId),
+  ),
+});
 const suiteRoot =
   process.env.SOURCE_PORT_SUITE_ROOT ||
   process.env.COMMAND_RUN_AGENT_SOURCE_PORT_ROOT ||
-  path.join(runPaths.target_root, runPaths.test_name, "_cache")
-const runRoot = runPaths.run_root
-const summaryPath = runPaths.summary_path
-const model = process.env.COMMAND_RUN_AGENT_CODEX_MODEL || "gpt-5.6-sol"
-const turaModel = process.env.COMMAND_RUN_AGENT_TURA_MODEL || (model.includes("/") ? model : `openai/${model}`)
-const reasoning = process.env.COMMAND_RUN_AGENT_REASONING_EFFORT || "medium"
-const serviceTier = process.env.COMMAND_RUN_AGENT_SERVICE_TIER || "default"
-const timeoutMs = Number(process.env.COMMAND_RUN_AGENT_TIMEOUT_MS || 60 * 60_000)
-const agents = parseGenericAgents(process.env.COMMAND_RUN_AGENT_AGENTS, "balanced")
-const printProviderLog = truthy(process.env.COMMAND_RUN_AGENT_PRINT_PROVIDER_LOG || "0")
-const selectedTasksRaw = process.env.SOURCE_PORT_TASKS || process.env.COMMAND_RUN_AGENT_SOURCE_PORT_TASKS || "all"
-const prepOnly = truthy(process.env.COMMAND_RUN_AGENT_PREP_ONLY || "0")
-const evaluateOnly = truthy(process.env.COMMAND_RUN_AGENT_EVALUATE_ONLY || "0")
-const selfTest = truthy(process.env.SOURCE_PORT_SELF_TEST || process.env.COMMAND_RUN_AGENT_SOURCE_PORT_SELF_TEST || "0")
-const binaryOnly = truthy(process.env.SOURCE_PORT_BINARY_ONLY || "0")
-const runEval = truthy(process.env.SOURCE_PORT_RUN_EVAL || process.env.COMMAND_RUN_AGENT_SOURCE_PORT_RUN_EVAL || "1")
-const complexTodoHint = defaultTruthy(process.env.SOURCE_PORT_COMPLEX_TODO_HINT || process.env.COMMAND_RUN_AGENT_SOURCE_PORT_COMPLEX_TODO_HINT)
-const planningOverride = parsePlanningOverride(process.env.COMMAND_RUN_AGENT_TURA_PLANNING || "auto")
-const codexGoalsEnabled = truthy(process.env.COMMAND_RUN_AGENT_CODEX_GOALS || "0")
-const turaGoalEnabled = truthy(process.env.COMMAND_RUN_AGENT_TURA_GOAL || "0")
-const turaExplicitSessionId = truthy(process.env.COMMAND_RUN_AGENT_TURA_SESSION_ID || "0")
-const turaStrictJson = process.env.COMMAND_RUN_AGENT_TURA_STRICT_JSON || process.env.TURA_COMMAND_RUN_STRICT_JSON || "0"
+  path.join(runPaths.target_root, runPaths.test_name, "_cache");
+const runRoot = runPaths.run_root;
+const summaryPath = runPaths.summary_path;
+const model = process.env.COMMAND_RUN_AGENT_CODEX_MODEL || "gpt-5.6-sol";
+const turaModel =
+  process.env.COMMAND_RUN_AGENT_TURA_MODEL ||
+  (model.includes("/") ? model : `openai/${model}`);
+const reasoning = process.env.COMMAND_RUN_AGENT_REASONING_EFFORT || "medium";
+const serviceTier = process.env.COMMAND_RUN_AGENT_SERVICE_TIER || "default";
+const timeoutMs = Number(
+  process.env.COMMAND_RUN_AGENT_TIMEOUT_MS || 60 * 60_000,
+);
+const agents = parseGenericAgents(
+  process.env.COMMAND_RUN_AGENT_AGENTS,
+  "balanced",
+);
+const printProviderLog = truthy(
+  process.env.COMMAND_RUN_AGENT_PRINT_PROVIDER_LOG || "0",
+);
+const selectedTasksRaw =
+  process.env.SOURCE_PORT_TASKS ||
+  process.env.COMMAND_RUN_AGENT_SOURCE_PORT_TASKS ||
+  "all";
+const prepOnly = truthy(process.env.COMMAND_RUN_AGENT_PREP_ONLY || "0");
+const evaluateOnly = truthy(process.env.COMMAND_RUN_AGENT_EVALUATE_ONLY || "0");
+const selfTest = truthy(
+  process.env.SOURCE_PORT_SELF_TEST ||
+    process.env.COMMAND_RUN_AGENT_SOURCE_PORT_SELF_TEST ||
+    "0",
+);
+const binaryOnly = truthy(process.env.SOURCE_PORT_BINARY_ONLY || "0");
+const runEval = truthy(
+  process.env.SOURCE_PORT_RUN_EVAL ||
+    process.env.COMMAND_RUN_AGENT_SOURCE_PORT_RUN_EVAL ||
+    "1",
+);
+const complexTodoHint = defaultTruthy(
+  process.env.SOURCE_PORT_COMPLEX_TODO_HINT ||
+    process.env.COMMAND_RUN_AGENT_SOURCE_PORT_COMPLEX_TODO_HINT,
+);
+const planningOverride = parsePlanningOverride(
+  process.env.COMMAND_RUN_AGENT_TURA_PLANNING || "auto",
+);
+const codexGoalsEnabled = truthy(
+  process.env.COMMAND_RUN_AGENT_CODEX_GOALS || "0",
+);
+const turaGoalEnabled = truthy(process.env.COMMAND_RUN_AGENT_TURA_GOAL || "0");
+const turaExplicitSessionId = truthy(
+  process.env.COMMAND_RUN_AGENT_TURA_SESSION_ID || "0",
+);
+const turaStrictJson =
+  process.env.COMMAND_RUN_AGENT_TURA_STRICT_JSON ||
+  process.env.TURA_COMMAND_RUN_STRICT_JSON ||
+  "0";
 const turaExe =
   process.env.COMMAND_RUN_AGENT_TURA_EXE ||
-  path.join(repoRoot, "target", "debug", process.platform === "win32" ? "tura_exec.exe" : "tura_exec")
-const codexMainExe = findCodexMainExe()
-const codexDocumentsExe = findCodexDocumentsExe()
-const claudeExe = findClaudeExe()
-const piExe = findPiExe()
+  path.join(
+    repoRoot,
+    "target",
+    "debug",
+    process.platform === "win32" ? "tura_exec.exe" : "tura_exec",
+  );
+const codexMainExe = findCodexMainExe();
+const codexDocumentsExe = findCodexDocumentsExe();
+const claudeExe = findClaudeExe();
+const piExe = findPiExe();
 
 function shortRunDirName(value) {
-  return `r-${crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 10)}`
+  return `r-${crypto.createHash("sha1").update(String(value)).digest("hex").slice(0, 10)}`;
 }
 
 const BUILTIN_TASKS = {
@@ -71,14 +130,42 @@ const BUILTIN_TASKS = {
     commit: "7c1a4c93841220fc740ed81d3b97784e450fc6a6",
     binaryNames: ["zip-password-finder"],
     releaseAssetRules: [
-      { os: "win32", arch: "x64", includes: ["x86_64-pc-windows-msvc", ".zip"] },
-      { os: "win32", arch: "arm64", includes: ["aarch64-pc-windows-msvc", ".zip"] },
-      { os: "linux", arch: "x64", includes: ["x86_64-unknown-linux-gnu", ".tar.gz"] },
-      { os: "linux", arch: "arm64", includes: ["aarch64-unknown-linux-gnu", ".tar.gz"] },
-      { os: "darwin", arch: "x64", includes: ["x86_64-apple-darwin", ".tar.gz"] },
-      { os: "darwin", arch: "arm64", includes: ["aarch64-apple-darwin", ".tar.gz"] },
+      {
+        os: "win32",
+        arch: "x64",
+        includes: ["x86_64-pc-windows-msvc", ".zip"],
+      },
+      {
+        os: "win32",
+        arch: "arm64",
+        includes: ["aarch64-pc-windows-msvc", ".zip"],
+      },
+      {
+        os: "linux",
+        arch: "x64",
+        includes: ["x86_64-unknown-linux-gnu", ".tar.gz"],
+      },
+      {
+        os: "linux",
+        arch: "arm64",
+        includes: ["aarch64-unknown-linux-gnu", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "x64",
+        includes: ["x86_64-apple-darwin", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "arm64",
+        includes: ["aarch64-apple-darwin", ".tar.gz"],
+      },
     ],
-    commands: ["single command CLI", "argument validation", "dictionary/bruteforce ZIP password search"],
+    commands: [
+      "single command CLI",
+      "argument validation",
+      "dictionary/bruteforce ZIP password search",
+    ],
   },
   xsv: {
     id: "burntsushi__xsv.source-port-python-complete",
@@ -90,12 +177,35 @@ const BUILTIN_TASKS = {
     commit: "2b4cbaa0eecf7b507a612632fe00289b1b358c15",
     binaryNames: ["xsv"],
     releaseAssetRules: [
-      { os: "win32", arch: "x64", includes: ["x86_64-pc-windows-msvc", ".zip"] },
+      {
+        os: "win32",
+        arch: "x64",
+        includes: ["x86_64-pc-windows-msvc", ".zip"],
+      },
       { os: "win32", arch: "ia32", includes: ["i686-pc-windows-msvc", ".zip"] },
-      { os: "linux", arch: "x64", includes: ["x86_64-unknown-linux-musl", ".tar.gz"] },
-      { os: "darwin", arch: "x64", includes: ["x86_64-apple-darwin", ".tar.gz"] },
+      {
+        os: "linux",
+        arch: "x64",
+        includes: ["x86_64-unknown-linux-musl", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "x64",
+        includes: ["x86_64-apple-darwin", ".tar.gz"],
+      },
     ],
-    commands: ["headers", "count", "select", "slice", "search", "sort", "table", "fmt", "stats", "frequency"],
+    commands: [
+      "headers",
+      "count",
+      "select",
+      "slice",
+      "search",
+      "sort",
+      "table",
+      "fmt",
+      "stats",
+      "frequency",
+    ],
   },
   eza: {
     id: "eza-community__eza.source-port-python-complete",
@@ -107,13 +217,40 @@ const BUILTIN_TASKS = {
     commit: "05d20d11c488b2ad3f0d63ac0b529281cc1c16ef",
     binaryNames: ["eza"],
     releaseAssetRules: [
-      { os: "win32", arch: "x64", includes: ["eza.exe_x86_64-pc-windows-gnu", ".zip"] },
-      { os: "linux", arch: "x64", includes: ["eza_x86_64-unknown-linux-musl", ".tar.gz"] },
-      { os: "linux", arch: "arm64", includes: ["eza_aarch64-unknown-linux-gnu", ".tar.gz"] },
-      { os: "darwin", arch: "x64", includes: ["eza_x86_64-apple-darwin", ".tar.gz"] },
-      { os: "darwin", arch: "arm64", includes: ["eza_aarch64-apple-darwin", ".tar.gz"] },
+      {
+        os: "win32",
+        arch: "x64",
+        includes: ["eza.exe_x86_64-pc-windows-gnu", ".zip"],
+      },
+      {
+        os: "linux",
+        arch: "x64",
+        includes: ["eza_x86_64-unknown-linux-musl", ".tar.gz"],
+      },
+      {
+        os: "linux",
+        arch: "arm64",
+        includes: ["eza_aarch64-unknown-linux-gnu", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "x64",
+        includes: ["eza_x86_64-apple-darwin", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "arm64",
+        includes: ["eza_aarch64-apple-darwin", ".tar.gz"],
+      },
     ],
-    commands: ["directory listing", "long view", "tree", "sort", "hidden", "icons/colors disabled"],
+    commands: [
+      "directory listing",
+      "long view",
+      "tree",
+      "sort",
+      "hidden",
+      "icons/colors disabled",
+    ],
   },
   nushell: {
     id: "nushell__nushell.source-port-python-complete",
@@ -125,137 +262,208 @@ const BUILTIN_TASKS = {
     commit: "682d593d3f53e5337dceedf98c9603a698af6a64",
     binaryNames: ["nu"],
     releaseAssetRules: [
-      { os: "win32", arch: "x64", includes: ["x86_64-pc-windows-msvc", ".zip"], excludes: [".msi"] },
-      { os: "win32", arch: "arm64", includes: ["aarch64-pc-windows-msvc", ".zip"], excludes: [".msi"] },
-      { os: "linux", arch: "x64", includes: ["x86_64-unknown-linux-gnu", ".tar.gz"] },
-      { os: "linux", arch: "arm64", includes: ["aarch64-unknown-linux-gnu", ".tar.gz"] },
-      { os: "darwin", arch: "x64", includes: ["x86_64-apple-darwin", ".tar.gz"] },
-      { os: "darwin", arch: "arm64", includes: ["aarch64-apple-darwin", ".tar.gz"] },
+      {
+        os: "win32",
+        arch: "x64",
+        includes: ["x86_64-pc-windows-msvc", ".zip"],
+        excludes: [".msi"],
+      },
+      {
+        os: "win32",
+        arch: "arm64",
+        includes: ["aarch64-pc-windows-msvc", ".zip"],
+        excludes: [".msi"],
+      },
+      {
+        os: "linux",
+        arch: "x64",
+        includes: ["x86_64-unknown-linux-gnu", ".tar.gz"],
+      },
+      {
+        os: "linux",
+        arch: "arm64",
+        includes: ["aarch64-unknown-linux-gnu", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "x64",
+        includes: ["x86_64-apple-darwin", ".tar.gz"],
+      },
+      {
+        os: "darwin",
+        arch: "arm64",
+        includes: ["aarch64-apple-darwin", ".tar.gz"],
+      },
     ],
-    commands: ["nu -c expressions", "tables", "json", "csv", "strings", "math", "filesystem snippets"],
+    commands: [
+      "nu -c expressions",
+      "tables",
+      "json",
+      "csv",
+      "strings",
+      "math",
+      "filesystem snippets",
+    ],
   },
-}
+};
 
 const TASKS = {
   ...BUILTIN_TASKS,
   ...loadExternalTasks(),
-}
+};
 
-const selectedTasks = parseTasks(selectedTasksRaw)
+const selectedTasks = parseTasks(selectedTasksRaw);
 
 function loadExternalTasks() {
-  const configPath = process.env.SOURCE_PORT_TASK_CONFIG || process.env.COMMAND_RUN_AGENT_SOURCE_PORT_TASK_CONFIG
-  if (!configPath) return {}
-  const resolved = path.resolve(configPath)
-  const parsed = JSON.parse(fs.readFileSync(resolved, "utf8"))
-  const rows = Array.isArray(parsed) ? parsed : parsed.tasks
-  if (!Array.isArray(rows)) throw new Error(`source-port task config must be an array or { tasks: [...] }: ${resolved}`)
-  const tasks = {}
+  const configPath =
+    process.env.SOURCE_PORT_TASK_CONFIG ||
+    process.env.COMMAND_RUN_AGENT_SOURCE_PORT_TASK_CONFIG;
+  if (!configPath) return {};
+  const resolved = path.resolve(configPath);
+  const parsed = JSON.parse(fs.readFileSync(resolved, "utf8"));
+  const rows = Array.isArray(parsed) ? parsed : parsed.tasks;
+  if (!Array.isArray(rows))
+    throw new Error(
+      `source-port task config must be an array or { tasks: [...] }: ${resolved}`,
+    );
+  const tasks = {};
   for (const row of rows) {
     const task = {
       ...row,
       label: row.label || row.name,
       sourceDir: row.sourceDir || "source-reference",
-    }
-    if (!task.label) throw new Error(`external source-port task missing label in ${resolved}`)
-    if (!task.id) task.id = `${task.label}.source-port-python-binary`
-    if (!task.repo) throw new Error(`external source-port task ${task.label} missing repo`)
+    };
+    if (!task.label)
+      throw new Error(`external source-port task missing label in ${resolved}`);
+    if (!task.id) task.id = `${task.label}.source-port-python-binary`;
+    if (!task.repo)
+      throw new Error(`external source-port task ${task.label} missing repo`);
     if (!task.owner || !task.repoName) {
-      const match = String(task.repo).match(/github\.com[:/](.+?)\/(.+?)(?:\.git)?$/i)
+      const match = String(task.repo).match(
+        /github\.com[:/](.+?)\/(.+?)(?:\.git)?$/i,
+      );
       if (match) {
-        task.owner ||= match[1]
-        task.repoName ||= match[2]
+        task.owner ||= match[1];
+        task.repoName ||= match[2];
       }
     }
-    task.ref ||= task.commit || task.tag
-    task.tag ||= task.ref
-    task.binaryNames ||= task.reference?.binaryNames || [task.reference?.binary || task.label]
-    task.releaseAssetRules ||= task.reference?.releaseAssetRules || []
-    tasks[task.label] = task
+    task.ref ||= task.commit || task.tag;
+    task.tag ||= task.ref;
+    task.binaryNames ||= task.reference?.binaryNames || [
+      task.reference?.binary || task.label,
+    ];
+    task.releaseAssetRules ||= task.reference?.releaseAssetRules || [];
+    tasks[task.label] = task;
   }
-  return tasks
+  return tasks;
 }
 
 function truthy(value) {
-  return ["1", "true", "yes", "on", "enabled"].includes(String(value || "").trim().toLowerCase())
+  return ["1", "true", "yes", "on", "enabled"].includes(
+    String(value || "")
+      .trim()
+      .toLowerCase(),
+  );
 }
 
 function defaultTruthy(value) {
-  const normalized = String(value ?? "").trim().toLowerCase()
-  if (!normalized) return true
-  return !["0", "false", "no", "off", "disabled"].includes(normalized)
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return true;
+  return !["0", "false", "no", "off", "disabled"].includes(normalized);
 }
 
 function findCodexMainExe() {
-  const exeName = process.platform === "win32" ? "codex.exe" : "codex"
+  const exeName = process.platform === "win32" ? "codex.exe" : "codex";
   const candidates = [
     process.env.COMMAND_RUN_AGENT_CODEX_MAIN_ROOT,
     path.join(homeDir, "Documents", "codex-main"),
     path.join(homeDir, "codex-main"),
-  ].filter(Boolean).map((root) => path.join(root, "codex-rs", "target", "debug", exeName))
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0]
+  ]
+    .filter(Boolean)
+    .map((root) => path.join(root, "codex-rs", "target", "debug", exeName));
+  return (
+    candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0]
+  );
 }
 
 function findCodexDocumentsExe() {
-  const exeName = process.platform === "win32" ? "codex.exe" : "codex"
+  const exeName = process.platform === "win32" ? "codex.exe" : "codex";
   const candidates = [
     process.env.COMMAND_RUN_AGENT_CODEX_ROOT,
     path.join(homeDir, "Documents", "Codex"),
-  ].filter(Boolean).map((root) => path.join(root, "codex-rs", "target", "debug", exeName))
-  return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0]
+  ]
+    .filter(Boolean)
+    .map((root) => path.join(root, "codex-rs", "target", "debug", exeName));
+  return (
+    candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0]
+  );
 }
 
 function parseTasks(value) {
-  const all = Object.keys(TASKS)
-  const normalized = String(value || "all").trim()
-  if (!normalized || normalized === "all") return all
-  return normalized.split(",").map((item) => item.trim()).filter(Boolean).map((id) => {
-    if (!TASKS[id]) throw new Error(`unknown source-port task ${id}; expected one of ${all.join(", ")}`)
-    return id
-  })
+  const all = Object.keys(TASKS);
+  const normalized = String(value || "all").trim();
+  if (!normalized || normalized === "all") return all;
+  return normalized
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((id) => {
+      if (!TASKS[id])
+        throw new Error(
+          `unknown source-port task ${id}; expected one of ${all.join(", ")}`,
+        );
+      return id;
+    });
 }
 
 function parsePlanningOverride(value) {
-  const normalized = String(value || "auto").trim().toLowerCase()
-  if (["auto", "default", "agent"].includes(normalized)) return null
-  if (["on", "true", "1", "yes", "enabled"].includes(normalized)) return true
-  if (["off", "false", "0", "no", "disabled"].includes(normalized)) return false
-  throw new Error(`COMMAND_RUN_AGENT_TURA_PLANNING must be auto, on, or off; got ${value}`)
+  const normalized = String(value || "auto")
+    .trim()
+    .toLowerCase();
+  if (["auto", "default", "agent"].includes(normalized)) return null;
+  if (["on", "true", "1", "yes", "enabled"].includes(normalized)) return true;
+  if (["off", "false", "0", "no", "disabled"].includes(normalized))
+    return false;
+  throw new Error(
+    `COMMAND_RUN_AGENT_TURA_PLANNING must be auto, on, or off; got ${value}`,
+  );
 }
 
 function mkdirp(dir) {
-  fs.mkdirSync(dir, { recursive: true })
+  fs.mkdirSync(dir, { recursive: true });
 }
 
 function writeFile(file, text) {
-  mkdirp(path.dirname(file))
-  fs.writeFileSync(file, text)
+  mkdirp(path.dirname(file));
+  fs.writeFileSync(file, text);
 }
 
 function writeJson(file, value) {
-  writeFile(file, JSON.stringify(value, null, 2))
+  writeFile(file, JSON.stringify(value, null, 2));
 }
 
 function copyDir(src, dest) {
-  mkdirp(dest)
-  fs.cpSync(src, dest, { recursive: true, force: true, dereference: false })
+  mkdirp(dest);
+  fs.cpSync(src, dest, { recursive: true, force: true, dereference: false });
 }
 
-const MAX_WINDOWS_GIT_CONFIG_PATH_CHARS = 256
+const MAX_WINDOWS_GIT_CONFIG_PATH_CHARS = 256;
 
 function validateWorkspaceGitPath(workspace) {
-  if (process.platform !== "win32") return
-  const gitConfigPath = path.join(workspace, ".git", "config")
-  if (gitConfigPath.length <= MAX_WINDOWS_GIT_CONFIG_PATH_CHARS) return
+  if (process.platform !== "win32") return;
+  const gitConfigPath = path.join(workspace, ".git", "config");
+  if (gitConfigPath.length <= MAX_WINDOWS_GIT_CONFIG_PATH_CHARS) return;
   throw new Error(
-    `workspace Git metadata path is too long for Windows (${gitConfigPath.length} > ${MAX_WINDOWS_GIT_CONFIG_PATH_CHARS} chars): ${gitConfigPath}. Use a shorter COMMAND_RUN_AGENT_RUN_ID or run root.`
-  )
+    `workspace Git metadata path is too long for Windows (${gitConfigPath.length} > ${MAX_WINDOWS_GIT_CONFIG_PATH_CHARS} chars): ${gitConfigPath}. Use a shorter COMMAND_RUN_AGENT_RUN_ID or run root.`,
+  );
 }
 
 function taskRunDirName(task) {
-  const raw = String(task.label || task.id || "task").trim()
-  const safe = raw.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "")
-  return (safe || "task").slice(0, 48)
+  const raw = String(task.label || task.id || "task").trim();
+  const safe = raw.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return (safe || "task").slice(0, 48);
 }
 
 function formatGitSetupFailure(step, result) {
@@ -264,35 +472,44 @@ function formatGitSetupFailure(step, result) {
     `STDOUT:\n${result.stdout}`,
     `STDERR:\n${result.stderr}`,
     `ERROR:\n${result.error || ""}`,
-  ].join("\n")
+  ].join("\n");
 }
 
 function setupWorkspaceGit(workspace, addArgs, commitMessage) {
-  const failures = []
+  const failures = [];
   const steps = [
     ["git init", ["init"]],
-    ["git config user.email", ["config", "user.email", "benchmark@example.invalid"]],
+    [
+      "git config user.email",
+      ["config", "user.email", "benchmark@example.invalid"],
+    ],
     ["git config user.name", ["config", "user.name", "Benchmark"]],
     [`git add ${addArgs.join(" ")}`, ["add", ...addArgs]],
     ["git commit", ["commit", "-m", commitMessage]],
-  ]
+  ];
   for (const [step, args] of steps) {
-    const result = run("git", args, { cwd: workspace, timeoutMs: 60_000 })
+    const result = run("git", args, { cwd: workspace, timeoutMs: 60_000 });
     if (result.status !== 0) {
-      failures.push(formatGitSetupFailure(step, result))
-      break
+      failures.push(formatGitSetupFailure(step, result));
+      break;
     }
   }
-  if (failures.length === 0) return { ok: true, warning_path: null, failures: [] }
-  const warningPath = path.join(workspace, ".tura-benchmark-git-setup-warning.log")
-  writeFile(warningPath, failures.join("\n\n"))
-  console.warn(`[source-port-suite] workspace git setup failed; continuing without git checkpoint: ${warningPath}`)
-  return { ok: false, warning_path: warningPath, failures }
+  if (failures.length === 0)
+    return { ok: true, warning_path: null, failures: [] };
+  const warningPath = path.join(
+    workspace,
+    ".tura-benchmark-git-setup-warning.log",
+  );
+  writeFile(warningPath, failures.join("\n\n"));
+  console.warn(
+    `[source-port-suite] workspace git setup failed; continuing without git checkpoint: ${warningPath}`,
+  );
+  return { ok: false, warning_path: warningPath, failures };
 }
 
 function run(command, args, options = {}) {
-  const started = performance.now()
-  const invocation = commandInvocation(command, args)
+  const started = performance.now();
+  const invocation = commandInvocation(command, args);
   const result = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd || repoRoot,
     input: options.input,
@@ -302,7 +519,7 @@ function run(command, args, options = {}) {
     maxBuffer: options.maxBuffer || 256 * 1024 * 1024,
     env: { ...process.env, ...(options.env || {}) },
     windowsHide: true,
-  })
+  });
   return {
     command,
     args,
@@ -311,33 +528,42 @@ function run(command, args, options = {}) {
     stdout: result.stdout || "",
     stderr: result.stderr || "",
     duration_ms: Math.round(performance.now() - started),
-    error: result.error ? String(result.error.stack || result.error.message || result.error) : null,
-  }
+    error: result.error
+      ? String(result.error.stack || result.error.message || result.error)
+      : null,
+  };
 }
 
 function commandInvocation(command, args = []) {
-  const commandText = String(command)
+  const commandText = String(command);
   if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(commandText)) {
     return {
       command: process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", `call ${quoteWindowsCmdArg(commandText)} ${args.map(quoteWindowsCmdArg).join(" ")}`.trim()],
-    }
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        `call ${quoteWindowsCmdArg(commandText)} ${args.map(quoteWindowsCmdArg).join(" ")}`.trim(),
+      ],
+    };
   }
-  return { command, args }
+  return { command, args };
 }
 
 function quoteWindowsCmdArg(value) {
-  const text = String(value)
-  if (!/[ \t"&<>|^]/.test(text)) return text
-  return `"${text.replace(/"/g, '\\"')}"`
+  const text = String(value);
+  if (!/[ \t"&<>|^]/.test(text)) return text;
+  return `"${text.replace(/"/g, '\\"')}"`;
 }
 
 function runOk(command, args, options = {}) {
-  const result = run(command, args, options)
+  const result = run(command, args, options);
   if (result.status !== 0) {
-    throw new Error(`${command} ${args.join(" ")} failed with ${result.status}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}\nERROR:\n${result.error || ""}`)
+    throw new Error(
+      `${command} ${args.join(" ")} failed with ${result.status}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}\nERROR:\n${result.error || ""}`,
+    );
   }
-  return result
+  return result;
 }
 
 function hasDispatchProgress(stdout) {
@@ -347,100 +573,121 @@ function hasDispatchProgress(stdout) {
     stdout.includes('"type":"command_execution"') ||
     stdout.includes('"type":"file_change"') ||
     stdout.includes('"provider_tool_call_id"')
-  )
+  );
 }
 
 async function runLive(command, args, options = {}) {
-  const maxAttempts = Math.max(1, Number(options.maxAttempts || 1))
-  let last = null
+  const maxAttempts = Math.max(1, Number(options.maxAttempts || 1));
+  let last = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    last = await runLiveAttempt(command, args, { ...options, attempt, maxAttempts })
-    if (!last.dispatch_stalled) return last
+    last = await runLiveAttempt(command, args, {
+      ...options,
+      attempt,
+      maxAttempts,
+    });
+    if (!last.dispatch_stalled) return last;
     if (attempt < maxAttempts) {
       options.onProgress?.({
         ...last,
         status: null,
         error: `dispatch stalled on attempt ${attempt}; retrying`,
-      })
+      });
     }
   }
-  return last
+  return last;
 }
 
 function runLiveAttempt(command, args, options = {}) {
-  const started = performance.now()
-  const stdoutPath = options.stdoutPath
-  const stderrPath = options.stderrPath
-  const statusPath = options.statusPath
-  if (stdoutPath) mkdirp(path.dirname(stdoutPath))
-  const stdoutStream = stdoutPath ? fs.createWriteStream(stdoutPath) : null
-  const stderrStream = stderrPath ? fs.createWriteStream(stderrPath) : null
+  const started = performance.now();
+  const stdoutPath = options.stdoutPath;
+  const stderrPath = options.stderrPath;
+  const statusPath = options.statusPath;
+  if (stdoutPath) mkdirp(path.dirname(stdoutPath));
+  const stdoutStream = stdoutPath ? fs.createWriteStream(stdoutPath) : null;
+  const stderrStream = stderrPath ? fs.createWriteStream(stderrPath) : null;
   return new Promise((resolve) => {
-    let stdout = ""
-    let stderr = ""
-    let firstOutputMs = null
-    let settled = false
-    let timedOut = false
-    let completionResolved = false
-    let turnCompletedTimer = null
-    let lastProgressMs = performance.now()
-    let dispatchStalled = false
-    let progressQueued = false
-    const child = spawn(command, args, isolatedProcessOptions({
-      cwd: options.cwd || repoRoot,
-      env: { ...process.env, ...(options.env || {}) },
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    }))
+    let stdout = "";
+    let stderr = "";
+    let firstOutputMs = null;
+    let settled = false;
+    let timedOut = false;
+    let completionResolved = false;
+    let turnCompletedTimer = null;
+    let lastProgressMs = performance.now();
+    let dispatchStalled = false;
+    let progressQueued = false;
+    const child = spawn(
+      command,
+      args,
+      isolatedProcessOptions({
+        cwd: options.cwd || repoRoot,
+        env: { ...process.env, ...(options.env || {}) },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      }),
+    );
     if (options.input) {
-      child.stdin.write(options.input)
+      child.stdin.write(options.input);
     }
-    child.stdin.end()
+    child.stdin.end();
     const timer = setTimeout(() => {
-      timedOut = true
-      killProcessTree(child.pid)
-      settle(1, null, `timed out after ${options.timeoutMs || timeoutMs}ms`)
-    }, options.timeoutMs || timeoutMs)
-    const dispatchWatchdogMs = Number(options.dispatchWatchdogMs || 0)
-    const dispatchTimer = dispatchWatchdogMs > 0
-      ? setInterval(() => {
-          if (settled) return
-          const elapsed = performance.now() - started
-          if (elapsed < dispatchWatchdogMs) return
-          if (hasDispatchProgress(stdout)) return
-          dispatchStalled = true
-          killProcessTree(child.pid)
-          settle(1, null, `dispatch stalled after ${Math.round(elapsed)}ms`)
-        }, Math.min(dispatchWatchdogMs, 5_000))
-      : null
+      timedOut = true;
+      killProcessTree(child.pid);
+      settle(1, null, `timed out after ${options.timeoutMs || timeoutMs}ms`);
+    }, options.timeoutMs || timeoutMs);
+    const dispatchWatchdogMs = Number(options.dispatchWatchdogMs || 0);
+    const dispatchTimer =
+      dispatchWatchdogMs > 0
+        ? setInterval(
+            () => {
+              if (settled) return;
+              const elapsed = performance.now() - started;
+              if (elapsed < dispatchWatchdogMs) return;
+              if (hasDispatchProgress(stdout)) return;
+              dispatchStalled = true;
+              killProcessTree(child.pid);
+              settle(
+                1,
+                null,
+                `dispatch stalled after ${Math.round(elapsed)}ms`,
+              );
+            },
+            Math.min(dispatchWatchdogMs, 5_000),
+          )
+        : null;
     function record(kind, chunk) {
-      if (settled) return
-      if (firstOutputMs == null) firstOutputMs = Math.round(performance.now() - started)
-      lastProgressMs = performance.now()
-      const text = chunk.toString()
+      if (settled) return;
+      if (firstOutputMs == null)
+        firstOutputMs = Math.round(performance.now() - started);
+      lastProgressMs = performance.now();
+      const text = chunk.toString();
       if (kind === "stdout") {
-        stdout += text
-        stdoutStream?.write(text)
-        queueProgress()
-        if (!completionResolved && options.resolveOnTurnCompleted && stdout.includes("\"type\":\"turn.completed\"")) {
-          completionResolved = true
+        stdout += text;
+        stdoutStream?.write(text);
+        queueProgress();
+        if (
+          !completionResolved &&
+          options.resolveOnTurnCompleted &&
+          stdout.includes('"type":"turn.completed"')
+        ) {
+          completionResolved = true;
           turnCompletedTimer = setTimeout(() => {
-            killProcessTree(child.pid)
-            settle(0, null, null)
-          }, options.turnCompletedGraceMs || 1000)
+            killProcessTree(child.pid);
+            settle(0, null, null);
+          }, options.turnCompletedGraceMs || 1000);
         }
       } else {
-        stderr += text
-        stderrStream?.write(text)
-        queueProgress()
+        stderr += text;
+        stderrStream?.write(text);
+        queueProgress();
       }
     }
     function queueProgress() {
-      if (progressQueued) return
-      progressQueued = true
+      if (progressQueued) return;
+      progressQueued = true;
       setImmediate(() => {
-        progressQueued = false
-        if (settled) return
+        progressQueued = false;
+        if (settled) return;
         options.onProgress?.({
           status: null,
           signal: null,
@@ -454,24 +701,24 @@ function runLiveAttempt(command, args, options = {}) {
           max_attempts: options.maxAttempts || 1,
           error: null,
           pid: child.pid,
-        })
-      })
+        });
+      });
     }
     function settle(status, signal, error = null) {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      if (dispatchTimer) clearInterval(dispatchTimer)
-      if (turnCompletedTimer) clearTimeout(turnCompletedTimer)
-      endStream(stdoutStream)
-      endStream(stderrStream)
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (dispatchTimer) clearInterval(dispatchTimer);
+      if (turnCompletedTimer) clearTimeout(turnCompletedTimer);
+      endStream(stdoutStream);
+      endStream(stderrStream);
       try {
-        child.stdin?.destroy()
-        child.stdout?.destroy()
-        child.stderr?.destroy()
-        child.removeAllListeners("close")
-        child.removeAllListeners("error")
-        child.unref?.()
+        child.stdin?.destroy();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.removeAllListeners("close");
+        child.removeAllListeners("error");
+        child.unref?.();
       } catch {}
       const summary = {
         status,
@@ -487,258 +734,405 @@ function runLiveAttempt(command, args, options = {}) {
         max_attempts: options.maxAttempts || 1,
         error,
         pid: child.pid,
-      }
-      if (statusPath) writeFile(statusPath, JSON.stringify(summary, null, 2))
-      options.onProgress?.(summary)
-      resolve(summary)
+      };
+      if (statusPath) writeFile(statusPath, JSON.stringify(summary, null, 2));
+      options.onProgress?.(summary);
+      resolve(summary);
     }
-    child.stdout?.on("data", (chunk) => record("stdout", chunk))
-    child.stderr?.on("data", (chunk) => record("stderr", chunk))
-    child.on("error", (error) => settle(null, null, String(error.stack || error.message || error)))
-    child.on("close", (status, signal) => settle(status, signal, timedOut ? `timed out after ${options.timeoutMs || timeoutMs}ms` : null))
-  })
+    child.stdout?.on("data", (chunk) => record("stdout", chunk));
+    child.stderr?.on("data", (chunk) => record("stderr", chunk));
+    child.on("error", (error) =>
+      settle(null, null, String(error.stack || error.message || error)),
+    );
+    child.on("close", (status, signal) =>
+      settle(
+        status,
+        signal,
+        timedOut ? `timed out after ${options.timeoutMs || timeoutMs}ms` : null,
+      ),
+    );
+  });
 }
 
 function ensureReferenceRepo(task) {
-  const referenceCache = path.join(suiteRoot, "reference", task.label)
-  mkdirp(path.dirname(referenceCache))
-  const checkoutRef = task.commit || task.ref || task.tag
+  const referenceCache = path.join(suiteRoot, "reference", task.label);
+  mkdirp(path.dirname(referenceCache));
+  const checkoutRef = task.commit || task.ref || task.tag;
   if (!fs.existsSync(path.join(referenceCache, ".git"))) {
-    fs.rmSync(referenceCache, { recursive: true, force: true })
-    runOk("git", ["clone", "--filter=blob:none", task.repo, referenceCache], { timeoutMs: 20 * 60_000 })
+    fs.rmSync(referenceCache, { recursive: true, force: true });
+    runOk("git", ["clone", "--filter=blob:none", task.repo, referenceCache], {
+      timeoutMs: 20 * 60_000,
+    });
   } else {
-    const current = run("git", ["rev-parse", "HEAD"], { cwd: referenceCache, timeoutMs: 60_000 })
-    if (current.status === 0 && task.commit && current.stdout.trim() === task.commit) {
-      return referenceCache
+    const current = run("git", ["rev-parse", "HEAD"], {
+      cwd: referenceCache,
+      timeoutMs: 60_000,
+    });
+    if (
+      current.status === 0 &&
+      task.commit &&
+      current.stdout.trim() === task.commit
+    ) {
+      return referenceCache;
     }
-    run("git", ["fetch", "--all", "--tags"], { cwd: referenceCache, timeoutMs: 10 * 60_000 })
+    run("git", ["fetch", "--all", "--tags"], {
+      cwd: referenceCache,
+      timeoutMs: 10 * 60_000,
+    });
   }
-  runOk("git", ["checkout", "--force", checkoutRef], { cwd: referenceCache, timeoutMs: 120_000 })
-  const rev = runOk("git", ["rev-parse", "HEAD"], { cwd: referenceCache, timeoutMs: 60_000 }).stdout.trim()
-  if (task.commit) assert.equal(rev, task.commit)
-  else task.commit = rev
-  return referenceCache
+  runOk("git", ["checkout", "--force", checkoutRef], {
+    cwd: referenceCache,
+    timeoutMs: 120_000,
+  });
+  const rev = runOk("git", ["rev-parse", "HEAD"], {
+    cwd: referenceCache,
+    timeoutMs: 60_000,
+  }).stdout.trim();
+  if (task.commit) assert.equal(rev, task.commit);
+  else task.commit = rev;
+  return referenceCache;
 }
 
 function platformInfo() {
-  const arch = process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : process.arch
-  return { os: process.platform, arch }
+  const arch =
+    process.arch === "x64"
+      ? "x64"
+      : process.arch === "arm64"
+        ? "arm64"
+        : process.arch;
+  return { os: process.platform, arch };
 }
 
 async function githubRelease(task) {
-  const cachePath = path.join(suiteRoot, "release-metadata", `${task.label}-${task.tag}.json`)
-  if (fs.existsSync(cachePath)) return JSON.parse(fs.readFileSync(cachePath, "utf8"))
-  const url = `https://api.github.com/repos/${task.owner}/${task.repoName}/releases/tags/${task.tag}`
-  const response = await fetch(url, { headers: { "User-Agent": "tura-source-port-suite" } })
-  if (!response.ok) throw new Error(`failed to fetch ${url}: ${response.status} ${await response.text()}`)
-  const release = await response.json()
-  writeFile(cachePath, JSON.stringify(release, null, 2))
-  return release
+  const cachePath = path.join(
+    suiteRoot,
+    "release-metadata",
+    `${task.label}-${task.tag}.json`,
+  );
+  if (fs.existsSync(cachePath))
+    return JSON.parse(fs.readFileSync(cachePath, "utf8"));
+  const url = `https://api.github.com/repos/${task.owner}/${task.repoName}/releases/tags/${task.tag}`;
+  const response = await fetch(url, {
+    headers: { "User-Agent": "tura-source-port-suite" },
+  });
+  if (!response.ok)
+    throw new Error(
+      `failed to fetch ${url}: ${response.status} ${await response.text()}`,
+    );
+  const release = await response.json();
+  writeFile(cachePath, JSON.stringify(release, null, 2));
+  return release;
 }
 
 function selectAsset(task, assets) {
-  const info = platformInfo()
-  const candidates = task.releaseAssetRules.filter((rule) => rule.os === info.os && (!rule.arch || rule.arch === info.arch))
+  const info = platformInfo();
+  const candidates = task.releaseAssetRules.filter(
+    (rule) => rule.os === info.os && (!rule.arch || rule.arch === info.arch),
+  );
   for (const rule of candidates) {
     const asset = assets.find((item) => {
-      const name = item.name || ""
-      return rule.includes.every((part) => name.includes(part)) && (rule.excludes || []).every((part) => !name.includes(part))
-    })
-    if (asset) return asset
+      const name = item.name || "";
+      return (
+        rule.includes.every((part) => name.includes(part)) &&
+        (rule.excludes || []).every((part) => !name.includes(part))
+      );
+    });
+    if (asset) return asset;
   }
-  throw new Error(`no release asset for ${task.label} on ${info.os}/${info.arch}; assets: ${assets.map((a) => a.name).join(", ")}`)
+  throw new Error(
+    `no release asset for ${task.label} on ${info.os}/${info.arch}; assets: ${assets.map((a) => a.name).join(", ")}`,
+  );
 }
 
 async function downloadFile(url, dest) {
-  if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest
-  mkdirp(path.dirname(dest))
-  const response = await fetch(url, { headers: { "User-Agent": "tura-source-port-suite" } })
-  if (!response.ok) throw new Error(`failed to download ${url}: ${response.status} ${await response.text()}`)
-  const arrayBuffer = await response.arrayBuffer()
-  fs.writeFileSync(dest, Buffer.from(arrayBuffer))
-  return dest
+  if (fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
+  mkdirp(path.dirname(dest));
+  const response = await fetch(url, {
+    headers: { "User-Agent": "tura-source-port-suite" },
+  });
+  if (!response.ok)
+    throw new Error(
+      `failed to download ${url}: ${response.status} ${await response.text()}`,
+    );
+  const arrayBuffer = await response.arrayBuffer();
+  fs.writeFileSync(dest, Buffer.from(arrayBuffer));
+  return dest;
 }
 
 function cleanExtractDir(dir) {
-  fs.rmSync(dir, { recursive: true, force: true })
-  mkdirp(dir)
+  fs.rmSync(dir, { recursive: true, force: true });
+  mkdirp(dir);
 }
 
 function extractArchive(archive, dest) {
-  cleanExtractDir(dest)
-  const lower = archive.toLowerCase()
+  cleanExtractDir(dest);
+  const lower = archive.toLowerCase();
   if (lower.endsWith(".zip")) {
     const ps = [
       "-NoProfile",
       "-Command",
       `Expand-Archive -LiteralPath ${JSON.stringify(archive)} -DestinationPath ${JSON.stringify(dest)} -Force`,
-    ]
-    runOk("powershell", ps, { timeoutMs: 5 * 60_000 })
+    ];
+    runOk("powershell", ps, { timeoutMs: 5 * 60_000 });
   } else if (lower.endsWith(".tar.gz") || lower.endsWith(".tgz")) {
-    runOk("tar", ["-xzf", archive, "-C", dest], { timeoutMs: 5 * 60_000 })
+    runOk("tar", ["-xzf", archive, "-C", dest], { timeoutMs: 5 * 60_000 });
   } else if (lower.endsWith(".tar.xz")) {
-    runOk("tar", ["-xJf", archive, "-C", dest], { timeoutMs: 5 * 60_000 })
+    runOk("tar", ["-xJf", archive, "-C", dest], { timeoutMs: 5 * 60_000 });
   } else {
-    throw new Error(`unsupported archive type: ${archive}`)
+    throw new Error(`unsupported archive type: ${archive}`);
   }
 }
 
 function isExecutableCandidate(file, binaryNames) {
-  const base = path.basename(file).toLowerCase()
-  const names = binaryNames.flatMap((name) => [name.toLowerCase(), `${name.toLowerCase()}.exe`])
-  return names.includes(base)
+  const base = path.basename(file).toLowerCase();
+  const names = binaryNames.flatMap((name) => [
+    name.toLowerCase(),
+    `${name.toLowerCase()}.exe`,
+  ]);
+  return names.includes(base);
 }
 
 function findBinaryInDir(dir, binaryNames) {
-  const stack = [dir]
-  const candidates = []
+  const stack = [dir];
+  const candidates = [];
   while (stack.length > 0) {
-    const current = stack.pop()
+    const current = stack.pop();
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const full = path.join(current, entry.name)
-      if (entry.isDirectory()) stack.push(full)
-      else if (entry.isFile() && isExecutableCandidate(full, binaryNames)) candidates.push(full)
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile() && isExecutableCandidate(full, binaryNames))
+        candidates.push(full);
     }
   }
-  if (candidates.length === 0) throw new Error(`could not find binary ${binaryNames.join("/")} under ${dir}`)
-  candidates.sort((a, b) => a.length - b.length)
-  return candidates[0]
+  if (candidates.length === 0)
+    throw new Error(
+      `could not find binary ${binaryNames.join("/")} under ${dir}`,
+    );
+  candidates.sort((a, b) => a.length - b.length);
+  return candidates[0];
 }
 
 async function ensureReferenceBinary(task) {
-  if (task.reference?.kind === "npm_package") return ensureNpmReferenceCommand(task)
-  if (task.reference?.kind === "pypi_package") return ensurePypiReferenceCommand(task)
-  if (task.reference?.kind === "github_release_jar") return ensureGithubReleaseJarCommand(task)
-  const binName = process.platform === "win32" ? `${task.binaryNames[0]}.exe` : task.binaryNames[0]
-  const stable = path.join(suiteRoot, "binaries", task.label, task.tag, binName)
+  if (task.reference?.kind === "npm_package")
+    return ensureNpmReferenceCommand(task);
+  if (task.reference?.kind === "pypi_package")
+    return ensurePypiReferenceCommand(task);
+  if (task.reference?.kind === "github_release_jar")
+    return ensureGithubReleaseJarCommand(task);
+  const binName =
+    process.platform === "win32"
+      ? `${task.binaryNames[0]}.exe`
+      : task.binaryNames[0];
+  const stable = path.join(
+    suiteRoot,
+    "binaries",
+    task.label,
+    task.tag,
+    binName,
+  );
   if (fs.existsSync(stable)) {
-    smokeReferenceBinary(task, stable)
-    return stable
+    smokeReferenceBinary(task, stable);
+    return stable;
   }
-  const release = await githubRelease(task)
-  const asset = selectAsset(task, release.assets || [])
-  const archive = path.join(suiteRoot, "downloads", task.label, task.tag, asset.name)
-  await downloadFile(asset.browser_download_url, archive)
-  mkdirp(path.dirname(stable))
+  const release = await githubRelease(task);
+  const asset = selectAsset(task, release.assets || []);
+  const archive = path.join(
+    suiteRoot,
+    "downloads",
+    task.label,
+    task.tag,
+    asset.name,
+  );
+  await downloadFile(asset.browser_download_url, archive);
+  mkdirp(path.dirname(stable));
   if (isRawBinaryAsset(archive)) {
-    fs.copyFileSync(archive, stable)
+    fs.copyFileSync(archive, stable);
   } else {
-    const extractDir = path.join(suiteRoot, "extract", task.label, task.tag)
-    extractArchive(archive, extractDir)
-    const found = findBinaryInDir(extractDir, task.binaryNames)
-    fs.copyFileSync(found, stable)
+    const extractDir = path.join(suiteRoot, "extract", task.label, task.tag);
+    extractArchive(archive, extractDir);
+    const found = findBinaryInDir(extractDir, task.binaryNames);
+    fs.copyFileSync(found, stable);
   }
-  if (process.platform !== "win32") fs.chmodSync(stable, 0o755)
-  smokeReferenceBinary(task, stable)
-  return stable
+  if (process.platform !== "win32") fs.chmodSync(stable, 0o755);
+  smokeReferenceBinary(task, stable);
+  return stable;
 }
 
 async function ensureGithubReleaseJarCommand(task) {
-  const jarName = task.reference.jarName || `${task.label}.jar`
-  const stableDir = path.join(suiteRoot, "jars", task.label, task.tag)
-  const jarPath = path.join(stableDir, jarName)
-  const wrapper = path.join(stableDir, process.platform === "win32" ? `${task.label}.cmd` : task.label)
+  const jarName = task.reference.jarName || `${task.label}.jar`;
+  const stableDir = path.join(suiteRoot, "jars", task.label, task.tag);
+  const jarPath = path.join(stableDir, jarName);
+  const wrapper = path.join(
+    stableDir,
+    process.platform === "win32" ? `${task.label}.cmd` : task.label,
+  );
   if (!fs.existsSync(jarPath)) {
-    const release = await githubRelease(task)
-    const asset = selectAsset(task, release.assets || [])
-    const downloaded = path.join(suiteRoot, "downloads", task.label, task.tag, asset.name)
-    await downloadFile(asset.browser_download_url, downloaded)
-    mkdirp(stableDir)
-    fs.copyFileSync(downloaded, jarPath)
+    const release = await githubRelease(task);
+    const asset = selectAsset(task, release.assets || []);
+    const downloaded = path.join(
+      suiteRoot,
+      "downloads",
+      task.label,
+      task.tag,
+      asset.name,
+    );
+    await downloadFile(asset.browser_download_url, downloaded);
+    mkdirp(stableDir);
+    fs.copyFileSync(downloaded, jarPath);
   }
-  writeCommandWrapper(wrapper, "java", ["-jar", jarPath])
-  smokeReferenceBinary(task, wrapper)
-  return wrapper
+  writeCommandWrapper(wrapper, "java", ["-jar", jarPath]);
+  smokeReferenceBinary(task, wrapper);
+  return wrapper;
 }
 
 function isRawBinaryAsset(file) {
-  const lower = file.toLowerCase()
+  const lower = file.toLowerCase();
   return (
     lower.endsWith(".exe") ||
     lower.endsWith(".bin") ||
-    (!lower.endsWith(".zip") && !lower.endsWith(".tar.gz") && !lower.endsWith(".tgz") && !lower.endsWith(".tar.xz"))
-  )
+    (!lower.endsWith(".zip") &&
+      !lower.endsWith(".tar.gz") &&
+      !lower.endsWith(".tgz") &&
+      !lower.endsWith(".tar.xz"))
+  );
 }
 
 function npmPack(packageSpec, destination) {
-  const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js")
+  const npmCli = path.join(
+    path.dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    "npm-cli.js",
+  );
   if (fs.existsSync(npmCli)) {
-    return runOk(process.execPath, [npmCli, "pack", packageSpec, "--pack-destination", destination], { timeoutMs: 5 * 60_000 })
+    return runOk(
+      process.execPath,
+      [npmCli, "pack", packageSpec, "--pack-destination", destination],
+      { timeoutMs: 5 * 60_000 },
+    );
   }
-  return runOk("npm", ["pack", packageSpec, "--pack-destination", destination], { timeoutMs: 5 * 60_000 })
+  return runOk(
+    "npm",
+    ["pack", packageSpec, "--pack-destination", destination],
+    { timeoutMs: 5 * 60_000 },
+  );
 }
 
 function ensureNpmReferenceCommand(task) {
-  const pkg = task.reference.package
-  const version = task.reference.version || task.tag
-  const binPath = task.reference.binPath
-  if (!pkg || !version || !binPath) throw new Error(`npm reference for ${task.label} requires package, version, and binPath`)
-  const stableDir = path.join(suiteRoot, "npm", task.label, version)
-  const packageDir = path.join(stableDir, "package")
-  const wrapper = path.join(stableDir, process.platform === "win32" ? `${task.label}.cmd` : task.label)
+  const pkg = task.reference.package;
+  const version = task.reference.version || task.tag;
+  const binPath = task.reference.binPath;
+  if (!pkg || !version || !binPath)
+    throw new Error(
+      `npm reference for ${task.label} requires package, version, and binPath`,
+    );
+  const stableDir = path.join(suiteRoot, "npm", task.label, version);
+  const packageDir = path.join(stableDir, "package");
+  const wrapper = path.join(
+    stableDir,
+    process.platform === "win32" ? `${task.label}.cmd` : task.label,
+  );
   if (!fs.existsSync(path.join(packageDir, binPath))) {
-    fs.rmSync(stableDir, { recursive: true, force: true })
-    mkdirp(stableDir)
-    const packDir = path.join(suiteRoot, "downloads", "npm", task.label, version)
-    fs.rmSync(packDir, { recursive: true, force: true })
-    mkdirp(packDir)
-    const pack = npmPack(`${pkg}@${version}`, packDir)
-    const tgz = pack.stdout.trim().split(/\r?\n/).pop()
-    extractArchive(path.join(packDir, tgz), stableDir)
+    fs.rmSync(stableDir, { recursive: true, force: true });
+    mkdirp(stableDir);
+    const packDir = path.join(
+      suiteRoot,
+      "downloads",
+      "npm",
+      task.label,
+      version,
+    );
+    fs.rmSync(packDir, { recursive: true, force: true });
+    mkdirp(packDir);
+    const pack = npmPack(`${pkg}@${version}`, packDir);
+    const tgz = pack.stdout.trim().split(/\r?\n/).pop();
+    extractArchive(path.join(packDir, tgz), stableDir);
   }
-  writeCommandWrapper(wrapper, "node", [path.join(packageDir, binPath)])
-  smokeReferenceBinary(task, wrapper)
-  return wrapper
+  writeCommandWrapper(wrapper, "node", [path.join(packageDir, binPath)]);
+  smokeReferenceBinary(task, wrapper);
+  return wrapper;
 }
 
 function ensurePypiReferenceCommand(task) {
-  const pkg = task.reference.package
-  const version = task.reference.version || task.tag
-  const command = task.reference.command || task.label
-  if (!pkg || !version) throw new Error(`PyPI reference for ${task.label} requires package and version`)
-  const stableDir = path.join(suiteRoot, "pypi", task.label, version)
-  const venvDir = path.join(stableDir, "venv")
-  const script = path.join(venvDir, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? `${command}.exe` : command)
+  const pkg = task.reference.package;
+  const version = task.reference.version || task.tag;
+  const command = task.reference.command || task.label;
+  if (!pkg || !version)
+    throw new Error(
+      `PyPI reference for ${task.label} requires package and version`,
+    );
+  const stableDir = path.join(suiteRoot, "pypi", task.label, version);
+  const venvDir = path.join(stableDir, "venv");
+  const script = path.join(
+    venvDir,
+    process.platform === "win32" ? "Scripts" : "bin",
+    process.platform === "win32" ? `${command}.exe` : command,
+  );
   if (!fs.existsSync(script)) {
-    fs.rmSync(stableDir, { recursive: true, force: true })
-    mkdirp(stableDir)
-    runOk(process.env.PYTHON || "python", ["-m", "venv", venvDir], { timeoutMs: 5 * 60_000 })
-    const pip = path.join(venvDir, process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "pip.exe" : "pip")
-    runOk(pip, ["install", `${pkg}==${version}`], { timeoutMs: 10 * 60_000 })
+    fs.rmSync(stableDir, { recursive: true, force: true });
+    mkdirp(stableDir);
+    runOk(process.env.PYTHON || "python", ["-m", "venv", venvDir], {
+      timeoutMs: 5 * 60_000,
+    });
+    const pip = path.join(
+      venvDir,
+      process.platform === "win32" ? "Scripts" : "bin",
+      process.platform === "win32" ? "pip.exe" : "pip",
+    );
+    runOk(pip, ["install", `${pkg}==${version}`], { timeoutMs: 10 * 60_000 });
   }
-  smokeReferenceBinary(task, script)
-  return script
+  smokeReferenceBinary(task, script);
+  return script;
 }
 
 function writeCommandWrapper(wrapper, command, args) {
-  mkdirp(path.dirname(wrapper))
+  mkdirp(path.dirname(wrapper));
   if (process.platform === "win32") {
-    const quoted = [command, ...args].map((item) => `"${String(item).replace(/"/g, '""')}"`).join(" ")
-    writeFile(wrapper, `@echo off\r\n${quoted} %*\r\n`)
+    const quoted = [command, ...args]
+      .map((item) => `"${String(item).replace(/"/g, '""')}"`)
+      .join(" ");
+    writeFile(wrapper, `@echo off\r\n${quoted} %*\r\n`);
   } else {
-    const quoted = [command, ...args].map((item) => `'${String(item).replace(/'/g, "'\\''")}'`).join(" ")
-    writeFile(wrapper, `#!/usr/bin/env sh\nexec ${quoted} "$@"\n`)
-    fs.chmodSync(wrapper, 0o755)
+    const quoted = [command, ...args]
+      .map((item) => `'${String(item).replace(/'/g, "'\\''")}'`)
+      .join(" ");
+    writeFile(wrapper, `#!/usr/bin/env sh\nexec ${quoted} "$@"\n`);
+    fs.chmodSync(wrapper, 0o755);
   }
 }
 
 function smokeReferenceBinary(task, binary) {
-  assert(fs.existsSync(binary), `missing reference binary for ${task.label}: ${binary}`)
-  const smokeArgs = task.reference?.smokeArgs || ["--version"]
-  const result = run(binary, smokeArgs, { timeoutMs: 60_000, maxBuffer: 16 * 1024 * 1024 })
+  assert(
+    fs.existsSync(binary),
+    `missing reference binary for ${task.label}: ${binary}`,
+  );
+  const smokeArgs = task.reference?.smokeArgs || ["--version"];
+  const result = run(binary, smokeArgs, {
+    timeoutMs: 60_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
   if (result.status !== 0) {
-    throw new Error(`reference binary smoke failed for ${task.label}: ${binary}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}\nerror:${result.error || ""}`)
+    throw new Error(
+      `reference binary smoke failed for ${task.label}: ${binary}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}\nerror:${result.error || ""}`,
+    );
   }
-  return result
+  return result;
 }
 
 function sourcePortPrompt(task) {
-  const sourceLanguage = task.sourceLanguage || "Rust"
-  const targetLanguage = task.targetLanguage || "Python"
-  const sourceDir = task.sourceDir || "rust-reference"
-  const tag = task.tag || task.ref || ""
-  const commit = task.commit || task.ref || "resolved from the configured tag during benchmark setup"
-  const commands = Array.isArray(task.commands) && task.commands.length > 0 ? task.commands.join(", ") : "the documented CLI behavior"
+  const sourceLanguage = task.sourceLanguage || "Rust";
+  const targetLanguage = task.targetLanguage || "Python";
+  const sourceDir = task.sourceDir || "rust-reference";
+  const tag = task.tag || task.ref || "";
+  const commit =
+    task.commit ||
+    task.ref ||
+    "resolved from the configured tag during benchmark setup";
+  const commands =
+    Array.isArray(task.commands) && task.commands.length > 0
+      ? task.commands.join(", ")
+      : "the documented CLI behavior";
   return `You are in a benchmark workspace containing a ${sourceLanguage} reference application at ./${sourceDir} and an official reference CLI path recorded in ./REFERENCE_BINARY.txt.
 
 Goal:
@@ -782,7 +1176,7 @@ Equivalence requirements:
 - If the official binary prints nothing, your program must print nothing.
 - If the official binary writes to stderr, your program must write to stderr.
 
-Do not ask the user questions. Infer from source and official CLI behavior.`
+Do not ask the user questions. Infer from source and official CLI behavior.`;
 }
 
 function harnessTemplate() {
@@ -1834,56 +2228,94 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
-`
+`;
 }
 
 function writeHarness(task) {
-  const harnessPath = path.join(runRoot, "harness", "evaluate_source_port.py")
-  writeFile(harnessPath, harnessTemplate())
-  return harnessPath
+  const harnessPath = path.join(runRoot, "harness", "evaluate_source_port.py");
+  writeFile(harnessPath, harnessTemplate());
+  return harnessPath;
 }
 
 async function prepareWorkspace(agentDir, task) {
-  const workspace = path.join(agentDir, "workspace")
-  validateWorkspaceGitPath(workspace)
-  fs.rmSync(workspace, { recursive: true, force: true })
-  mkdirp(workspace)
-  const reference = ensureReferenceRepo(task)
-  const binary = await ensureReferenceBinary(task)
-  const sourceDir = task.sourceDir || "rust-reference"
-  copyDir(reference, path.join(workspace, sourceDir))
-  fs.rmSync(path.join(workspace, sourceDir, ".git"), { recursive: true, force: true })
-  writeFile(path.join(workspace, ".gitignore"), `${sourceDir}/\nharness/\n__pycache__/\n*.pyc\n`)
-  writeFile(path.join(workspace, "PYTHON_PORT_TASK.md"), sourcePortPrompt(task))
-  writeFile(path.join(workspace, "REFERENCE_BINARY.txt"), binary)
+  const workspace = path.join(agentDir, "workspace");
+  validateWorkspaceGitPath(workspace);
+  fs.rmSync(workspace, { recursive: true, force: true });
+  mkdirp(workspace);
+  const reference = ensureReferenceRepo(task);
+  const binary = await ensureReferenceBinary(task);
+  const sourceDir = task.sourceDir || "rust-reference";
+  copyDir(reference, path.join(workspace, sourceDir));
+  fs.rmSync(path.join(workspace, sourceDir, ".git"), {
+    recursive: true,
+    force: true,
+  });
+  writeFile(
+    path.join(workspace, ".gitignore"),
+    `${sourceDir}/\nharness/\n__pycache__/\n*.pyc\n`,
+  );
+  writeFile(
+    path.join(workspace, "PYTHON_PORT_TASK.md"),
+    sourcePortPrompt(task),
+  );
+  writeFile(path.join(workspace, "REFERENCE_BINARY.txt"), binary);
   if (Array.isArray(task.cases) && task.cases.length > 0) {
-    writeFile(path.join(workspace, "SOURCE_PORT_CASES.json"), JSON.stringify({ cases: task.cases, coverage: task.coverage || {} }, null, 2))
+    writeFile(
+      path.join(workspace, "SOURCE_PORT_CASES.json"),
+      JSON.stringify(
+        { cases: task.cases, coverage: task.coverage || {} },
+        null,
+        2,
+      ),
+    );
   }
-  writeFile(path.join(workspace, "compile.sh"), "#!/usr/bin/env sh\nset -eu\n[ -f executable ]\n")
-  const initialFiles = [".gitignore", "PYTHON_PORT_TASK.md", "REFERENCE_BINARY.txt", "compile.sh"]
-  if (fs.existsSync(path.join(workspace, "SOURCE_PORT_CASES.json"))) initialFiles.push("SOURCE_PORT_CASES.json")
-  const gitSetup = setupWorkspaceGit(workspace, initialFiles, "benchmark source-port fixture")
-  return { workspace, reference_path: reference, reference_binary: binary, prompt_path: path.join(workspace, "PYTHON_PORT_TASK.md"), git_setup: gitSetup, error: null }
+  writeFile(
+    path.join(workspace, "compile.sh"),
+    "#!/usr/bin/env sh\nset -eu\n[ -f executable ]\n",
+  );
+  const initialFiles = [
+    ".gitignore",
+    "PYTHON_PORT_TASK.md",
+    "REFERENCE_BINARY.txt",
+    "compile.sh",
+  ];
+  if (fs.existsSync(path.join(workspace, "SOURCE_PORT_CASES.json")))
+    initialFiles.push("SOURCE_PORT_CASES.json");
+  const gitSetup = setupWorkspaceGit(
+    workspace,
+    initialFiles,
+    "benchmark source-port fixture",
+  );
+  return {
+    workspace,
+    reference_path: reference,
+    reference_binary: binary,
+    prompt_path: path.join(workspace, "PYTHON_PORT_TASK.md"),
+    git_setup: gitSetup,
+    error: null,
+  };
 }
 
 function serviceTierConfigArgs() {
-  const tier = String(serviceTier || "").trim()
-  if (!tier || tier === "default" || tier === "none" || tier === "off") return []
-  return ["-c", `service_tier="${tier}"`]
+  const tier = String(serviceTier || "").trim();
+  if (!tier || tier === "default" || tier === "none" || tier === "off")
+    return [];
+  return ["-c", `service_tier="${tier}"`];
 }
 
 function turaServiceTierConfigArgs() {
-  const tier = String(serviceTier || "").trim()
-  if (!tier || tier === "default" || tier === "none" || tier === "off") return []
-  return tier === "priority" ? ["-p"] : []
+  const tier = String(serviceTier || "").trim();
+  if (!tier || tier === "default" || tier === "none" || tier === "off")
+    return [];
+  return tier === "priority" ? ["-p"] : [];
 }
 
 function escapeConfigPath(value) {
-  return String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"")
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function contextArchiveDir(agentDir) {
-  return path.join(agentDir, "context-and-calls")
+  return path.join(agentDir, "context-and-calls");
 }
 
 function safeArchiveEnv(env) {
@@ -1897,21 +2329,24 @@ function safeArchiveEnv(env) {
     "TURA_FORCE_EXECUTE_TOOLS_PLANNING",
     "TURA_PROJECT_ROOT",
     "TURA_SESSION_REASONING_EFFORT",
-  ])
-  const out = {}
+  ]);
+  const out = {};
   for (const [key, value] of Object.entries(env || {})) {
-    if (allowed.has(key)) out[key] = value
+    if (allowed.has(key)) out[key] = value;
   }
-  return out
+  return out;
 }
 
 function writeAgentInvocationArchive(agentDir, details) {
-  const archive = contextArchiveDir(agentDir)
-  mkdirp(archive)
-  writeFile(path.join(archive, "input-prompt.md"), details.input || "")
-  const taskPromptPath = path.join(details.workspace, "PYTHON_PORT_TASK.md")
+  const archive = contextArchiveDir(agentDir);
+  mkdirp(archive);
+  writeFile(path.join(archive, "input-prompt.md"), details.input || "");
+  const taskPromptPath = path.join(details.workspace, "PYTHON_PORT_TASK.md");
   if (fs.existsSync(taskPromptPath)) {
-    writeFile(path.join(archive, "workspace-PYTHON_PORT_TASK.md"), fs.readFileSync(taskPromptPath, "utf8"))
+    writeFile(
+      path.join(archive, "workspace-PYTHON_PORT_TASK.md"),
+      fs.readFileSync(taskPromptPath, "utf8"),
+    );
   }
   writeJson(path.join(archive, "invocation.json"), {
     agent: details.agent,
@@ -1928,63 +2363,92 @@ function writeAgentInvocationArchive(agentDir, details) {
     timeout_ms: timeoutMs,
     codex_goals_enabled: codexGoalsEnabled,
     tura_goal_enabled: turaGoalEnabled,
-    planning_override: planningOverride === null ? "auto" : (planningOverride ? "on" : "off"),
+    planning_override:
+      planningOverride === null ? "auto" : planningOverride ? "on" : "off",
     notes: details.notes || [],
-  })
+  });
 }
 
 function codexHomeForAgent(agentDir, label) {
-  const defaultCodexHome = process.env.CODEX_HOME || path.join(homeDir, ".codex")
-  const explicitHome = process.env[codexEnvName("COMMAND_RUN_AGENT_CODEX_HOME", label)]
-    || process.env.COMMAND_RUN_AGENT_CODEX_HOME
-    || (label === "codex-main" || label === "codex-cli" ? process.env.COMMAND_RUN_AGENT_CODEX_MAIN_HOME : "")
-  if (explicitHome) return explicitHome
-  if (!truthy(process.env.COMMAND_RUN_AGENT_CODEX_CLEAN_HOME || "0")) return process.env.CODEX_HOME || undefined
-  const cleanHome = path.join(agentDir, "codex-home-clean")
-  mkdirp(cleanHome)
-  const authSource = path.join(defaultCodexHome, "auth.json")
-  if (fs.existsSync(authSource)) fs.copyFileSync(authSource, path.join(cleanHome, "auth.json"))
-  return cleanHome
+  const defaultCodexHome =
+    process.env.CODEX_HOME || path.join(homeDir, ".codex");
+  const explicitHome =
+    process.env[codexEnvName("COMMAND_RUN_AGENT_CODEX_HOME", label)] ||
+    process.env.COMMAND_RUN_AGENT_CODEX_HOME ||
+    (label === "codex-main" || label === "codex-cli"
+      ? process.env.COMMAND_RUN_AGENT_CODEX_MAIN_HOME
+      : "");
+  if (explicitHome) return explicitHome;
+  if (!truthy(process.env.COMMAND_RUN_AGENT_CODEX_CLEAN_HOME || "0"))
+    return process.env.CODEX_HOME || undefined;
+  const cleanHome = path.join(agentDir, "codex-home-clean");
+  mkdirp(cleanHome);
+  const authSource = path.join(defaultCodexHome, "auth.json");
+  if (fs.existsSync(authSource))
+    fs.copyFileSync(authSource, path.join(cleanHome, "auth.json"));
+  return cleanHome;
 }
 
 function codexEnvName(prefix, label) {
-  const suffix = String(label || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "")
-  return suffix ? `${prefix}_${suffix}` : prefix
+  const suffix = String(label || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return suffix ? `${prefix}_${suffix}` : prefix;
 }
 
 function codexCliConfigOverrides(label) {
   return [
     ...parseCodexCliConfig(process.env.COMMAND_RUN_AGENT_CODEX_CLI_CONFIG),
-    ...parseCodexCliConfig(process.env[codexEnvName("COMMAND_RUN_AGENT_CODEX_CLI_CONFIG", label)]),
-  ]
+    ...parseCodexCliConfig(
+      process.env[codexEnvName("COMMAND_RUN_AGENT_CODEX_CLI_CONFIG", label)],
+    ),
+  ];
 }
 
 function parseCodexCliConfig(value) {
-  if (!value) return []
-  const text = String(value).trim()
-  if (!text) return []
+  if (!value) return [];
+  const text = String(value).trim();
+  if (!text) return [];
   try {
-    const parsed = JSON.parse(text)
-    if (Array.isArray(parsed)) return parsed.map(String).map((item) => item.trim()).filter(Boolean)
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed))
+      return parsed
+        .map(String)
+        .map((item) => item.trim())
+        .filter(Boolean);
     if (parsed && typeof parsed === "object") {
-      return Object.entries(parsed).map(([key, item]) => `${key}=${tomlLiteral(item)}`)
+      return Object.entries(parsed).map(
+        ([key, item]) => `${key}=${tomlLiteral(item)}`,
+      );
     }
   } catch {}
-  return text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+  return text
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function tomlLiteral(value) {
-  if (typeof value === "boolean") return value ? "true" : "false"
-  if (typeof value === "number" && Number.isFinite(value)) return String(value)
-  if (Array.isArray(value)) return `[${value.map(tomlLiteral).join(", ")}]`
-  return JSON.stringify(String(value ?? ""))
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) return `[${value.map(tomlLiteral).join(", ")}]`;
+  return JSON.stringify(String(value ?? ""));
 }
 
-async function runCodexLike(workspace, agentDir, prompt, onProgress, codexExe, label) {
-  assert(fs.existsSync(codexExe), `missing ${label} exe: ${codexExe}`)
-  const codexLogDir = path.join(agentDir, "codex-log")
-  const codexHome = codexHomeForAgent(agentDir, label)
-  const command = codexExe
+async function runCodexLike(
+  workspace,
+  agentDir,
+  prompt,
+  onProgress,
+  codexExe,
+  label,
+) {
+  assert(fs.existsSync(codexExe), `missing ${label} exe: ${codexExe}`);
+  const codexLogDir = path.join(agentDir, "codex-log");
+  const codexHome = codexHomeForAgent(agentDir, label);
+  const command = codexExe;
   const args = [
     "exec",
     "--json",
@@ -2001,12 +2465,12 @@ async function runCodexLike(workspace, agentDir, prompt, onProgress, codexExe, l
     `log_dir="${escapeConfigPath(codexLogDir)}"`,
     ...serviceTierConfigArgs(),
     ...codexCliConfigOverrides(label).flatMap((override) => ["-c", override]),
-  ]
+  ];
   const env = {
     COMMAND_RUN_AGENT_CONTEXT_ARCHIVE: "1",
     CODEX_LOG_DIR: codexLogDir,
     ...(codexHome ? { CODEX_HOME: codexHome } : {}),
-  }
+  };
   writeAgentInvocationArchive(agentDir, {
     agent: label,
     workspace,
@@ -2019,51 +2483,81 @@ async function runCodexLike(workspace, agentDir, prompt, onProgress, codexExe, l
     notes: [
       "Codex exec does not expose Tura provider LOG_PATH. The harness saves stdin prompt, visible JSONL events, configured log_dir, and any rollout files discoverable from events.",
     ],
-  })
+  });
   return runLive(command, args, {
     cwd: workspace,
     input: prompt,
     timeoutMs,
     resolveOnTurnCompleted: true,
-    dispatchWatchdogMs: Number(process.env.COMMAND_RUN_AGENT_DISPATCH_WATCHDOG_MS || 45_000),
+    dispatchWatchdogMs: Number(
+      process.env.COMMAND_RUN_AGENT_DISPATCH_WATCHDOG_MS || 45_000,
+    ),
     maxAttempts: Number(process.env.COMMAND_RUN_AGENT_TURA_ATTEMPTS || 3),
     stdoutPath: path.join(agentDir, "stdout.jsonl"),
     stderrPath: path.join(agentDir, "stderr.log"),
     statusPath: path.join(agentDir, "status.json"),
     onProgress,
     env,
-  })
+  });
 }
 
 async function runCodexMain(workspace, agentDir, prompt, onProgress) {
-  return runCodexLike(workspace, agentDir, prompt, onProgress, codexMainExe, "codex-main")
+  return runCodexLike(
+    workspace,
+    agentDir,
+    prompt,
+    onProgress,
+    codexMainExe,
+    "codex-main",
+  );
 }
 
 async function runCodexCli(workspace, agentDir, prompt, onProgress) {
-  return runCodexLike(workspace, agentDir, prompt, onProgress, codexMainExe, "codex-cli")
+  return runCodexLike(
+    workspace,
+    agentDir,
+    prompt,
+    onProgress,
+    codexMainExe,
+    "codex-cli",
+  );
 }
 
 async function runCodexDocuments(workspace, agentDir, prompt, onProgress) {
-  return runCodexLike(workspace, agentDir, prompt, onProgress, codexDocumentsExe, "codex-documents")
+  return runCodexLike(
+    workspace,
+    agentDir,
+    prompt,
+    onProgress,
+    codexDocumentsExe,
+    "codex-documents",
+  );
 }
 
 async function runCodexPonytail(workspace, agentDir, prompt, onProgress) {
-  return runCodexLike(workspace, agentDir, prompt, onProgress, codexDocumentsExe, "codex-ponytail")
+  return runCodexLike(
+    workspace,
+    agentDir,
+    prompt,
+    onProgress,
+    codexDocumentsExe,
+    "codex-ponytail",
+  );
 }
 
 async function runTuraAgent(workspace, agentDir, prompt, agentId, onProgress) {
   assert(
     !truthy(process.env.COMMAND_RUN_AGENT_TURA_EMBEDDED || "0"),
     "Tura embedded mode is prohibited for source-port benchmarks; use the normal tura_exec + tura_router path",
-  )
-  assert(fs.existsSync(turaExe), `missing Tura exe: ${turaExe}`)
-  const launchId = `source-port-${agentId}-${process.pid}-${Date.now()}`
-  const sessionCwd = prepareTuraSessionCwd(launchId)
-  const providerLogPath = path.join(agentDir, "provider-log")
-  snapshotTuraInternalPrompt(agentDir, agentId)
-  snapshotTuraAgentConfig(agentDir, agentId)
-  const planningMode = planningOverride
-  const command = turaExe
+  );
+  assert(fs.existsSync(turaExe), `missing Tura exe: ${turaExe}`);
+  const launchId = `source-port-${agentId}-${process.pid}-${Date.now()}`;
+  const sessionCwd = prepareTuraSessionCwd(launchId);
+  const providerLogPath = path.join(agentDir, "provider-log");
+  snapshotTuraInternalPrompt(agentDir, agentId);
+  snapshotTuraAgentConfig(agentDir, agentId);
+  const planningMode = planningOverride;
+  const command = turaExe;
   const args = [
     "exec",
     "--json",
@@ -2077,16 +2571,19 @@ async function runTuraAgent(workspace, agentDir, prompt, agentId, onProgress) {
     "-m",
     turaModel,
     ...turaServiceTierConfigArgs(),
-    ...(planningMode !== null ? ["--planning", planningMode ? "on" : "off"] : []),
+    ...(planningMode !== null
+      ? ["--planning", planningMode ? "on" : "off"]
+      : []),
     "--model-reasoning-effort",
     reasoning,
     "--cwd",
     workspace,
-  ]
+  ];
   const env = {
     TURA_PROJECT_ROOT: repoRoot,
     LOG_PATH: providerLogPath,
-    TURA_COMMAND_RUN_SHELL: process.env.COMMAND_RUN_AGENT_TURA_SHELL || "shell_command",
+    TURA_COMMAND_RUN_SHELL:
+      process.env.COMMAND_RUN_AGENT_TURA_SHELL || "shell_command",
     TURA_COMMAND_RUN_STRICT_JSON: turaStrictJson,
     TURA_SESSION_REASONING_EFFORT: reasoning,
     ...optionalEnv([
@@ -2098,10 +2595,12 @@ async function runTuraAgent(workspace, agentDir, prompt, agentId, onProgress) {
       "TURA_ROUTER_STDERR_LOG",
       "TURA_DEBUG_RUNTIME",
     ]),
-    ...(planningMode === true ? { TURA_FORCE_EXECUTE_TOOLS_PLANNING: "1" } : {}),
+    ...(planningMode === true
+      ? { TURA_FORCE_EXECUTE_TOOLS_PLANNING: "1" }
+      : {}),
     COMMAND_RUN_AGENT_TIMEOUT_MS: String(timeoutMs),
     COMMAND_RUN_AGENT_CONTEXT_ARCHIVE: "1",
-  }
+  };
   writeAgentInvocationArchive(agentDir, {
     agent: path.basename(agentDir).replace(/-\d+$/, ""),
     workspace,
@@ -2116,7 +2615,7 @@ async function runTuraAgent(workspace, agentDir, prompt, agentId, onProgress) {
     notes: [
       "Tura provider calls are expected under provider-log with full request.messages and response payloads.",
     ],
-  })
+  });
   return runLive(command, args, {
     cwd: sessionCwd,
     input: prompt,
@@ -2127,7 +2626,7 @@ async function runTuraAgent(workspace, agentDir, prompt, agentId, onProgress) {
     statusPath: path.join(agentDir, "status.json"),
     onProgress,
     env,
-  })
+  });
 }
 
 function optionalEnv(keys) {
@@ -2135,15 +2634,23 @@ function optionalEnv(keys) {
     keys
       .map((key) => [key, process.env[key]])
       .filter(([, value]) => value != null && String(value).trim() !== ""),
-  )
+  );
 }
 
-async function runExternalCliAgent(workspace, agentDir, prompt, agentId, onProgress) {
-  const isClaude = agentId === "claude-code"
-  const command = isClaude ? claudeExe : piExe
+async function runExternalCliAgent(
+  workspace,
+  agentDir,
+  prompt,
+  agentId,
+  onProgress,
+) {
+  const isClaude = agentId === "claude-code";
+  const command = isClaude ? claudeExe : piExe;
   const args = isClaude
-    ? claudeCodeArgs(prompt, { model: process.env.COMMAND_RUN_AGENT_CLAUDE_MODEL || "opus" })
-    : piAgentArgs(prompt)
+    ? claudeCodeArgs(prompt, {
+        model: process.env.COMMAND_RUN_AGENT_CLAUDE_MODEL || "opus",
+      })
+    : piAgentArgs(prompt);
   writeAgentInvocationArchive(agentDir, {
     agent: agentId,
     workspace,
@@ -2153,8 +2660,10 @@ async function runExternalCliAgent(workspace, agentDir, prompt, agentId, onProgr
     env: {},
     input: prompt,
     context_kind: `${agentId}-prompt-arg`,
-    notes: [`${agentId} is launched through its CLI and scored only by the shared source-port harness.`],
-  })
+    notes: [
+      `${agentId} is launched through its CLI and scored only by the shared source-port harness.`,
+    ],
+  });
   return runLive(command, args, {
     cwd: workspace,
     timeoutMs,
@@ -2162,82 +2671,143 @@ async function runExternalCliAgent(workspace, agentDir, prompt, agentId, onProgr
     stderrPath: path.join(agentDir, "stderr.log"),
     statusPath: path.join(agentDir, "status.json"),
     onProgress,
-  })
+  });
 }
 
 function snapshotTuraInternalPrompt(agentDir, agentPrompt) {
-  const promptPath = path.join(repoRoot, "agents", "src", agentPrompt, "prompt.md")
-  if (!fs.existsSync(promptPath)) return null
-  const content = fs.readFileSync(promptPath, "utf8")
-  const snapshotPath = path.join(agentDir, "tura-internal-prompt.md")
-  writeFile(snapshotPath, content)
-  return { prompt_path: promptPath, snapshot_path: snapshotPath, sha256: crypto.createHash("sha256").update(content).digest("hex") }
+  const promptPath = path.join(
+    repoRoot,
+    "agents",
+    "src",
+    agentPrompt,
+    "prompt.md",
+  );
+  if (!fs.existsSync(promptPath)) return null;
+  const content = fs.readFileSync(promptPath, "utf8");
+  const snapshotPath = path.join(agentDir, "tura-internal-prompt.md");
+  writeFile(snapshotPath, content);
+  return {
+    prompt_path: promptPath,
+    snapshot_path: snapshotPath,
+    sha256: crypto.createHash("sha256").update(content).digest("hex"),
+  };
 }
 
 function snapshotTuraAgentConfig(agentDir, agentPrompt) {
-  const configPath = path.join(repoRoot, "agents", "src", agentPrompt, "agent_config.json")
-  if (!fs.existsSync(configPath)) return null
-  const content = fs.readFileSync(configPath, "utf8")
-  const snapshotPath = path.join(agentDir, "tura-agent-config.json")
-  writeFile(snapshotPath, content)
-  return { config_path: configPath, snapshot_path: snapshotPath, sha256: crypto.createHash("sha256").update(content).digest("hex") }
+  const configPath = path.join(
+    repoRoot,
+    "agents",
+    "src",
+    agentPrompt,
+    "agent_config.json",
+  );
+  if (!fs.existsSync(configPath)) return null;
+  const content = fs.readFileSync(configPath, "utf8");
+  const snapshotPath = path.join(agentDir, "tura-agent-config.json");
+  writeFile(snapshotPath, content);
+  return {
+    config_path: configPath,
+    snapshot_path: snapshotPath,
+    sha256: crypto.createHash("sha256").update(content).digest("hex"),
+  };
 }
 
 function turaCapabilityInfo(agentPrompt, agentDir) {
-  if (!agentPrompt) return null
-  const configPath = path.join(repoRoot, "agents", "src", agentPrompt, "agent_config.json")
-  let capabilities = []
+  if (!agentPrompt) return null;
+  const configPath = path.join(
+    repoRoot,
+    "agents",
+    "src",
+    agentPrompt,
+    "agent_config.json",
+  );
+  let capabilities = [];
   if (fs.existsSync(configPath)) {
-    const config = JSON.parse(fs.readFileSync(configPath, "utf8"))
-    capabilities = (config.agent_capabilities || []).map((item) => item.capability_name).filter(Boolean)
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    capabilities = (config.agent_capabilities || [])
+      .map((item) => item.capability_name)
+      .filter(Boolean);
   }
-  const planningMode = planningOverride ?? path.basename(agentDir).includes("planning")
+  const planningMode =
+    planningOverride ?? path.basename(agentDir).includes("planning");
   return {
     agent_prompt: agentPrompt,
     config_path: configPath,
     configured_capabilities: capabilities,
     config_has_task_status: capabilities.includes("task_status"),
     config_has_planning: capabilities.includes("planning"),
-    planning_override: planningOverride === null ? "auto" : (planningOverride ? "on" : "off"),
+    planning_override:
+      planningOverride === null ? "auto" : planningOverride ? "on" : "off",
     planning_cli_override_effective: planningMode,
-    effective_planning_available: planningMode || capabilities.includes("planning"),
-  }
+    effective_planning_available:
+      planningMode || capabilities.includes("planning"),
+  };
 }
 
 function prepareTuraSessionCwd(sessionId) {
-  const safe = sessionId.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80)
-  const dir = path.join(suiteRoot, "tura-session-cwd", safe)
-  mkdirp(path.join(dir, "crates", "session_log"))
-  writeFile(path.join(dir, "Cargo.toml"), "[workspace]\n")
-  return dir
+  const safe = sessionId.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 80);
+  const dir = path.join(suiteRoot, "tura-session-cwd", safe);
+  mkdirp(path.join(dir, "crates", "session_log"));
+  writeFile(path.join(dir, "Cargo.toml"), "[workspace]\n");
+  return dir;
 }
 
 function parseJsonl(text) {
-  return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => {
-    try { return JSON.parse(line) } catch { return null }
-  }).filter(Boolean)
+  return String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
 }
 
 function addUsage(totals, usage) {
-  totals.usage_events += 1
-  totals.input_tokens += Number(usage.input_tokens || usage.prompt_tokens || 0)
-  totals.output_tokens += Number(usage.output_tokens || usage.completion_tokens || 0)
-  totals.reasoning_tokens += Number(usage.reasoning_tokens || usage.reasoning_output_tokens || usage.output_tokens_details?.reasoning_tokens || 0)
-  totals.cached_input_tokens += Number(usage.cached_input_tokens || usage.input_tokens_details?.cached_tokens || usage.prompt_tokens_details?.cached_tokens || 0)
-  totals.cache_write_tokens += Number(usage.cache_write_tokens || usage.input_tokens_details?.cache_write_tokens || usage.prompt_tokens_details?.cache_creation_tokens || 0)
-  totals.total_tokens += Number(usage.total_tokens || 0)
-  totals.latency_ms += Number(usage.latency_ms || 0)
+  totals.usage_events += 1;
+  totals.input_tokens += Number(usage.input_tokens || usage.prompt_tokens || 0);
+  totals.output_tokens += Number(
+    usage.output_tokens || usage.completion_tokens || 0,
+  );
+  totals.reasoning_tokens += Number(
+    usage.reasoning_tokens ||
+      usage.reasoning_output_tokens ||
+      usage.output_tokens_details?.reasoning_tokens ||
+      0,
+  );
+  totals.cached_input_tokens += Number(
+    usage.cached_input_tokens ||
+      usage.input_tokens_details?.cached_tokens ||
+      usage.prompt_tokens_details?.cached_tokens ||
+      0,
+  );
+  totals.cache_write_tokens += Number(
+    usage.cache_write_tokens ||
+      usage.input_tokens_details?.cache_write_tokens ||
+      usage.prompt_tokens_details?.cache_creation_tokens ||
+      0,
+  );
+  totals.total_tokens += Number(usage.total_tokens || 0);
+  totals.latency_ms += Number(usage.latency_ms || 0);
 }
 
 function usageFromJsonl(stdout) {
-  const codexUsage = codexTokenUsageReport(stdout)
-  if (codexUsage.raw_event_count > 0) return codexUsage.totals
-  const totals = emptyUsage()
+  const codexUsage = codexTokenUsageReport(stdout);
+  if (codexUsage.raw_event_count > 0) return codexUsage.totals;
+  const totals = emptyUsage();
   for (const event of parseJsonl(stdout)) {
-    const usage = event.usage || event.message?.usage || event.payload?.info?.last_token_usage || (event.type === "runtime_usage" ? event.usage : null)
-    if (usage) addUsage(totals, usage)
+    const usage =
+      event.usage ||
+      event.message?.usage ||
+      event.payload?.info?.last_token_usage ||
+      (event.type === "runtime_usage" ? event.usage : null);
+    if (usage) addUsage(totals, usage);
   }
-  return totals
+  return totals;
 }
 
 function emptyUsage() {
@@ -2250,34 +2820,38 @@ function emptyUsage() {
     cache_write_tokens: 0,
     total_tokens: 0,
     latency_ms: 0,
-  }
+  };
 }
 
 function jsonFilesUnder(root) {
-  if (!fs.existsSync(root)) return []
-  const files = []
-  const stack = [root]
+  if (!fs.existsSync(root)) return [];
+  const files = [];
+  const stack = [root];
   while (stack.length > 0) {
-    const current = stack.pop()
+    const current = stack.pop();
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const full = path.join(current, entry.name)
-      if (entry.isDirectory()) stack.push(full)
-      else if (entry.isFile() && entry.name.endsWith(".json")) files.push(full)
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile() && entry.name.endsWith(".json")) files.push(full);
     }
   }
-  return files
+  return files;
 }
 
 function usageFromProviderLogs(logRoot) {
-  const totals = emptyUsage()
-  const calls = []
+  const totals = emptyUsage();
+  const calls = [];
   for (const file of jsonFilesUnder(logRoot)) {
-    let payload
-    try { payload = JSON.parse(fs.readFileSync(file, "utf8")) } catch { continue }
-    if (payload?.type !== "llm_call") continue
-    const usage = payload.metrics?.usage
-    if (!usage) continue
-    addUsage(totals, usage)
+    let payload;
+    try {
+      payload = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    if (payload?.type !== "llm_call") continue;
+    const usage = payload.metrics?.usage;
+    if (!usage) continue;
+    addUsage(totals, usage);
     calls.push({
       file,
       call_id: payload.call_id,
@@ -2288,36 +2862,44 @@ function usageFromProviderLogs(logRoot) {
       finished_at: payload.finished_at,
       duration_ms: payload.duration_ms,
       usage,
-    })
+    });
   }
-  calls.sort((a, b) => String(a.started_at || "").localeCompare(String(b.started_at || "")))
-  return { totals, calls }
+  calls.sort((a, b) =>
+    String(a.started_at || "").localeCompare(String(b.started_at || "")),
+  );
+  return { totals, calls };
 }
 
 function responseOutputText(response) {
-  const text = response?.output_text
-  if (typeof text === "string") return text
+  const text = response?.output_text;
+  if (typeof text === "string") return text;
   if (Array.isArray(response?.output)) {
     return response.output
-      .flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+      .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
       .map((content) => content?.text || "")
       .filter(Boolean)
-      .join("\n")
+      .join("\n");
   }
-  return ""
+  return "";
 }
 
 function providerCallDebugRows(agentDir, seen = new Set()) {
-  const rows = []
-  for (const file of jsonFilesUnder(path.join(agentDir, "provider-log")).sort()) {
-    let payload
-    try { payload = JSON.parse(fs.readFileSync(file, "utf8")) } catch { continue }
-    if (payload?.type !== "llm_call") continue
-    const key = `${file}:${payload.finished_at || payload.duration_ms || payload.error || ""}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    const response = payload.response || null
-    const outputText = responseOutputText(response)
+  const rows = [];
+  for (const file of jsonFilesUnder(
+    path.join(agentDir, "provider-log"),
+  ).sort()) {
+    let payload;
+    try {
+      payload = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+      continue;
+    }
+    if (payload?.type !== "llm_call") continue;
+    const key = `${file}:${payload.finished_at || payload.duration_ms || payload.error || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const response = payload.response || null;
+    const outputText = responseOutputText(response);
     rows.push({
       file,
       call_id: payload.call_id,
@@ -2328,108 +2910,133 @@ function providerCallDebugRows(agentDir, seen = new Set()) {
       finished_at: payload.finished_at,
       duration_ms: payload.duration_ms,
       error: payload.error || response?.error || null,
-      request_messages_count: Array.isArray(payload.request?.messages) ? payload.request.messages.length : null,
-      request_tools_count: Array.isArray(payload.request?.params?.tools) ? payload.request.params.tools.length : null,
+      request_messages_count: Array.isArray(payload.request?.messages)
+        ? payload.request.messages.length
+        : null,
+      request_tools_count: Array.isArray(payload.request?.params?.tools)
+        ? payload.request.params.tools.length
+        : null,
       response_status: response?.status || null,
-      response_output_count: Array.isArray(response?.output) ? response.output.length : null,
+      response_output_count: Array.isArray(response?.output)
+        ? response.output.length
+        : null,
       response_text_preview: outputText.slice(0, 500),
       tool_call_count: payload.metrics?.tool_call_count ?? null,
       usage: payload.metrics?.usage || null,
-    })
+    });
   }
-  return rows
+  return rows;
 }
 
 function discoverRolloutPathsFromStdout(stdout) {
-  const paths = new Set()
+  const paths = new Set();
   const visit = (value) => {
     if (typeof value === "string") {
-      if (/rollout/i.test(value) && /\.(jsonl|json)$/i.test(value)) paths.add(value)
-      return
+      if (/rollout/i.test(value) && /\.(jsonl|json)$/i.test(value))
+        paths.add(value);
+      return;
     }
-    if (!value || typeof value !== "object") return
+    if (!value || typeof value !== "object") return;
     if (!Array.isArray(value)) {
       for (const [key, item] of Object.entries(value)) {
-        if (key === "rollout_path" && typeof item === "string") paths.add(item)
-        else visit(item)
+        if (key === "rollout_path" && typeof item === "string") paths.add(item);
+        else visit(item);
       }
-      return
+      return;
     }
-    for (const item of value) visit(item)
-  }
-  for (const event of parseJsonl(stdout)) visit(event)
-  return [...paths].filter((item) => fs.existsSync(item))
+    for (const item of value) visit(item);
+  };
+  for (const event of parseJsonl(stdout)) visit(event);
+  return [...paths].filter((item) => fs.existsSync(item));
 }
 
 function copyFileIfReadable(src, dest) {
   try {
-    mkdirp(path.dirname(dest))
-    fs.copyFileSync(src, dest)
-    return true
+    mkdirp(path.dirname(dest));
+    fs.copyFileSync(src, dest);
+    return true;
   } catch {
-    return false
+    return false;
   }
 }
 
 function refreshContextAndCallArchive(agentDir, stdout = "", options = {}) {
-  const archive = contextArchiveDir(agentDir)
-  mkdirp(archive)
+  const archive = contextArchiveDir(agentDir);
+  mkdirp(archive);
 
-  const providerLogRoot = path.join(agentDir, "provider-log")
-  const providerFiles = jsonFilesUnder(providerLogRoot).sort()
-  const fullCalls = []
+  const providerLogRoot = path.join(agentDir, "provider-log");
+  const providerFiles = jsonFilesUnder(providerLogRoot).sort();
+  const fullCalls = [];
   for (const file of providerFiles) {
-    let payload = null
-    try { payload = JSON.parse(fs.readFileSync(file, "utf8")) } catch {}
-    if (payload?.type !== "llm_call") continue
+    let payload = null;
+    try {
+      payload = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {}
+    if (payload?.type !== "llm_call") continue;
     fullCalls.push({
       source_file: file,
       ...payload,
-    })
+    });
   }
   writeFile(
     path.join(archive, "provider-calls-full.jsonl"),
-    fullCalls.map((call) => JSON.stringify(call)).join("\n") + (fullCalls.length ? "\n" : ""),
-  )
-  writeJson(path.join(archive, "provider-calls-index.json"), fullCalls.map((call, index) => ({
-    index,
-    source_file: call.source_file,
-    call_id: call.call_id,
-    success: call.success,
-    provider: call.provider,
-    model: call.model,
-    started_at: call.started_at,
-    finished_at: call.finished_at,
-    duration_ms: call.duration_ms,
-    usage: call.metrics?.usage || null,
-    request_messages_count: Array.isArray(call.request?.messages) ? call.request.messages.length : null,
-    has_request_messages: Array.isArray(call.request?.messages),
-    has_response: Boolean(call.response),
-  })))
+    fullCalls.map((call) => JSON.stringify(call)).join("\n") +
+      (fullCalls.length ? "\n" : ""),
+  );
+  writeJson(
+    path.join(archive, "provider-calls-index.json"),
+    fullCalls.map((call, index) => ({
+      index,
+      source_file: call.source_file,
+      call_id: call.call_id,
+      success: call.success,
+      provider: call.provider,
+      model: call.model,
+      started_at: call.started_at,
+      finished_at: call.finished_at,
+      duration_ms: call.duration_ms,
+      usage: call.metrics?.usage || null,
+      request_messages_count: Array.isArray(call.request?.messages)
+        ? call.request.messages.length
+        : null,
+      has_request_messages: Array.isArray(call.request?.messages),
+      has_response: Boolean(call.response),
+    })),
+  );
 
-  const rolloutPaths = discoverRolloutPathsFromStdout(stdout)
-  const copiedRollouts = []
+  const rolloutPaths = discoverRolloutPathsFromStdout(stdout);
+  const copiedRollouts = [];
   rolloutPaths.forEach((rolloutPath, index) => {
-    const dest = path.join(archive, "codex-rollouts", `${String(index + 1).padStart(2, "0")}-${path.basename(rolloutPath)}`)
-    if (copyFileIfReadable(rolloutPath, dest)) copiedRollouts.push({ source: rolloutPath, archive: dest })
-  })
-  writeJson(path.join(archive, "codex-rollout-paths.json"), copiedRollouts)
+    const dest = path.join(
+      archive,
+      "codex-rollouts",
+      `${String(index + 1).padStart(2, "0")}-${path.basename(rolloutPath)}`,
+    );
+    if (copyFileIfReadable(rolloutPath, dest))
+      copiedRollouts.push({ source: rolloutPath, archive: dest });
+  });
+  writeJson(path.join(archive, "codex-rollout-paths.json"), copiedRollouts);
 
-  const visibleEventsPath = path.join(agentDir, "stdout.jsonl")
+  const visibleEventsPath = path.join(agentDir, "stdout.jsonl");
   if (stdout && options.preferStdoutSnapshot) {
-    writeFile(path.join(archive, "visible-agent-events.jsonl"), stdout)
+    writeFile(path.join(archive, "visible-agent-events.jsonl"), stdout);
   } else if (fs.existsSync(visibleEventsPath)) {
-    copyFileIfReadable(visibleEventsPath, path.join(archive, "visible-agent-events.jsonl"))
+    copyFileIfReadable(
+      visibleEventsPath,
+      path.join(archive, "visible-agent-events.jsonl"),
+    );
   } else if (stdout) {
-    writeFile(path.join(archive, "visible-agent-events.jsonl"), stdout)
+    writeFile(path.join(archive, "visible-agent-events.jsonl"), stdout);
   }
-  const codexTokenUsage = writeCodexTokenUsageArtifacts(archive, stdout)
+  const codexTokenUsage = writeCodexTokenUsageArtifacts(archive, stdout);
 
   writeJson(path.join(archive, "archive-summary.json"), {
     provider_log_root: providerLogRoot,
     provider_call_count: fullCalls.length,
     provider_calls_full_path: path.join(archive, "provider-calls-full.jsonl"),
-    provider_calls_include_full_request_messages: fullCalls.some((call) => Array.isArray(call.request?.messages)),
+    provider_calls_include_full_request_messages: fullCalls.some((call) =>
+      Array.isArray(call.request?.messages),
+    ),
     codex_rollout_count: copiedRollouts.length,
     codex_rollout_archive_dir: path.join(archive, "codex-rollouts"),
     visible_events_path: path.join(archive, "visible-agent-events.jsonl"),
@@ -2438,10 +3045,11 @@ function refreshContextAndCallArchive(agentDir, stdout = "", options = {}) {
     codex_token_usage_raw_events: codexTokenUsage.raw_event_count,
     codex_token_usage_unique_events: codexTokenUsage.unique_event_count,
     codex_token_usage_duplicate_events: codexTokenUsage.duplicate_event_count,
-    limitation: fullCalls.length > 0
-      ? "Provider call logs are available and include the raw request object saved by the provider logger."
-      : "No provider call logs were found for this agent. The archive contains stdin prompt, invocation config, visible JSONL events, and any discoverable rollout files.",
-  })
+    limitation:
+      fullCalls.length > 0
+        ? "Provider call logs are available and include the raw request object saved by the provider logger."
+        : "No provider call logs were found for this agent. The archive contains stdin prompt, invocation config, visible JSONL events, and any discoverable rollout files.",
+  });
   return {
     archive_dir: archive,
     provider_call_count: fullCalls.length,
@@ -2450,20 +3058,28 @@ function refreshContextAndCallArchive(agentDir, stdout = "", options = {}) {
     codex_token_usage_log_path: codexTokenUsage.normalized_log_path,
     codex_token_usage_summary_path: codexTokenUsage.summary_path,
     codex_token_usage_duplicate_events: codexTokenUsage.duplicate_event_count,
-  }
+  };
 }
 
 function usageForAgent(agentDir, stdout) {
-  const provider = usageFromProviderLogs(path.join(agentDir, "provider-log"))
+  const provider = usageFromProviderLogs(path.join(agentDir, "provider-log"));
   if (provider.totals.usage_events > 0) {
-    return { usage: provider.totals, usage_source: "provider_log", provider_calls: provider.calls }
+    return {
+      usage: provider.totals,
+      usage_source: "provider_log",
+      provider_calls: provider.calls,
+    };
   }
-  return { usage: usageFromJsonl(stdout), usage_source: "stdout_jsonl", provider_calls: [] }
+  return {
+    usage: usageFromJsonl(stdout),
+    usage_source: "stdout_jsonl",
+    provider_calls: [],
+  };
 }
 
 function eventStats(stdout) {
-  const events = parseJsonl(stdout)
-  const codexUsage = codexTokenUsageReport(events)
+  const events = parseJsonl(stdout);
+  const codexUsage = codexTokenUsageReport(events);
   const stats = {
     events: events.length,
     thread_started: 0,
@@ -2480,46 +3096,61 @@ function eventStats(stdout) {
     token_usage_updates: codexUsage.unique_event_count,
     token_usage_updates_raw: codexUsage.raw_event_count,
     token_usage_updates_duplicate: codexUsage.duplicate_event_count,
-  }
+  };
   for (const event of events) {
-    const text = JSON.stringify(event)
-    if (event.type === "thread.started") stats.thread_started += 1
-    if (event.type === "turn.started") stats.turn_started += 1
-    if (event.type === "turn.completed") stats.turn_completed += 1
-    if (event.item?.type === "agent_message") stats.agent_messages += 1
-    if (event.item?.type === "file_change") stats.file_changes += 1
+    const text = JSON.stringify(event);
+    if (event.type === "thread.started") stats.thread_started += 1;
+    if (event.type === "turn.started") stats.turn_started += 1;
+    if (event.type === "turn.completed") stats.turn_completed += 1;
+    if (event.item?.type === "agent_message") stats.agent_messages += 1;
+    if (event.item?.type === "file_change") stats.file_changes += 1;
     if (event.item?.type === "command_execution") {
-      stats.command_executions += 1
-      if (event.item.status === "completed") stats.commands_completed += 1
-      if (event.item.status === "failed") stats.commands_failed += 1
-      if (event.item.command === "task_status" || /"task_status"\s*:/.test(text)) stats.task_status_callbacks += 1
-      if (event.item.command === "planning" || /"planning"\s*:/.test(text)) stats.planning_command_executions += 1
+      stats.command_executions += 1;
+      if (event.item.status === "completed") stats.commands_completed += 1;
+      if (event.item.status === "failed") stats.commands_failed += 1;
+      if (
+        event.item.command === "task_status" ||
+        /"task_status"\s*:/.test(text)
+      )
+        stats.task_status_callbacks += 1;
+      if (event.item.command === "planning" || /"planning"\s*:/.test(text))
+        stats.planning_command_executions += 1;
     }
-    if (text.includes("planning")) stats.planning_mentions += 1
+    if (text.includes("planning")) stats.planning_mentions += 1;
   }
-  stats.dispatch_ok = stats.command_executions > 0 || stats.file_changes > 0 || stats.planning_mentions > 0
-  stats.callback_ok = stats.task_status_callbacks > 0 || stats.turn_completed > 0
-  return stats
+  stats.dispatch_ok =
+    stats.command_executions > 0 ||
+    stats.file_changes > 0 ||
+    stats.planning_mentions > 0;
+  stats.callback_ok =
+    stats.task_status_callbacks > 0 || stats.turn_completed > 0;
+  return stats;
 }
 
 function collectPatch(workspace, agentDir) {
-  const patchPath = path.join(agentDir, "model.patch")
-  const statusPath = path.join(agentDir, "git-status.txt")
-  const diff = run("git", ["diff", "--binary"], { cwd: workspace, timeoutMs: 120_000 })
-  const status = run("git", ["status", "--short"], { cwd: workspace, timeoutMs: 120_000 })
-  writeFile(patchPath, diff.stdout || "")
-  writeFile(statusPath, status.stdout || "")
+  const patchPath = path.join(agentDir, "model.patch");
+  const statusPath = path.join(agentDir, "git-status.txt");
+  const diff = run("git", ["diff", "--binary"], {
+    cwd: workspace,
+    timeoutMs: 120_000,
+  });
+  const status = run("git", ["status", "--short"], {
+    cwd: workspace,
+    timeoutMs: 120_000,
+  });
+  writeFile(patchPath, diff.stdout || "");
+  writeFile(statusPath, status.stdout || "");
   return {
     patch_path: patchPath,
     patch_bytes: Buffer.byteLength(diff.stdout || "", "utf8"),
     changed_files: status.stdout.split(/\r?\n/).filter(Boolean).length,
     git_status: status.stdout,
-  }
+  };
 }
 
 function evaluateWorkspace(workspace, agentDir, task, binary) {
-  if (!runEval) return { ran: false, reason: "SOURCE_PORT_RUN_EVAL is not 1" }
-  const harnessPath = writeHarness(task)
+  if (!runEval) return { ran: false, reason: "SOURCE_PORT_RUN_EVAL is not 1" };
+  const harnessPath = writeHarness(task);
   const result = run(process.env.PYTHON || "python", [harnessPath, workspace], {
     cwd: workspace,
     timeoutMs: Number(process.env.SOURCE_PORT_EVAL_TIMEOUT_MS || 10 * 60_000),
@@ -2528,11 +3159,13 @@ function evaluateWorkspace(workspace, agentDir, task, binary) {
       SOURCE_PORT_TARGET_LANGUAGE: task.targetLanguage || "Python",
       SOURCE_PORT_REFERENCE_BINARY: binary,
     },
-  })
-  writeFile(path.join(agentDir, "source-port-eval.stdout.log"), result.stdout)
-  writeFile(path.join(agentDir, "source-port-eval.stderr.log"), result.stderr)
-  let parsed = null
-  try { parsed = JSON.parse(result.stdout) } catch {}
+  });
+  writeFile(path.join(agentDir, "source-port-eval.stdout.log"), result.stdout);
+  writeFile(path.join(agentDir, "source-port-eval.stderr.log"), result.stderr);
+  let parsed = null;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {}
   return {
     ran: true,
     exit_code: result.status,
@@ -2540,44 +3173,77 @@ function evaluateWorkspace(workspace, agentDir, task, binary) {
     stderr_path: path.join(agentDir, "source-port-eval.stderr.log"),
     error: result.error,
     report: parsed,
-  }
+  };
 }
 
-async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = null) {
-  const agentDir = path.join(runRoot, taskRunDirName(task), `${agentId}-${agentIndex + 1}`)
-  const prep = await prepareWorkspace(agentDir, task)
-  const prompt = sourcePortPrompt(task)
-  let result
-  const started = performance.now()
-  const turaAgentId = ["balanced", "direct", "direct-text-only"].includes(agentId) ? agentId : null
-  let lastContextArchive = null
-  let lastContextArchiveRefreshMs = 0
-  const seenProviderDebugRows = new Set()
+async function runAgent(
+  agentId,
+  task,
+  taskIndex,
+  agentIndex,
+  onAgentUpdate = null,
+) {
+  const agentDir = path.join(
+    runRoot,
+    taskRunDirName(task),
+    `${agentId}-${agentIndex + 1}`,
+  );
+  const prep = await prepareWorkspace(agentDir, task);
+  const prompt = sourcePortPrompt(task);
+  let result;
+  const started = performance.now();
+  const turaAgentId = ["balanced", "direct", "direct-text-only"].includes(
+    agentId,
+  )
+    ? agentId
+    : null;
+  let lastContextArchive = null;
+  let lastContextArchiveRefreshMs = 0;
+  const seenProviderDebugRows = new Set();
   const publishProgress = (liveResult) => {
-    const isLive = liveResult.status === null && !liveResult.error
+    const isLive = liveResult.status === null && !liveResult.error;
     if (printProviderLog) {
-      for (const row of providerCallDebugRows(agentDir, seenProviderDebugRows)) {
-        console.log(`[source-port-provider] ${JSON.stringify({ agent: agentId, task: task.label, ...row })}`)
+      for (const row of providerCallDebugRows(
+        agentDir,
+        seenProviderDebugRows,
+      )) {
+        console.log(
+          `[source-port-provider] ${JSON.stringify({ agent: agentId, task: task.label, ...row })}`,
+        );
       }
     }
     const usageInfo = isLive
-      ? { usage: usageFromJsonl(liveResult.stdout || ""), usage_source: "stdout_jsonl", provider_calls: [] }
-      : usageForAgent(agentDir, liveResult.stdout || "")
-    const now = performance.now()
+      ? {
+          usage: usageFromJsonl(liveResult.stdout || ""),
+          usage_source: "stdout_jsonl",
+          provider_calls: [],
+        }
+      : usageForAgent(agentDir, liveResult.stdout || "");
+    const now = performance.now();
     const shouldRefreshArchive =
-      !isLive && (!lastContextArchive || liveResult.status !== null || now - lastContextArchiveRefreshMs > 10_000)
+      !isLive &&
+      (!lastContextArchive ||
+        liveResult.status !== null ||
+        now - lastContextArchiveRefreshMs > 10_000);
     if (shouldRefreshArchive) {
-      lastContextArchive = refreshContextAndCallArchive(agentDir, liveResult.stdout || "", {
-        preferStdoutSnapshot: liveResult.status === null,
-      })
-      lastContextArchiveRefreshMs = now
+      lastContextArchive = refreshContextAndCallArchive(
+        agentDir,
+        liveResult.stdout || "",
+        {
+          preferStdoutSnapshot: liveResult.status === null,
+        },
+      );
+      lastContextArchiveRefreshMs = now;
     } else if (!lastContextArchive) {
       lastContextArchive = {
         archive_dir: contextArchiveDir(agentDir),
         provider_call_count: 0,
-        provider_calls_full_path: path.join(contextArchiveDir(agentDir), "provider-calls-full.jsonl"),
+        provider_calls_full_path: path.join(
+          contextArchiveDir(agentDir),
+          "provider-calls-full.jsonl",
+        ),
         codex_rollout_count: 0,
-      }
+      };
     }
     const stats = {
       agent: agentId,
@@ -2599,27 +3265,82 @@ async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = nu
       stderr_path: path.join(agentDir, "stderr.log"),
       provider_log_path: path.join(agentDir, "provider-log"),
       tura_capability_info: turaCapabilityInfo(turaAgentId, agentDir),
-      usage: agentId === "claude-code" || agentId === "pi-agent" ? agentUsageFromJsonl(liveResult.stdout || "") : usageInfo.usage,
-      usage_source: agentId === "claude-code" || agentId === "pi-agent" ? `${agentId}-jsonl` : usageInfo.usage_source,
+      usage:
+        agentId === "claude-code" || agentId === "pi-agent"
+          ? agentUsageFromJsonl(liveResult.stdout || "")
+          : usageInfo.usage,
+      usage_source:
+        agentId === "claude-code" || agentId === "pi-agent"
+          ? `${agentId}-jsonl`
+          : usageInfo.usage_source,
       provider_calls: usageInfo.provider_calls,
       context_archive: lastContextArchive,
-      events: agentId === "claude-code" || agentId === "pi-agent" ? agentEventStats(liveResult.stdout || "") : eventStats(liveResult.stdout || ""),
-    }
-    writeFile(path.join(agentDir, "agent-summary.json"), JSON.stringify(stats, null, 2))
-    onAgentUpdate?.(stats)
-  }
-  if (agentId === "codex-cli") result = await runCodexCli(prep.workspace, agentDir, prompt, publishProgress)
-  else if (agentId === "codex-main") result = await runCodexMain(prep.workspace, agentDir, prompt, publishProgress)
-  else if (agentId === "codex-documents") result = await runCodexDocuments(prep.workspace, agentDir, prompt, publishProgress)
-  else if (agentId === "codex-ponytail") result = await runCodexPonytail(prep.workspace, agentDir, prompt, publishProgress)
-  else if (turaAgentId) result = await runTuraAgent(prep.workspace, agentDir, prompt, turaAgentId, publishProgress)
-  else if (agentId === "claude-code" || agentId === "pi-agent") result = await runExternalCliAgent(prep.workspace, agentDir, prompt, agentId, publishProgress)
-  else throw new Error(`unsupported agent ${agentId}`)
+      events:
+        agentId === "claude-code" || agentId === "pi-agent"
+          ? agentEventStats(liveResult.stdout || "")
+          : eventStats(liveResult.stdout || ""),
+    };
+    writeFile(
+      path.join(agentDir, "agent-summary.json"),
+      JSON.stringify(stats, null, 2),
+    );
+    onAgentUpdate?.(stats);
+  };
+  if (agentId === "codex-cli")
+    result = await runCodexCli(
+      prep.workspace,
+      agentDir,
+      prompt,
+      publishProgress,
+    );
+  else if (agentId === "codex-main")
+    result = await runCodexMain(
+      prep.workspace,
+      agentDir,
+      prompt,
+      publishProgress,
+    );
+  else if (agentId === "codex-documents")
+    result = await runCodexDocuments(
+      prep.workspace,
+      agentDir,
+      prompt,
+      publishProgress,
+    );
+  else if (agentId === "codex-ponytail")
+    result = await runCodexPonytail(
+      prep.workspace,
+      agentDir,
+      prompt,
+      publishProgress,
+    );
+  else if (turaAgentId)
+    result = await runTuraAgent(
+      prep.workspace,
+      agentDir,
+      prompt,
+      turaAgentId,
+      publishProgress,
+    );
+  else if (agentId === "claude-code" || agentId === "pi-agent")
+    result = await runExternalCliAgent(
+      prep.workspace,
+      agentDir,
+      prompt,
+      agentId,
+      publishProgress,
+    );
+  else throw new Error(`unsupported agent ${agentId}`);
 
-  const patch = collectPatch(prep.workspace, agentDir)
-  const evalResult = evaluateWorkspace(prep.workspace, agentDir, task, prep.reference_binary)
-  const usageInfo = usageForAgent(agentDir, result.stdout)
-  const contextArchive = refreshContextAndCallArchive(agentDir, result.stdout)
+  const patch = collectPatch(prep.workspace, agentDir);
+  const evalResult = evaluateWorkspace(
+    prep.workspace,
+    agentDir,
+    task,
+    prep.reference_binary,
+  );
+  const usageInfo = usageForAgent(agentDir, result.stdout);
+  const contextArchive = refreshContextAndCallArchive(agentDir, result.stdout);
   const stats = {
     agent: agentId,
     task: task.label,
@@ -2636,113 +3357,194 @@ async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = nu
     stderr_path: path.join(agentDir, "stderr.log"),
     provider_log_path: path.join(agentDir, "provider-log"),
     tura_capability_info: turaCapabilityInfo(turaAgentId, agentDir),
-    usage: agentId === "claude-code" || agentId === "pi-agent" ? agentUsageFromJsonl(result.stdout) : usageInfo.usage,
-    usage_source: agentId === "claude-code" || agentId === "pi-agent" ? `${agentId}-jsonl` : usageInfo.usage_source,
+    usage:
+      agentId === "claude-code" || agentId === "pi-agent"
+        ? agentUsageFromJsonl(result.stdout)
+        : usageInfo.usage,
+    usage_source:
+      agentId === "claude-code" || agentId === "pi-agent"
+        ? `${agentId}-jsonl`
+        : usageInfo.usage_source,
     provider_calls: usageInfo.provider_calls,
     context_archive: contextArchive,
-    events: agentId === "claude-code" || agentId === "pi-agent" ? agentEventStats(result.stdout) : eventStats(result.stdout),
+    events:
+      agentId === "claude-code" || agentId === "pi-agent"
+        ? agentEventStats(result.stdout)
+        : eventStats(result.stdout),
     patch,
     eval: evalResult,
-  }
-  writeFile(path.join(agentDir, "agent-summary.json"), JSON.stringify(stats, null, 2))
-  onAgentUpdate?.(stats)
-  return stats
+  };
+  writeFile(
+    path.join(agentDir, "agent-summary.json"),
+    JSON.stringify(stats, null, 2),
+  );
+  onAgentUpdate?.(stats);
+  return stats;
 }
 
 async function runSelfTest() {
-  mkdirp(runRoot)
+  mkdirp(runRoot);
   for (const id of selectedTasks) {
-    const task = TASKS[id]
-    const prompt = sourcePortPrompt(task)
-    for (const expected of ["official reference CLI", "REFERENCE_BINARY.txt", "Target language", "Do not use Docker", "Do not shell out", "1:1 functional port", "The evaluator checks entrypoints in this order", "Do not make ./executable a POSIX shell script", "remove any POSIX shell wrapper named ./executable"]) {
-      assert(prompt.includes(expected), `${task.label} prompt missing ${expected}`)
+    const task = TASKS[id];
+    const prompt = sourcePortPrompt(task);
+    for (const expected of [
+      "official reference CLI",
+      "REFERENCE_BINARY.txt",
+      "Target language",
+      "Do not use Docker",
+      "Do not shell out",
+      "1:1 functional port",
+      "The evaluator checks entrypoints in this order",
+      "Do not make ./executable a POSIX shell script",
+      "remove any POSIX shell wrapper named ./executable",
+    ]) {
+      assert(
+        prompt.includes(expected),
+        `${task.label} prompt missing ${expected}`,
+      );
     }
   }
-  const harness = harnessTemplate()
-  for (const expected of ["run_cmd([REFERENCE_BINARY", "actual_command", "zip_cases", "xsv_cases", "eza_cases", "nushell_cases", "same_business"]) {
-    assert(harness.includes(expected), `harness missing ${expected}`)
+  const harness = harnessTemplate();
+  for (const expected of [
+    "run_cmd([REFERENCE_BINARY",
+    "actual_command",
+    "zip_cases",
+    "xsv_cases",
+    "eza_cases",
+    "nushell_cases",
+    "same_business",
+  ]) {
+    assert(harness.includes(expected), `harness missing ${expected}`);
   }
-  return { ok: true, self_test: "source-port rewrite suite", tasks: selectedTasks }
+  return {
+    ok: true,
+    self_test: "source-port rewrite suite",
+    tasks: selectedTasks,
+  };
 }
 
 async function ensureTaskAssets(task) {
-  const reference = ensureReferenceRepo(task)
-  const binary = await ensureReferenceBinary(task)
-  const smoke = smokeReferenceBinary(task, binary)
-  return { task: task.label, reference, binary, version_stdout: smoke.stdout.trim(), version_stderr: smoke.stderr.trim(), version_status: smoke.status }
+  const reference = ensureReferenceRepo(task);
+  const binary = await ensureReferenceBinary(task);
+  const smoke = smokeReferenceBinary(task, binary);
+  return {
+    task: task.label,
+    reference,
+    binary,
+    version_stdout: smoke.stdout.trim(),
+    version_stderr: smoke.stderr.trim(),
+    version_status: smoke.status,
+  };
 }
 
 function buildSuiteSummary(results, assets, inProgress = false) {
-  return normalizeBusinessSummary({
-    ok: !inProgress && results.every(resultPassed),
-    in_progress: inProgress,
-    suite_root: suiteRoot,
-    model,
-    tura_model: turaModel,
-    reasoning,
-    service_tier: serviceTier,
-    timeout_ms: timeoutMs,
-    complex_todo_hint: complexTodoHint,
-    agents,
-    tasks: selectedTasks,
-    assets,
-    results,
-  }, runPaths)
+  return normalizeBusinessSummary(
+    {
+      ok: !inProgress && results.every(resultPassed),
+      in_progress: inProgress,
+      suite_root: suiteRoot,
+      model,
+      tura_model: turaModel,
+      reasoning,
+      service_tier: serviceTier,
+      timeout_ms: timeoutMs,
+      complex_todo_hint: complexTodoHint,
+      agents,
+      tasks: selectedTasks,
+      assets,
+      results,
+    },
+    runPaths,
+  );
 }
 
 function resultPassed(result) {
-  if (result.error || !result.events?.callback_ok) return false
-  if (!result.eval?.ran) return true
-  const reports = Array.isArray(result.eval?.report?.reports) ? result.eval.report.reports : []
-  const failed = reports.reduce((total, report) => total + Number(report?.failed || 0), 0)
-  return Number(result.eval.exit_code) === 0 && failed === 0
+  if (result.error || !result.events?.callback_ok) return false;
+  if (!result.eval?.ran) return true;
+  const reports = Array.isArray(result.eval?.report?.reports)
+    ? result.eval.report.reports
+    : [];
+  const failed = reports.reduce(
+    (total, report) => total + Number(report?.failed || 0),
+    0,
+  );
+  return Number(result.eval.exit_code) === 0 && failed === 0;
 }
 
 async function main() {
-  mkdirp(runRoot)
+  mkdirp(runRoot);
   if (selfTest) {
-    const summary = normalizeBusinessSummary(await runSelfTest(), runPaths)
-    writeFile(summaryPath, JSON.stringify(summary, null, 2))
-    console.log(JSON.stringify(summary, null, 2))
-    return
+    const summary = normalizeBusinessSummary(await runSelfTest(), runPaths);
+    writeFile(summaryPath, JSON.stringify(summary, null, 2));
+    console.log(JSON.stringify(summary, null, 2));
+    return;
   }
-  const taskObjects = selectedTasks.map((id) => TASKS[id])
-  const assets = []
+  const taskObjects = selectedTasks.map((id) => TASKS[id]);
+  const assets = [];
   for (const task of taskObjects) {
-    assets.push(await ensureTaskAssets(task))
+    assets.push(await ensureTaskAssets(task));
   }
   if (binaryOnly) {
-    const summary = normalizeBusinessSummary({ ok: true, binary_only: true, suite_root: suiteRoot, assets }, runPaths)
-    writeFile(summaryPath, JSON.stringify(summary, null, 2))
-    console.log(JSON.stringify(summary, null, 2))
-    return
+    const summary = normalizeBusinessSummary(
+      { ok: true, binary_only: true, suite_root: suiteRoot, assets },
+      runPaths,
+    );
+    writeFile(summaryPath, JSON.stringify(summary, null, 2));
+    console.log(JSON.stringify(summary, null, 2));
+    return;
   }
   if (prepOnly) {
-    const preps = []
+    const preps = [];
     for (const task of taskObjects) {
-      const prepDir = path.join(runRoot, taskRunDirName(task), "prep-only")
-      const prep = await prepareWorkspace(prepDir, task)
-      const harnessPath = writeHarness(task)
-      preps.push({ task: task.label, prep, harness_path: harnessPath })
+      const prepDir = path.join(runRoot, taskRunDirName(task), "prep-only");
+      const prep = await prepareWorkspace(prepDir, task);
+      const harnessPath = writeHarness(task);
+      preps.push({ task: task.label, prep, harness_path: harnessPath });
     }
-    const summary = normalizeBusinessSummary({ ok: true, prep_only: true, suite_root: suiteRoot, complex_todo_hint: complexTodoHint, assets, preps }, runPaths)
-    writeFile(summaryPath, JSON.stringify(summary, null, 2))
-    console.log(JSON.stringify(summary, null, 2))
-    return
+    const summary = normalizeBusinessSummary(
+      {
+        ok: true,
+        prep_only: true,
+        suite_root: suiteRoot,
+        complex_todo_hint: complexTodoHint,
+        assets,
+        preps,
+      },
+      runPaths,
+    );
+    writeFile(summaryPath, JSON.stringify(summary, null, 2));
+    console.log(JSON.stringify(summary, null, 2));
+    return;
   }
   if (evaluateOnly) {
-    const results = []
+    const results = [];
     for (let t = 0; t < taskObjects.length; t += 1) {
-      const task = taskObjects[t]
+      const task = taskObjects[t];
       for (let a = 0; a < agents.length; a += 1) {
-        const agentId = agents[a]
-        const agentDir = path.join(runRoot, taskRunDirName(task), `${agentId}-${a + 1}`)
-        const summaryFile = path.join(agentDir, "agent-summary.json")
-        const prior = fs.existsSync(summaryFile) ? JSON.parse(fs.readFileSync(summaryFile, "utf8")) : {}
-        const workspace = prior.prep?.workspace || path.join(agentDir, "workspace")
-        assert(fs.existsSync(workspace), `missing workspace for evaluate-only: ${workspace}`)
-        const referenceBinary = prior.prep?.reference_binary || await ensureReferenceBinary(task)
-        const evalResult = evaluateWorkspace(workspace, agentDir, task, referenceBinary)
+        const agentId = agents[a];
+        const agentDir = path.join(
+          runRoot,
+          taskRunDirName(task),
+          `${agentId}-${a + 1}`,
+        );
+        const summaryFile = path.join(agentDir, "agent-summary.json");
+        const prior = fs.existsSync(summaryFile)
+          ? JSON.parse(fs.readFileSync(summaryFile, "utf8"))
+          : {};
+        const workspace =
+          prior.prep?.workspace || path.join(agentDir, "workspace");
+        assert(
+          fs.existsSync(workspace),
+          `missing workspace for evaluate-only: ${workspace}`,
+        );
+        const referenceBinary =
+          prior.prep?.reference_binary || (await ensureReferenceBinary(task));
+        const evalResult = evaluateWorkspace(
+          workspace,
+          agentDir,
+          task,
+          referenceBinary,
+        );
         const stats = {
           ...prior,
           agent: agentId,
@@ -2751,42 +3553,55 @@ async function main() {
           workspace,
           in_progress: false,
           eval: evalResult,
-        }
-        writeFile(summaryFile, JSON.stringify(stats, null, 2))
-        results.push(stats)
+        };
+        writeFile(summaryFile, JSON.stringify(stats, null, 2));
+        results.push(stats);
       }
     }
-    const summary = buildSuiteSummary(results, assets, false)
-    writeFile(summaryPath, JSON.stringify({ ...summary, evaluate_only: true }, null, 2))
-    console.log(JSON.stringify({ ...summary, evaluate_only: true }, null, 2))
-    if (!summary.ok && process.env.COMMAND_RUN_AGENT_ALLOW_FAILURE !== "1") process.exitCode = 1
-    return
+    const summary = buildSuiteSummary(results, assets, false);
+    writeFile(
+      summaryPath,
+      JSON.stringify({ ...summary, evaluate_only: true }, null, 2),
+    );
+    console.log(JSON.stringify({ ...summary, evaluate_only: true }, null, 2));
+    if (!summary.ok && process.env.COMMAND_RUN_AGENT_ALLOW_FAILURE !== "1")
+      process.exitCode = 1;
+    return;
   }
-  const jobs = []
-  const partialResults = new Map()
-  let finalSummaryWritten = false
+  const jobs = [];
+  const partialResults = new Map();
+  let finalSummaryWritten = false;
   const writeProgressSummary = () => {
-    if (finalSummaryWritten) return
+    if (finalSummaryWritten) return;
     const results = [...partialResults.values()].sort((a, b) =>
-      `${a.task}:${a.agent}`.localeCompare(`${b.task}:${b.agent}`))
-    writeFile(summaryPath, JSON.stringify(buildSuiteSummary(results, assets, true), null, 2))
-  }
+      `${a.task}:${a.agent}`.localeCompare(`${b.task}:${b.agent}`),
+    );
+    writeFile(
+      summaryPath,
+      JSON.stringify(buildSuiteSummary(results, assets, true), null, 2),
+    );
+  };
   for (let t = 0; t < taskObjects.length; t += 1) {
     for (let a = 0; a < agents.length; a += 1) {
-      console.log(`[source-port-suite] running ${agents[a]} on ${taskObjects[t].label} for ${Math.round(timeoutMs / 1000)}s`)
-      const key = `${taskObjects[t].id}:${agents[a]}:${a}`
-      jobs.push(runAgent(agents[a], taskObjects[t], t, a, (stats) => {
-        partialResults.set(key, stats)
-        writeProgressSummary()
-      }))
+      console.log(
+        `[source-port-suite] running ${agents[a]} on ${taskObjects[t].label} for ${Math.round(timeoutMs / 1000)}s`,
+      );
+      const key = `${taskObjects[t].id}:${agents[a]}:${a}`;
+      jobs.push(
+        runAgent(agents[a], taskObjects[t], t, a, (stats) => {
+          partialResults.set(key, stats);
+          writeProgressSummary();
+        }),
+      );
     }
   }
-  const results = await Promise.all(jobs)
-  const summary = buildSuiteSummary(results, assets, false)
-  finalSummaryWritten = true
-  writeFile(summaryPath, JSON.stringify(summary, null, 2))
-  console.log(JSON.stringify(summary, null, 2))
-  if (!summary.ok && process.env.COMMAND_RUN_AGENT_ALLOW_FAILURE !== "1") process.exitCode = 1
+  const results = await Promise.all(jobs);
+  const summary = buildSuiteSummary(results, assets, false);
+  finalSummaryWritten = true;
+  writeFile(summaryPath, JSON.stringify(summary, null, 2));
+  console.log(JSON.stringify(summary, null, 2));
+  if (!summary.ok && process.env.COMMAND_RUN_AGENT_ALLOW_FAILURE !== "1")
+    process.exitCode = 1;
 }
 
-await main()
+await main();

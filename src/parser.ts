@@ -25,14 +25,21 @@ export type BenchmarkInstructionInput =
       raw?: JsonValue;
     };
 
-export function normalizeCliInstruction(input: BenchmarkInstructionInput): BenchmarkCliInstruction {
+export function normalizeCliInstruction(
+  input: BenchmarkInstructionInput,
+): BenchmarkCliInstruction {
   if (typeof input === "string") {
     const args = splitCommandLine(input);
     return { commandName: args[0] ?? "", commandLine: input, args };
   }
 
-  const commandName = input.commandName ?? input.command ?? input.args?.[0] ?? "";
-  const args = input.args ?? (input.commandLine ? splitCommandLine(input.commandLine) : [commandName].filter(Boolean));
+  const commandName =
+    input.commandName ?? input.command ?? input.args?.[0] ?? "";
+  const args =
+    input.args ??
+    (input.commandLine
+      ? splitCommandLine(input.commandLine)
+      : [commandName].filter(Boolean));
   const commandLine = input.commandLine ?? args.map(quoteCommandArg).join(" ");
   return {
     commandName,
@@ -44,13 +51,27 @@ export function normalizeCliInstruction(input: BenchmarkInstructionInput): Bench
   };
 }
 
-export function parseAgentRound(callback: unknown, roundIndex = 0): BenchmarkAgentRound {
+export function parseAgentRound(
+  callback: unknown,
+  roundIndex = 0,
+): BenchmarkAgentRound {
   const record = asRecord(callback) ?? {};
-  const startedAt = readString(record, ["startedAt", "startTimestamp", "started_at"]) ?? new Date().toISOString();
-  const endedAt = readString(record, ["endedAt", "endTimestamp", "ended_at"]) ?? startedAt;
+  const startedAt =
+    readString(record, ["startedAt", "startTimestamp", "started_at"]) ??
+    new Date().toISOString();
+  const endedAt =
+    readString(record, ["endedAt", "endTimestamp", "ended_at"]) ?? startedAt;
   const usage = readUsage(record);
   const toolCalls = normalizeToolCalls(callback);
-  const roundId = readString(record, ["roundId", "id", "turnId", "turn_id", "session_id", "sessionId"]) ?? `round-${roundIndex + 1}`;
+  const roundId =
+    readString(record, [
+      "roundId",
+      "id",
+      "turnId",
+      "turn_id",
+      "session_id",
+      "sessionId",
+    ]) ?? `round-${roundIndex + 1}`;
 
   return {
     schema: ROUND_SCHEMA,
@@ -66,34 +87,82 @@ export function parseAgentRound(callback: unknown, roundIndex = 0): BenchmarkAge
     },
     messages: [],
     usage,
-    providerDurationMs: readNumber(record, ["providerDurationMs", "provider_duration_ms", "duration_ms"]) ?? 0,
+    providerDurationMs:
+      readNumber(record, [
+        "providerDurationMs",
+        "provider_duration_ms",
+        "duration_ms",
+      ]) ?? 0,
     toolCalls,
     metadata: readRoundMetadata(record, roundId),
   };
 }
 
 function readRoundMetadata(record: UnknownRecord, roundId: string) {
-  const agentId = readString(record, ["agentId", "agent_id", "agent", "provider", "source_agent"]) ?? inferAgentId(record);
-  const model = readString(record, ["model", "model_id", "provider_model"]) ?? readString(asRecord(record.metadata) ?? {}, ["model"]) ?? "unknown";
-  const reasoning = readString(record, ["reasoning", "reasoning_effort", "reasoningEffort"]) ?? readString(asRecord(record.metadata) ?? {}, ["reasoning"]) ?? "unknown";
-  const serviceTier = readString(record, ["serviceTier", "service_tier", "tier"]) ?? readString(asRecord(record.metadata) ?? {}, ["serviceTier", "service_tier"]) ?? "unknown";
-  const eventType = readString(record, ["type", "event", "event_type", "eventType"]) ?? "unknown";
+  const agentId =
+    readString(record, [
+      "agentId",
+      "agent_id",
+      "agent",
+      "provider",
+      "source_agent",
+    ]) ?? inferAgentId(record);
+  const model =
+    readString(record, ["model", "model_id", "provider_model"]) ??
+    readString(asRecord(record.metadata) ?? {}, ["model"]) ??
+    "unknown";
+  const reasoning =
+    readString(record, ["reasoning", "reasoning_effort", "reasoningEffort"]) ??
+    readString(asRecord(record.metadata) ?? {}, ["reasoning"]) ??
+    "unknown";
+  const serviceTier =
+    readString(record, ["serviceTier", "service_tier", "tier"]) ??
+    readString(asRecord(record.metadata) ?? {}, [
+      "serviceTier",
+      "service_tier",
+    ]) ??
+    "unknown";
+  const eventType =
+    readString(record, ["type", "event", "event_type", "eventType"]) ??
+    "unknown";
   return {
     agentId,
-    agentKind: readString(record, ["agentKind", "agent_kind", "kind"]) ?? inferAgentKind(agentId),
-    agentMode: readString(record, ["agentMode", "agent_mode", "mode", "tura_agent"]) ?? inferAgentMode(agentId),
+    agentKind:
+      readString(record, ["agentKind", "agent_kind", "kind"]) ??
+      inferAgentKind(agentId),
+    agentMode:
+      readString(record, ["agentMode", "agent_mode", "mode", "tura_agent"]) ??
+      inferAgentMode(agentId),
     model,
     reasoning,
     serviceTier,
-    priorityEnabled: readBoolean(record, ["priorityEnabled", "priority_enabled", "priority", "is_priority"]) ?? serviceTier.toLowerCase() === "priority",
-    roundSource: readString(record, ["roundSource", "round_source", "source"]) ?? "callback",
+    priorityEnabled:
+      readBoolean(record, [
+        "priorityEnabled",
+        "priority_enabled",
+        "priority",
+        "is_priority",
+      ]) ?? serviceTier.toLowerCase() === "priority",
+    roundSource:
+      readString(record, ["roundSource", "round_source", "source"]) ??
+      "callback",
     eventType,
-    sessionOrTurnId: readString(record, ["sessionOrTurnId", "session_or_turn_id", "turnId", "turn_id", "session_id", "sessionId", "id"]) ?? roundId,
+    sessionOrTurnId:
+      readString(record, [
+        "sessionOrTurnId",
+        "session_or_turn_id",
+        "turnId",
+        "turn_id",
+        "session_id",
+        "sessionId",
+        "id",
+      ]) ?? roundId,
   };
 }
 
 function inferAgentId(record: UnknownRecord): string {
-  const type = readString(record, ["type", "event", "event_type", "eventType"]) ?? "";
+  const type =
+    readString(record, ["type", "event", "event_type", "eventType"]) ?? "";
   const prefix = type.split(".")[0];
   if (prefix) return prefix === "claude" ? "claudecode" : prefix;
   return "unknown";
@@ -104,7 +173,8 @@ function inferAgentKind(agentId: string): string {
 }
 
 function inferAgentMode(agentId: string): string {
-  if (agentId.startsWith("tura-")) return agentId.slice("tura-".length).replace(/-shll$/, "");
+  if (agentId.startsWith("tura-"))
+    return agentId.slice("tura-".length).replace(/-shll$/, "");
   return "unknown";
 }
 
@@ -124,8 +194,14 @@ export function parseJsonlRounds(text: string): BenchmarkAgentRound[] {
     .map((value, index) => parseAgentRound(value, index));
 }
 
-export async function saveAgentRound(directory: string, round: BenchmarkAgentRound): Promise<string> {
-  const filePath = path.join(directory, `${String(round.roundIndex + 1).padStart(4, "0")}-${round.roundId}.json`);
+export async function saveAgentRound(
+  directory: string,
+  round: BenchmarkAgentRound,
+): Promise<string> {
+  const filePath = path.join(
+    directory,
+    `${String(round.roundIndex + 1).padStart(4, "0")}-${round.roundId}.json`,
+  );
   await writeJsonFile(filePath, round as unknown as JsonValue);
   return filePath;
 }
@@ -151,7 +227,11 @@ function collectToolCallCandidates(value: unknown): UnknownRecord[] {
   pushContentToolUses(result, asRecord(root.assistantMessage)?.content);
   pushContentToolUses(result, asRecord(root.assistant_message)?.content);
 
-  const body = asRecord(root.body) ?? asRecord(root.response) ?? asRecord(root.provider) ?? root;
+  const body =
+    asRecord(root.body) ??
+    asRecord(root.response) ??
+    asRecord(root.provider) ??
+    root;
   pushOpenAiOutput(result, body.output);
   const firstChoice = asRecord(asArray(body.choices)[0]);
   pushArrayRecords(result, asRecord(firstChoice?.message)?.tool_calls);
@@ -161,11 +241,20 @@ function collectToolCallCandidates(value: unknown): UnknownRecord[] {
   return result;
 }
 
-function normalizeOneToolCall(call: UnknownRecord, index: number): BenchmarkToolCall[] {
+function normalizeOneToolCall(
+  call: UnknownRecord,
+  index: number,
+): BenchmarkToolCall[] {
   const name = toolName(call) || "tool";
-  const id = readString(call, ["id", "call_id", "tool_call_id"]) ?? `${name}-${index + 1}`;
+  const id =
+    readString(call, ["id", "call_id", "tool_call_id"]) ??
+    `${name}-${index + 1}`;
   const args = parseToolArguments(call);
-  const parallelGroupId = readString(call, ["parallelGroupId", "parallel_group_id", "step"]);
+  const parallelGroupId = readString(call, [
+    "parallelGroupId",
+    "parallel_group_id",
+    "step",
+  ]);
 
   if (name === "command_run") {
     const commands = asArray(asRecord(args)?.commands);
@@ -174,7 +263,13 @@ function normalizeOneToolCall(call: UnknownRecord, index: number): BenchmarkTool
         const commandRecord = asRecord(command) ?? {};
         const commandName =
           readString(commandRecord, ["command_type", "commandType", "name"]) ??
-          inferCommandName(readString(commandRecord, ["command", "command_line", "commandLine"]) ?? "command");
+          inferCommandName(
+            readString(commandRecord, [
+              "command",
+              "command_line",
+              "commandLine",
+            ]) ?? "command",
+          );
         return {
           id: `${id}:${commandIndex + 1}`,
           kind: "command",
@@ -183,7 +278,12 @@ function normalizeOneToolCall(call: UnknownRecord, index: number): BenchmarkTool
           arguments: toJsonValue(command) ?? {},
           parentToolName: name,
           parentToolCallId: id,
-          parallelGroupId: readString(commandRecord, ["parallelGroupId", "parallel_group_id", "step"]) ?? parallelGroupId,
+          parallelGroupId:
+            readString(commandRecord, [
+              "parallelGroupId",
+              "parallel_group_id",
+              "step",
+            ]) ?? parallelGroupId,
           raw: toJsonValue(command),
         };
       });
@@ -218,19 +318,43 @@ function readUsage(record: UnknownRecord): TokenUsage {
   for (const candidate of candidates) {
     const item = asRecord(candidate);
     if (!item) continue;
-    usage.inputTokens += readNumber(item, ["inputTokens", "input_tokens", "prompt_tokens"]) ?? 0;
+    usage.inputTokens +=
+      readNumber(item, ["inputTokens", "input_tokens", "prompt_tokens"]) ?? 0;
     usage.cacheInputTokens +=
-      readNumber(item, ["cacheInputTokens", "cached_input_tokens", "cached", "cache_read_input_tokens"]) ??
-      readNumber(asRecord(item.input_tokens_details) ?? {}, ["cached_tokens"]) ??
-      readNumber(asRecord(item.prompt_tokens_details) ?? {}, ["cached_tokens"]) ??
+      readNumber(item, [
+        "cacheInputTokens",
+        "cached_input_tokens",
+        "cached",
+        "cache_read_input_tokens",
+      ]) ??
+      readNumber(asRecord(item.input_tokens_details) ?? {}, [
+        "cached_tokens",
+      ]) ??
+      readNumber(asRecord(item.prompt_tokens_details) ?? {}, [
+        "cached_tokens",
+      ]) ??
       0;
-    usage.outputTokens += readNumber(item, ["outputTokens", "output_tokens", "completion_tokens"]) ?? 0;
+    usage.outputTokens +=
+      readNumber(item, [
+        "outputTokens",
+        "output_tokens",
+        "completion_tokens",
+      ]) ?? 0;
     usage.reasoningTokens +=
-      readNumber(item, ["reasoningTokens", "reasoning_tokens", "reasoning_output_tokens"]) ??
-      readNumber(asRecord(item.output_tokens_details) ?? {}, ["reasoning_tokens"]) ??
-      readNumber(asRecord(item.completion_tokens_details) ?? {}, ["reasoning_tokens"]) ??
+      readNumber(item, [
+        "reasoningTokens",
+        "reasoning_tokens",
+        "reasoning_output_tokens",
+      ]) ??
+      readNumber(asRecord(item.output_tokens_details) ?? {}, [
+        "reasoning_tokens",
+      ]) ??
+      readNumber(asRecord(item.completion_tokens_details) ?? {}, [
+        "reasoning_tokens",
+      ]) ??
       0;
-    usage.totalTokens += readNumber(item, ["totalTokens", "total_tokens", "total"]) ?? 0;
+    usage.totalTokens +=
+      readNumber(item, ["totalTokens", "total_tokens", "total"]) ?? 0;
   }
   if (usage.totalTokens === 0) {
     usage.totalTokens = usage.inputTokens + usage.outputTokens;
@@ -239,13 +363,39 @@ function readUsage(record: UnknownRecord): TokenUsage {
 }
 
 function extractFullContext(record: UnknownRecord): string {
-  return readString(record, ["fullContext", "full_context", "inputContext", "input_context", "context"]) ??
-    stringifyFirst(record.messages, asRecord(record.input)?.messages, asRecord(record.request)?.input, asRecord(record.body)?.input);
+  return (
+    readString(record, [
+      "fullContext",
+      "full_context",
+      "inputContext",
+      "input_context",
+      "context",
+    ]) ??
+    stringifyFirst(
+      record.messages,
+      asRecord(record.input)?.messages,
+      asRecord(record.request)?.input,
+      asRecord(record.body)?.input,
+    )
+  );
 }
 
 function extractFullOutput(record: UnknownRecord): string {
-  return readString(record, ["fullOutput", "full_output", "output", "content", "text"]) ??
-    stringifyFirst(asRecord(record.output)?.message, asRecord(record.response)?.output, asRecord(record.body)?.output, record.message);
+  return (
+    readString(record, [
+      "fullOutput",
+      "full_output",
+      "output",
+      "content",
+      "text",
+    ]) ??
+    stringifyFirst(
+      asRecord(record.output)?.message,
+      asRecord(record.response)?.output,
+      asRecord(record.body)?.output,
+      record.message,
+    )
+  );
 }
 
 function extractAssistantMessage(record: UnknownRecord): string {
@@ -264,7 +414,11 @@ function extractAssistantMessage(record: UnknownRecord): string {
     const contentText = extractTextFromContent(candidate);
     if (contentText) return contentText;
   }
-  return extractTextFromOutput(asRecord(record.response)?.output ?? asRecord(record.body)?.output ?? record.output);
+  return extractTextFromOutput(
+    asRecord(record.response)?.output ??
+      asRecord(record.body)?.output ??
+      record.output,
+  );
 }
 
 function extractTextFromOutput(value: unknown): string {
@@ -275,7 +429,8 @@ function extractTextFromOutput(value: unknown): string {
     if (typeof record.text === "string") pieces.push(record.text);
     for (const content of asArray(record.content)) {
       const contentRecord = asRecord(content);
-      if (typeof contentRecord?.text === "string") pieces.push(contentRecord.text);
+      if (typeof contentRecord?.text === "string")
+        pieces.push(contentRecord.text);
     }
   }
   return pieces.join("\n");
@@ -286,7 +441,8 @@ function extractTextFromContent(value: unknown): string {
   for (const item of asArray(value)) {
     const record = asRecord(item);
     if (!record) continue;
-    if (record.type === "text" && typeof record.text === "string") pieces.push(record.text);
+    if (record.type === "text" && typeof record.text === "string")
+      pieces.push(record.text);
     if (typeof record.content === "string") pieces.push(record.content);
   }
   return pieces.join("\n");
@@ -306,25 +462,41 @@ function parseToolArguments(call: UnknownRecord): unknown {
 }
 
 function commandLineFromRecord(record: UnknownRecord): string {
-  return readString(record, ["commandLine", "command_line", "command", "cmd"]) ?? commandLineFromValue(record);
+  return (
+    readString(record, ["commandLine", "command_line", "command", "cmd"]) ??
+    commandLineFromValue(record)
+  );
 }
 
 function commandLineFromValue(value: unknown): string {
   if (typeof value === "string") return value;
   const record = asRecord(value);
   if (record) {
-    const direct = readString(record, ["commandLine", "command_line", "command", "cmd"]);
+    const direct = readString(record, [
+      "commandLine",
+      "command_line",
+      "command",
+      "cmd",
+    ]);
     if (direct) return direct;
   }
   return JSON.stringify(toJsonValue(value) ?? {});
 }
 
 function toolName(call: UnknownRecord): string | undefined {
-  return readString(call, ["name", "tool_name"]) ?? readString(asRecord(call.function) ?? {}, ["name"]);
+  return (
+    readString(call, ["name", "tool_name"]) ??
+    readString(asRecord(call.function) ?? {}, ["name"])
+  );
 }
 
 function isFunctionCall(value: UnknownRecord): boolean {
-  return value.type === "function_call" || value.type === "tool_use" || Boolean(value.function) || Boolean((value.arguments || value.input) && toolName(value));
+  return (
+    value.type === "function_call" ||
+    value.type === "tool_use" ||
+    Boolean(value.function) ||
+    Boolean((value.arguments || value.input) && toolName(value))
+  );
 }
 
 function pushOpenAiOutput(result: UnknownRecord[], output: unknown): void {
@@ -399,14 +571,19 @@ function readNumber(record: UnknownRecord, keys: string[]): number | undefined {
   return undefined;
 }
 
-function readBoolean(record: UnknownRecord, keys: string[]): boolean | undefined {
+function readBoolean(
+  record: UnknownRecord,
+  keys: string[],
+): boolean | undefined {
   for (const key of keys) {
     const value = record[key];
     if (typeof value === "boolean") return value;
     if (typeof value === "string") {
       const normalized = value.trim().toLowerCase();
-      if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
-      if (["0", "false", "no", "off", "disabled"].includes(normalized)) return false;
+      if (["1", "true", "yes", "on", "enabled"].includes(normalized))
+        return true;
+      if (["0", "false", "no", "off", "disabled"].includes(normalized))
+        return false;
     }
     if (typeof value === "number" && Number.isFinite(value)) return value !== 0;
   }
@@ -416,13 +593,16 @@ function readBoolean(record: UnknownRecord, keys: string[]): boolean | undefined
 function stringifyFirst(...values: unknown[]): string {
   for (const value of values) {
     if (typeof value === "string") return value;
-    if (value !== undefined && value !== null) return JSON.stringify(toJsonValue(value) ?? value);
+    if (value !== undefined && value !== null)
+      return JSON.stringify(toJsonValue(value) ?? value);
   }
   return "";
 }
 
 function asRecord(value: unknown): UnknownRecord | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as UnknownRecord) : null;
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as UnknownRecord)
+    : null;
 }
 
 function asArray(value: unknown): unknown[] {
@@ -430,12 +610,20 @@ function asArray(value: unknown): unknown[] {
 }
 
 function toJsonValue(value: unknown): JsonValue | undefined {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map((item) => toJsonValue(item) ?? null);
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  )
+    return value;
+  if (Array.isArray(value))
+    return value.map((item) => toJsonValue(item) ?? null);
   const record = asRecord(value);
   if (!record) return undefined;
   const out: Record<string, JsonValue> = {};
-  for (const [key, item] of Object.entries(record)) out[key] = toJsonValue(item) ?? null;
+  for (const [key, item] of Object.entries(record))
+    out[key] = toJsonValue(item) ?? null;
   return out;
 }
 

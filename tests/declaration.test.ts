@@ -7,15 +7,24 @@ import { fileURLToPath } from "node:url";
 import { discoverTaskDeclarations } from "../src/declaration.js";
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
-const benchmarkRoot = [path.resolve(testDirectory, ".."), path.resolve(testDirectory, "..", "..")]
-  .find((candidate) => existsSync(path.join(candidate, "tasks"))) ?? path.resolve(testDirectory, "..", "..");
+const benchmarkRoot =
+  [
+    path.resolve(testDirectory, ".."),
+    path.resolve(testDirectory, "..", ".."),
+  ].find((candidate) => existsSync(path.join(candidate, "tasks"))) ??
+  path.resolve(testDirectory, "..", "..");
 const repoRoot = path.resolve(benchmarkRoot, "..");
 
 test("discovers the current benchmark task declarations", async () => {
   const declarations = await discoverTaskDeclarations(benchmarkRoot);
 
   assert.equal(declarations.length, 5);
-  assert.deepEqual(countByType(declarations), { build: 0, design: 0, debug: 0, rewrite: 5 });
+  assert.deepEqual(countByType(declarations), {
+    build: 0,
+    design: 0,
+    debug: 0,
+    rewrite: 5,
+  });
   assert.deepEqual(
     declarations.map((declaration) => declaration.id),
     [
@@ -33,9 +42,15 @@ test("all declared variants point at existing task-local runners", async () => {
 
   for (const declaration of declarations) {
     const taskDirectory = path.join(benchmarkRoot, declaration.directory);
-    assert.ok(existsSync(path.join(taskDirectory, "benchmark.task.json")), declaration.id);
+    assert.ok(
+      existsSync(path.join(taskDirectory, "benchmark.task.json")),
+      declaration.id,
+    );
     for (const variant of declaration.variants) {
-      assert.ok(existsSync(path.join(taskDirectory, variant.runner)), `${declaration.id}:${variant.id}`);
+      assert.ok(
+        existsSync(path.join(taskDirectory, variant.runner)),
+        `${declaration.id}:${variant.id}`,
+      );
     }
   }
 });
@@ -43,7 +58,9 @@ test("all declared variants point at existing task-local runners", async () => {
 test("rewrite benchmark questions use one configured runner entry", async () => {
   const declarations = await discoverTaskDeclarations(benchmarkRoot);
 
-  for (const declaration of declarations.filter((item) => item.type === "rewrite")) {
+  for (const declaration of declarations.filter(
+    (item) => item.type === "rewrite",
+  )) {
     assert.equal(declaration.variants.length, 1, declaration.id);
     assert.equal(declaration.duplicatePolicy, "none", declaration.id);
     assert.equal(declaration.variants[0]?.default, true, declaration.id);
@@ -51,7 +68,9 @@ test("rewrite benchmark questions use one configured runner entry", async () => 
   }
 });
 
-function countByType(declarations: Awaited<ReturnType<typeof discoverTaskDeclarations>>) {
+function countByType(
+  declarations: Awaited<ReturnType<typeof discoverTaskDeclarations>>,
+) {
   return declarations.reduce(
     (counts, declaration) => {
       counts[declaration.type] += 1;

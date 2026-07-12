@@ -45,7 +45,10 @@ export class BenchmarkMonitor {
   }
 
   async startTask(): Promise<void> {
-    await writeJsonFile(this.cliMetadataPath, this.config.cliMetadata as unknown as JsonValue);
+    await writeJsonFile(
+      this.cliMetadataPath,
+      this.config.cliMetadata as unknown as JsonValue,
+    );
   }
 
   async recordRound(callback: unknown): Promise<BenchmarkAgentRound> {
@@ -57,9 +60,15 @@ export class BenchmarkMonitor {
     return persisted;
   }
 
-  async finishTask(options: FinishTaskOptions = {}): Promise<BenchmarkTaskReport> {
-    const gitDiffPath = options.gitDiffPath ?? path.join(this.config.runDirectory, "git-diff.patch");
-    const gitDiff = options.gitDiff ?? (await captureGitDiff(this.config.repoRoot, gitDiffPath));
+  async finishTask(
+    options: FinishTaskOptions = {},
+  ): Promise<BenchmarkTaskReport> {
+    const gitDiffPath =
+      options.gitDiffPath ??
+      path.join(this.config.runDirectory, "git-diff.patch");
+    const gitDiff =
+      options.gitDiff ??
+      (await captureGitDiff(this.config.repoRoot, gitDiffPath));
     const usage = addUsage(this.rounds.map((round) => round.usage));
     const report: BenchmarkTaskReport = {
       schema: TASK_REPORT_SCHEMA,
@@ -74,7 +83,10 @@ export class BenchmarkMonitor {
       },
       usage: {
         ...usage,
-        providerDurationMs: this.rounds.reduce((total, round) => total + round.providerDurationMs, 0),
+        providerDurationMs: this.rounds.reduce(
+          (total, round) => total + round.providerDurationMs,
+          0,
+        ),
         llmRoundCount: this.rounds.length,
       },
       harnessScore: options.harnessScore ?? null,

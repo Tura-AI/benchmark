@@ -2,13 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { aggregateHarnessScore } from "../src/harness.js";
-import { normalizeCliInstruction, parseAgentRound, parseJsonlRounds } from "../src/parser.js";
+import {
+  normalizeCliInstruction,
+  parseAgentRound,
+  parseJsonlRounds,
+} from "../src/parser.js";
 
 test("normalizeCliInstruction preserves command line and shell-like args", () => {
-  const instruction = normalizeCliInstruction('node script.mjs --flag "two words"');
+  const instruction = normalizeCliInstruction(
+    'node script.mjs --flag "two words"',
+  );
 
   assert.equal(instruction.commandName, "node");
-  assert.deepEqual(instruction.args, ["node", "script.mjs", "--flag", "two words"]);
+  assert.deepEqual(instruction.args, [
+    "node",
+    "script.mjs",
+    "--flag",
+    "two words",
+  ]);
   assert.equal(instruction.commandLine, 'node script.mjs --flag "two words"');
 });
 
@@ -34,8 +45,16 @@ test("parseAgentRound flattens command_run commands into unified calls", () => {
           name: "command_run",
           arguments: JSON.stringify({
             commands: [
-              { command_type: "shell_command", command_line: "npm test", step: 1 },
-              { command_type: "apply_patch", command_line: "PATCH_BODY", step: 2 },
+              {
+                command_type: "shell_command",
+                command_line: "npm test",
+                step: 1,
+              },
+              {
+                command_type: "apply_patch",
+                command_line: "PATCH_BODY",
+                step: 2,
+              },
             ],
           }),
         },
@@ -56,7 +75,13 @@ test("parseAgentRound flattens command_run commands into unified calls", () => {
   });
   assert.equal(round.providerDurationMs, 900);
   assert.deepEqual(
-    round.toolCalls.map((call) => [call.kind, call.name, call.commandLine, call.parentToolName, call.parallelGroupId]),
+    round.toolCalls.map((call) => [
+      call.kind,
+      call.name,
+      call.commandLine,
+      call.parentToolName,
+      call.parallelGroupId,
+    ]),
     [
       ["command", "shell_command", "npm test", "command_run", "1"],
       ["command", "apply_patch", "PATCH_BODY", "command_run", "2"],
@@ -111,8 +136,20 @@ test("parseJsonlRounds normalizes the five benchmark agents' per-round callbacks
       ended_at: "2026-01-01T00:00:01.000Z",
       messages: [{ role: "user", content: "Fix Pi case" }],
       message: { role: "assistant", content: "Pi patched it." },
-      usage: { input_tokens: 11, cached_input_tokens: 2, output_tokens: 3, reasoning_tokens: 4, total_tokens: 20 },
-      tool_calls: [{ id: "pi-tool", name: "shell_command", input: { command: "npm test" } }],
+      usage: {
+        input_tokens: 11,
+        cached_input_tokens: 2,
+        output_tokens: 3,
+        reasoning_tokens: 4,
+        total_tokens: 20,
+      },
+      tool_calls: [
+        {
+          id: "pi-tool",
+          name: "shell_command",
+          input: { command: "npm test" },
+        },
+      ],
     },
     {
       type: "codex-cli.round.completed",
@@ -133,7 +170,14 @@ test("parseJsonlRounds normalizes the five benchmark agents' per-round callbacks
           output_tokens_details: { reasoning_tokens: 2 },
           total_tokens: 20,
         },
-        output: [{ type: "function_call", id: "codex-tool", name: "apply_patch", arguments: "PATCH" }],
+        output: [
+          {
+            type: "function_call",
+            id: "codex-tool",
+            name: "apply_patch",
+            arguments: "PATCH",
+          },
+        ],
       },
     },
     {
@@ -147,8 +191,20 @@ test("parseJsonlRounds normalizes the five benchmark agents' per-round callbacks
       session_id: "claude-turn-1",
       message: {
         role: "assistant",
-        content: [{ type: "text", text: "Claude patched it." }, { type: "tool_use", id: "claude-tool", name: "Bash", input: { command: "pytest" } }],
-        usage: { input_tokens: 13, cache_read_input_tokens: 3, output_tokens: 4 },
+        content: [
+          { type: "text", text: "Claude patched it." },
+          {
+            type: "tool_use",
+            id: "claude-tool",
+            name: "Bash",
+            input: { command: "pytest" },
+          },
+        ],
+        usage: {
+          input_tokens: 13,
+          cache_read_input_tokens: 3,
+          output_tokens: 4,
+        },
       },
     },
     {
@@ -162,8 +218,19 @@ test("parseJsonlRounds normalizes the five benchmark agents' per-round callbacks
       id: "opencode-turn-1",
       input: { messages: [{ role: "user", content: "Fix OpenCode case" }] },
       output: { message: { content: "OpenCode patched it." } },
-      metrics: { inputTokens: 14, cacheInputTokens: 2, outputTokens: 6, reasoningTokens: 1, totalTokens: 23, durationMs: 321 },
-      tool: { id: "opencode-tool", name: "edit", arguments: { file: "src/app.ts" } },
+      metrics: {
+        inputTokens: 14,
+        cacheInputTokens: 2,
+        outputTokens: 6,
+        reasoningTokens: 1,
+        totalTokens: 23,
+        durationMs: 321,
+      },
+      tool: {
+        id: "opencode-tool",
+        name: "edit",
+        arguments: { file: "src/app.ts" },
+      },
     },
     {
       type: "tura.round.completed",
@@ -176,31 +243,57 @@ test("parseJsonlRounds normalizes the five benchmark agents' per-round callbacks
       turn_id: "tura-turn-1",
       full_context: "Fix Tura case",
       assistant_message: "Tura patched it.",
-      runtime_usage: { input_tokens: 15, cached_input_tokens: 1, output_tokens: 7, reasoning_tokens: 2, total_tokens: 25, latency_ms: 456 },
+      runtime_usage: {
+        input_tokens: 15,
+        cached_input_tokens: 1,
+        output_tokens: 7,
+        reasoning_tokens: 2,
+        total_tokens: 25,
+        latency_ms: 456,
+      },
       tool_result: {
         tool_name: "command_run",
-        input: { commands: [{ command_type: "shell_command", command_line: "cargo test", step: 1 }] },
+        input: {
+          commands: [
+            {
+              command_type: "shell_command",
+              command_line: "cargo test",
+              step: 1,
+            },
+          ],
+        },
       },
     },
   ];
 
-  const rounds = parseJsonlRounds(callbacks.map((callback) => JSON.stringify(callback)).join("\n"));
+  const rounds = parseJsonlRounds(
+    callbacks.map((callback) => JSON.stringify(callback)).join("\n"),
+  );
 
-  assert.deepEqual(rounds.map((round) => round.roundId), [
-    "pi-turn-1",
-    "codex-turn-1",
-    "claude-turn-1",
-    "opencode-turn-1",
-    "tura-turn-1",
-  ]);
-  assert.deepEqual(rounds.map((round) => round.output.assistantMessage), [
-    "Pi patched it.",
-    "Codex patched it.",
-    "Claude patched it.",
-    "OpenCode patched it.",
-    "Tura patched it.",
-  ]);
-  assert.deepEqual(rounds.map((round) => round.usage.totalTokens), [20, 20, 17, 23, 25]);
+  assert.deepEqual(
+    rounds.map((round) => round.roundId),
+    [
+      "pi-turn-1",
+      "codex-turn-1",
+      "claude-turn-1",
+      "opencode-turn-1",
+      "tura-turn-1",
+    ],
+  );
+  assert.deepEqual(
+    rounds.map((round) => round.output.assistantMessage),
+    [
+      "Pi patched it.",
+      "Codex patched it.",
+      "Claude patched it.",
+      "OpenCode patched it.",
+      "Tura patched it.",
+    ],
+  );
+  assert.deepEqual(
+    rounds.map((round) => round.usage.totalTokens),
+    [20, 20, 17, 23, 25],
+  );
   assert.deepEqual(
     rounds.map((round) => [
       round.metadata.agentId,
@@ -214,15 +307,67 @@ test("parseJsonlRounds normalizes the five benchmark agents' per-round callbacks
       round.metadata.sessionOrTurnId,
     ]),
     [
-      ["pi", "pi", "direct", "gpt-5.5", "medium", "default", false, "pi.round.completed", "pi-turn-1"],
-      ["codex-cli", "codex-cli", "cli", "gpt-5.5", "medium", "default", false, "codex-cli.round.completed", "codex-turn-1"],
-      ["claudecode", "claudecode", "cli", "claude-opus-4", "medium", "default", false, "claude.round.completed", "claude-turn-1"],
-      ["opencode", "opencode", "cli", "gpt-5.5", "medium", "default", false, "opencode.round.completed", "opencode-turn-1"],
-      ["tura", "tura", "balanced", "openai/gpt-5.5", "medium", "default", false, "tura.round.completed", "tura-turn-1"],
+      [
+        "pi",
+        "pi",
+        "direct",
+        "gpt-5.5",
+        "medium",
+        "default",
+        false,
+        "pi.round.completed",
+        "pi-turn-1",
+      ],
+      [
+        "codex-cli",
+        "codex-cli",
+        "cli",
+        "gpt-5.5",
+        "medium",
+        "default",
+        false,
+        "codex-cli.round.completed",
+        "codex-turn-1",
+      ],
+      [
+        "claudecode",
+        "claudecode",
+        "cli",
+        "claude-opus-4",
+        "medium",
+        "default",
+        false,
+        "claude.round.completed",
+        "claude-turn-1",
+      ],
+      [
+        "opencode",
+        "opencode",
+        "cli",
+        "gpt-5.5",
+        "medium",
+        "default",
+        false,
+        "opencode.round.completed",
+        "opencode-turn-1",
+      ],
+      [
+        "tura",
+        "tura",
+        "balanced",
+        "openai/gpt-5.5",
+        "medium",
+        "default",
+        false,
+        "tura.round.completed",
+        "tura-turn-1",
+      ],
     ],
   );
   assert.deepEqual(
-    rounds.map((round) => round.toolCalls.map((tool) => [tool.kind, tool.name, tool.commandLine])),
+    rounds.map((round) =>
+      round.toolCalls.map((tool) => [tool.kind, tool.name, tool.commandLine]),
+    ),
     [
       [["tool", "shell_command", "npm test"]],
       [["tool", "apply_patch", "PATCH"]],

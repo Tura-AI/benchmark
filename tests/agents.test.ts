@@ -12,10 +12,16 @@ test("agent cli config declares a configurable default matrix", async () => {
   const config = await readAgentCliConfig();
 
   assert.ok(config.defaultAgents.length > 0);
-  assert.ok(config.defaultAgents.every((id) => config.runtimeAliases?.some((agent) => agent.id === id)));
+  assert.ok(
+    config.defaultAgents.every((id) =>
+      config.runtimeAliases?.some((agent) => agent.id === id),
+    ),
+  );
   assert.ok(config.runtimeAliases?.some((agent) => agent.id === "balanced"));
   assert.ok(config.runtimeAliases?.some((agent) => agent.id === "direct"));
-  assert.ok(config.runtimeAliases?.some((agent) => agent.id === "direct-text-only"));
+  assert.ok(
+    config.runtimeAliases?.some((agent) => agent.id === "direct-text-only"),
+  );
 });
 
 test("agent aliases normalize to canonical ids", async () => {
@@ -26,7 +32,10 @@ test("agent aliases normalize to canonical ids", async () => {
   assert.equal(normalizeBenchmarkAgentId("claude-code", config), "claudecode");
   assert.equal(normalizeBenchmarkAgentId("open-code", config), "opencode");
   assert.equal(normalizeBenchmarkAgentId("balanced", config), "tura");
-  assert.throws(() => normalizeBenchmarkAgentId("unknown-agent", config), /unknown benchmark agent/);
+  assert.throws(
+    () => normalizeBenchmarkAgentId("unknown-agent", config),
+    /unknown benchmark agent/,
+  );
 });
 
 test("all agent profiles expose configurable command and model environment names", async () => {
@@ -41,7 +50,11 @@ test("all agent profiles expose configurable command and model environment names
 test("agent cli resolver maps each agent to an editable launch command", async () => {
   const config = await readAgentCliConfig();
   const workspaceDirectory = "C:/workspace/task";
-  const matrix = resolveBenchmarkAgentMatrix(config.defaultAgents, { workspaceDirectory, reasoning: "low" }, config);
+  const matrix = resolveBenchmarkAgentMatrix(
+    config.defaultAgents,
+    { workspaceDirectory, reasoning: "low" },
+    config,
+  );
   const byId = new Map(matrix.map((agent) => [agent.agentId, agent]));
   const pi = mustGet(byId, "pi-agent");
   const codex = mustGet(byId, "codex-cli");

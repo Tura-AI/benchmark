@@ -1,5 +1,6 @@
 export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonValue =
+  JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
 export const CLI_METADATA_SCHEMA = "tura.benchmark.cli-metadata.v1";
@@ -224,11 +225,14 @@ export function emptyUsage(): TokenUsage {
 }
 
 export function addUsage(values: TokenUsage[]): TokenUsage {
-  return values.reduce((total, usage) => ({
-    inputTokens: total.inputTokens + usage.inputTokens,
-    cacheInputTokens: total.cacheInputTokens + usage.cacheInputTokens,
-    outputTokens: total.outputTokens + usage.outputTokens,
-    reasoningTokens: total.reasoningTokens + usage.reasoningTokens,
-    totalTokens: total.totalTokens + usage.totalTokens,
-  }), emptyUsage());
+  return values.reduce(
+    (total, usage) => ({
+      inputTokens: total.inputTokens + usage.inputTokens,
+      cacheInputTokens: total.cacheInputTokens + usage.cacheInputTokens,
+      outputTokens: total.outputTokens + usage.outputTokens,
+      reasoningTokens: total.reasoningTokens + usage.reasoningTokens,
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    emptyUsage(),
+  );
 }

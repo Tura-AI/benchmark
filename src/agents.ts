@@ -64,50 +64,90 @@ export interface ResolveBenchmarkAgentCliOptions {
 
 export function defaultAgentConfigPath(): string {
   const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
-  const sourceConfigPath = path.resolve(moduleDirectory, "..", "config", "agents.json");
-  const compiledConfigPath = path.resolve(moduleDirectory, "..", "..", "config", "agents.json");
-  return moduleDirectory.endsWith(`${path.sep}dist${path.sep}src`) ? compiledConfigPath : sourceConfigPath;
+  const sourceConfigPath = path.resolve(
+    moduleDirectory,
+    "..",
+    "config",
+    "agents.json",
+  );
+  const compiledConfigPath = path.resolve(
+    moduleDirectory,
+    "..",
+    "..",
+    "config",
+    "agents.json",
+  );
+  return moduleDirectory.endsWith(`${path.sep}dist${path.sep}src`)
+    ? compiledConfigPath
+    : sourceConfigPath;
 }
 
-export async function readAgentCliConfig(configPath = defaultAgentConfigPath()): Promise<BenchmarkAgentCliConfig> {
-  const config = JSON.parse(await readFile(configPath, "utf8")) as BenchmarkAgentCliConfig;
+export async function readAgentCliConfig(
+  configPath = defaultAgentConfigPath(),
+): Promise<BenchmarkAgentCliConfig> {
+  const config = JSON.parse(
+    await readFile(configPath, "utf8"),
+  ) as BenchmarkAgentCliConfig;
   validateAgentCliConfig(config);
   return config;
 }
 
 export function validateAgentCliConfig(config: BenchmarkAgentCliConfig): void {
-  if (config.schema !== AGENT_CLI_CONFIG_SCHEMA) throw new Error("invalid benchmark agent cli config schema");
+  if (config.schema !== AGENT_CLI_CONFIG_SCHEMA)
+    throw new Error("invalid benchmark agent cli config schema");
   const ids = new Set<string>();
   for (const profile of config.agents) {
-    if (!profile.id || !Array.isArray(profile.aliases)) throw new Error("agent profile identity is incomplete");
-    if (ids.has(profile.id)) throw new Error(`duplicate benchmark agent id: ${profile.id}`);
+    if (!profile.id || !Array.isArray(profile.aliases))
+      throw new Error("agent profile identity is incomplete");
+    if (ids.has(profile.id))
+      throw new Error(`duplicate benchmark agent id: ${profile.id}`);
     ids.add(profile.id);
-    if (!profile.commandEnv || !profile.defaultCommand) throw new Error(`agent command mapping is incomplete: ${profile.id}`);
-    if (!Array.isArray(profile.defaultArgs)) throw new Error(`agent args must be an array: ${profile.id}`);
+    if (!profile.commandEnv || !profile.defaultCommand)
+      throw new Error(`agent command mapping is incomplete: ${profile.id}`);
+    if (!Array.isArray(profile.defaultArgs))
+      throw new Error(`agent args must be an array: ${profile.id}`);
   }
   for (const id of config.defaultAgents) {
-    const runtime = config.runtimeAliases?.find((candidate) => candidate.id === id);
-    if (!ids.has(id) && !runtime) throw new Error(`default benchmark agent is not declared: ${id}`);
+    const runtime = config.runtimeAliases?.find(
+      (candidate) => candidate.id === id,
+    );
+    if (!ids.has(id) && !runtime)
+      throw new Error(`default benchmark agent is not declared: ${id}`);
   }
   const runtimeNames = new Set<string>();
   for (const runtime of config.runtimeAliases ?? []) {
-    if (!runtime.id || !ids.has(runtime.profile) || !runtime.kind || !runtime.mode) {
-      throw new Error(`runtime agent mapping is incomplete: ${runtime.id || "unknown"}`);
+    if (
+      !runtime.id ||
+      !ids.has(runtime.profile) ||
+      !runtime.kind ||
+      !runtime.mode
+    ) {
+      throw new Error(
+        `runtime agent mapping is incomplete: ${runtime.id || "unknown"}`,
+      );
     }
     for (const name of [runtime.id, ...runtime.aliases]) {
-      if (runtimeNames.has(name)) throw new Error(`duplicate runtime agent name: ${name}`);
+      if (runtimeNames.has(name))
+        throw new Error(`duplicate runtime agent name: ${name}`);
       runtimeNames.add(name);
     }
   }
 }
 
-export function normalizeBenchmarkAgentId(agentId: string, config: BenchmarkAgentCliConfig): BenchmarkAgentId {
+export function normalizeBenchmarkAgentId(
+  agentId: string,
+  config: BenchmarkAgentCliConfig,
+): BenchmarkAgentId {
   const normalized = agentId.trim().toLowerCase();
   const runtime = config.runtimeAliases?.find(
-    (candidate) => candidate.id === normalized || candidate.aliases.includes(normalized),
+    (candidate) =>
+      candidate.id === normalized || candidate.aliases.includes(normalized),
   );
   if (runtime) return runtime.profile;
-  const profile = config.agents.find((candidate) => candidate.id === normalized || candidate.aliases.includes(normalized));
+  const profile = config.agents.find(
+    (candidate) =>
+      candidate.id === normalized || candidate.aliases.includes(normalized),
+  );
   if (!profile) throw new Error(`unknown benchmark agent: ${agentId}`);
   return profile.id;
 }
@@ -119,14 +159,26 @@ export function resolveBenchmarkAgentCli(
 ): AgentLaunchConfig {
   const requestedId = agentId.trim().toLowerCase();
   const runtime = config.runtimeAliases?.find(
-    (candidate) => candidate.id === requestedId || candidate.aliases.includes(requestedId),
+    (candidate) =>
+      candidate.id === requestedId || candidate.aliases.includes(requestedId),
   );
   const normalizedId = normalizeBenchmarkAgentId(agentId, config);
-  const profile = config.agents.find((candidate) => candidate.id === normalizedId);
-  if (!profile) throw new Error(`missing benchmark agent profile: ${normalizedId}`);
+  const profile = config.agents.find(
+    (candidate) => candidate.id === normalizedId,
+  );
+  if (!profile)
+    throw new Error(`missing benchmark agent profile: ${normalizedId}`);
   const env = options.env ?? process.env;
-  const model = options.model ?? readEnv(env, profile.modelEnv) ?? profile.defaultModel ?? "unknown";
-  const reasoning = options.reasoning ?? readEnv(env, profile.reasoningEnv) ?? profile.defaultReasoning ?? "medium";
+  const model =
+    options.model ??
+    readEnv(env, profile.modelEnv) ??
+    profile.defaultModel ??
+    "unknown";
+  const reasoning =
+    options.reasoning ??
+    readEnv(env, profile.reasoningEnv) ??
+    profile.defaultReasoning ??
+    "medium";
   const variables = {
     workspace: options.workspaceDirectory ?? ".",
     repoRoot: options.repoRoot ?? ".",
@@ -136,19 +188,33 @@ export function resolveBenchmarkAgentCli(
     ...(runtime?.kind === "tura" ? { turaAgentId: runtime.id } : {}),
     ...options.variables,
   };
-  const cliArgs = [...profile.defaultArgs.map((arg) => expandTemplate(arg, variables)), ...(options.extraArgs ?? [])];
+  const cliArgs = [
+    ...profile.defaultArgs.map((arg) => expandTemplate(arg, variables)),
+    ...(options.extraArgs ?? []),
+  ];
   return {
     agentId: runtime?.id ?? normalizedId,
     agentName: profile.agentName,
-    agentVersion: options.agentVersion ?? readEnv(env, profile.versionEnv) ?? profile.defaultVersion ?? model,
-    agentApplicationVersion: options.agentApplicationVersion ?? readEnv(env, profile.versionEnv) ?? profile.defaultVersion ?? model,
-    cliLaunchCommandName: readEnv(env, profile.commandEnv) ?? profile.defaultCommand,
+    agentVersion:
+      options.agentVersion ??
+      readEnv(env, profile.versionEnv) ??
+      profile.defaultVersion ??
+      model,
+    agentApplicationVersion:
+      options.agentApplicationVersion ??
+      readEnv(env, profile.versionEnv) ??
+      profile.defaultVersion ??
+      model,
+    cliLaunchCommandName:
+      readEnv(env, profile.commandEnv) ?? profile.defaultCommand,
     cliArgs,
     pluginSkillGithubUrls: profile.pluginSkillGithubUrls,
     githubRepositoryUrl: profile.githubRepositoryUrl,
     releasePageUrl: profile.releasePageUrl,
-    releaseDownloadUrl: readEnv(env, profile.releaseDownloadUrlEnv) ?? profile.releaseDownloadUrl,
-    releaseSha256: readEnv(env, profile.releaseSha256Env) ?? profile.releaseSha256,
+    releaseDownloadUrl:
+      readEnv(env, profile.releaseDownloadUrlEnv) ?? profile.releaseDownloadUrl,
+    releaseSha256:
+      readEnv(env, profile.releaseSha256Env) ?? profile.releaseSha256,
     appendInstruction: options.appendInstruction ?? profile.appendInstruction,
     env: materializeEnv(profile.defaultEnv),
   };
@@ -159,10 +225,14 @@ export function resolveBenchmarkAgentMatrix(
   options: ResolveBenchmarkAgentCliOptions,
   config: BenchmarkAgentCliConfig,
 ): AgentLaunchConfig[] {
-  return agentIds.map((agentId) => resolveBenchmarkAgentCli(agentId, options, config));
+  return agentIds.map((agentId) =>
+    resolveBenchmarkAgentCli(agentId, options, config),
+  );
 }
 
-export function agentCliConfigSummary(config: BenchmarkAgentCliConfig): JsonObject {
+export function agentCliConfigSummary(
+  config: BenchmarkAgentCliConfig,
+): JsonObject {
   return {
     schema: config.schema,
     defaultAgents: [...config.defaultAgents],
@@ -184,11 +254,23 @@ function readEnv(env: NodeJS.ProcessEnv, name?: string): string | undefined {
   return value && value.trim() ? value : undefined;
 }
 
-function expandTemplate(value: string, variables: Record<string, string>): string {
-  return value.replace(/\{([A-Za-z0-9_]+)\}/g, (_, name: string) => variables[name] ?? "");
+function expandTemplate(
+  value: string,
+  variables: Record<string, string>,
+): string {
+  return value.replace(
+    /\{([A-Za-z0-9_]+)\}/g,
+    (_, name: string) => variables[name] ?? "",
+  );
 }
 
-function materializeEnv(values?: Record<string, string>): Record<string, string> | undefined {
+function materializeEnv(
+  values?: Record<string, string>,
+): Record<string, string> | undefined {
   if (!values) return undefined;
-  return Object.fromEntries(Object.entries(values).filter((entry): entry is [string, string] => Boolean(entry[1])));
+  return Object.fromEntries(
+    Object.entries(values).filter((entry): entry is [string, string] =>
+      Boolean(entry[1]),
+    ),
+  );
 }

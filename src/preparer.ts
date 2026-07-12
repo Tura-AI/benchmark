@@ -74,8 +74,10 @@ export interface AgentRunResult {
 export async function prepareBenchmarkEnvironment(
   config: BenchmarkEnvironmentConfig,
 ): Promise<PreparedBenchmarkEnvironment> {
-  const workspaceDirectory = config.workspaceDirectory ?? path.join(config.runRoot, "workspace");
-  const harnessDirectory = config.harnessDirectory ?? path.join(config.runRoot, "harness");
+  const workspaceDirectory =
+    config.workspaceDirectory ?? path.join(config.runRoot, "workspace");
+  const harnessDirectory =
+    config.harnessDirectory ?? path.join(config.runRoot, "harness");
   await rm(workspaceDirectory, { recursive: true, force: true });
   await ensureDirectory(config.runRoot);
   await ensureDirectory(harnessDirectory);
@@ -84,7 +86,10 @@ export async function prepareBenchmarkEnvironment(
   } else {
     await mkdir(workspaceDirectory, { recursive: true });
   }
-  const startRepoSnapshot = await snapshotRepoState(config.repoRoot, path.join(config.runRoot, "start-repo-snapshot.json"));
+  const startRepoSnapshot = await snapshotRepoState(
+    config.repoRoot,
+    path.join(config.runRoot, "start-repo-snapshot.json"),
+  );
   const prepared = {
     benchmarkId: config.benchmarkId,
     runId: config.runId,
@@ -94,7 +99,10 @@ export async function prepareBenchmarkEnvironment(
     harnessDirectory,
     startRepoSnapshot,
   };
-  await writeJsonFile(path.join(config.runRoot, "prepared-environment.json"), prepared as unknown as JsonValue);
+  await writeJsonFile(
+    path.join(config.runRoot, "prepared-environment.json"),
+    prepared as unknown as JsonValue,
+  );
   return prepared;
 }
 
@@ -106,7 +114,11 @@ export function buildAgentRunRequest(
   const args = [...(agent.cliArgs ?? [])];
   if (agent.appendInstruction !== false) args.push(instruction.commandLine);
   const cliCommand = [agent.cliLaunchCommandName, ...args].join(" ");
-  const cliMetadata = createCliMetadata(environment.repoRoot, agent, cliCommand);
+  const cliMetadata = createCliMetadata(
+    environment.repoRoot,
+    agent,
+    cliCommand,
+  );
   return {
     agentId: agent.agentId,
     workspaceDirectory: environment.workspaceDirectory,
@@ -125,14 +137,23 @@ export async function executeAgentRunRequest(
   timeoutMs: number,
 ): Promise<AgentRunResult> {
   await ensureDirectory(outputDirectory);
-  const stdoutPath = path.join(outputDirectory, `${request.agentId}.stdout.jsonl`);
-  const stderrPath = path.join(outputDirectory, `${request.agentId}.stderr.log`);
+  const stdoutPath = path.join(
+    outputDirectory,
+    `${request.agentId}.stdout.jsonl`,
+  );
+  const stderrPath = path.join(
+    outputDirectory,
+    `${request.agentId}.stderr.log`,
+  );
   const started = Date.now();
   let stdout = "";
   let stderr = "";
   let timedOut = false;
 
-  const result = await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+  const result = await new Promise<{
+    exitCode: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve) => {
     const child = spawn(request.commandName, request.args, {
       cwd: request.workspaceDirectory,
       env: { ...process.env, ...request.env },
@@ -173,7 +194,10 @@ export async function executeAgentRunRequest(
   };
 }
 
-export async function snapshotRepoState(repoRoot: string, snapshotPath: string): Promise<BenchmarkRepoSnapshot> {
+export async function snapshotRepoState(
+  repoRoot: string,
+  snapshotPath: string,
+): Promise<BenchmarkRepoSnapshot> {
   const snapshot: BenchmarkRepoSnapshot = {
     repoRoot,
     gitHead: runGit(repoRoot, ["rev-parse", "HEAD"]),
@@ -185,7 +209,10 @@ export async function snapshotRepoState(repoRoot: string, snapshotPath: string):
   return snapshot;
 }
 
-export async function captureGitDiff(repoRoot: string, diffPath: string): Promise<string> {
+export async function captureGitDiff(
+  repoRoot: string,
+  diffPath: string,
+): Promise<string> {
   const diff = runGit(repoRoot, ["diff", "--binary"]) ?? "";
   await writeTextFile(diffPath, diff);
   return diff;
@@ -217,12 +244,16 @@ function softwareMetadata(repoRoot: string): BenchmarkSoftwareMetadata {
   };
 }
 
-function agentMetadata(agent: AgentLaunchConfig, cliCommand: string): BenchmarkAgentMetadata {
+function agentMetadata(
+  agent: AgentLaunchConfig,
+  cliCommand: string,
+): BenchmarkAgentMetadata {
   return {
     agentId: agent.agentId,
     agentName: agent.agentName ?? agent.agentId,
     agentVersion: agent.agentVersion,
-    agentApplicationVersion: agent.agentApplicationVersion ?? agent.agentVersion,
+    agentApplicationVersion:
+      agent.agentApplicationVersion ?? agent.agentVersion,
     cliLaunchCommandName: agent.cliLaunchCommandName,
     cliCommand,
     pluginSkillGithubUrls: agent.pluginSkillGithubUrls ?? [],
@@ -234,13 +265,21 @@ function agentMetadata(agent: AgentLaunchConfig, cliCommand: string): BenchmarkA
 }
 
 function runGit(repoRoot: string, args: string[]): string | undefined {
-  const result = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8", windowsHide: true });
+  const result = spawnSync("git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    windowsHide: true,
+  });
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
-function readPackageJson(repoRoot: string): { name?: string; version?: string } | undefined {
+function readPackageJson(
+  repoRoot: string,
+): { name?: string; version?: string } | undefined {
   try {
-    return JSON.parse(readFileSync(path.join(repoRoot, "package.json"), "utf8")) as {
+    return JSON.parse(
+      readFileSync(path.join(repoRoot, "package.json"), "utf8"),
+    ) as {
       name?: string;
       version?: string;
     };

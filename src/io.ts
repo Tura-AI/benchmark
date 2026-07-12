@@ -8,7 +8,10 @@ export async function ensureDirectory(directory: string): Promise<void> {
   await mkdir(directory, { recursive: true });
 }
 
-export async function writeJsonFile(filePath: string, value: JsonValue): Promise<void> {
+export async function writeJsonFile(
+  filePath: string,
+  value: JsonValue,
+): Promise<void> {
   await ensureDirectory(path.dirname(filePath));
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
@@ -17,7 +20,10 @@ export async function readJsonFile<T>(filePath: string): Promise<T> {
   return JSON.parse(await readFile(filePath, "utf8")) as T;
 }
 
-export async function writeTextFile(filePath: string, value: string): Promise<void> {
+export async function writeTextFile(
+  filePath: string,
+  value: string,
+): Promise<void> {
   await ensureDirectory(path.dirname(filePath));
   await writeFile(filePath, value, "utf8");
 }

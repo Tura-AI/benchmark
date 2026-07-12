@@ -1,6 +1,8 @@
 # Tura Benchmark
 
-`benchmark/` is the repository's manual long-horizon evaluation subsystem. It
+Canonical repository: <https://github.com/Tura-AI/benchmark>
+
+This repository is Tura's manual long-horizon evaluation subsystem. It
 keeps benchmark definitions separate from product tests and separates stable
 task data from reusable execution code, agent configuration, and generated run
 artifacts.
@@ -8,6 +10,84 @@ artifacts.
 Benchmarks may launch external processes, clone repositories, use network and
 provider quota, and create large outputs. They are not part of GitHub CI or the
 default workspace test command.
+
+## Quick start
+
+Requirements: Node.js 20 or newer and Python 3.11 or newer.
+
+```sh
+git clone https://github.com/Tura-AI/benchmark.git
+cd benchmark
+npm ci
+node scripts/benchmark.mjs list
+node scripts/benchmark.mjs validate
+```
+
+Inspect a run plan before launching any agent:
+
+```sh
+node scripts/benchmark.mjs plan --task eza --agents balanced,direct --replicates 2
+```
+
+Launch the same plan only after checking its agent, model, concurrency, paths,
+and potential provider cost:
+
+```sh
+node scripts/benchmark.mjs run --task eza --agents balanced,direct --replicates 2
+```
+
+The public commands are:
+
+- `list`: print available tasks and configured agent profiles;
+- `plan`: print the resolved jobs and environment without launching agents;
+- `run`: execute the resolved jobs with bounded concurrency;
+- `validate`: validate configuration and task declarations without a live run.
+
+## Configuration
+
+Runtime defaults and matrices live in `config/benchmark.json`. Agent commands,
+models, environment overrides, and formal runtime IDs live in
+`config/agents.json`. Do not encode a machine path, model, or agent matrix in a
+task runner.
+
+Settings use this precedence, from highest to lowest:
+
+1. CLI options such as `--config`, `--agents`, `--concurrency`, and `--model`;
+2. `TURA_BENCHMARK_*` environment variables;
+3. the selected JSON configuration file;
+4. repository defaults.
+
+Use `TURA_BENCHMARK_CONFIG` to select another runtime configuration and
+`TURA_BENCHMARK_AGENT_CONFIG` to select another agent configuration. Run
+`node scripts/benchmark.mjs help` for the complete option and environment list.
+
+Tura's accepted runtime agent IDs are exactly `balanced`, `direct`, and
+`direct-text-only`, matching `tura agent list --json`. Planning is a separate
+runtime option; it is not part of an agent ID. Other CLIs use the IDs declared
+in `config/agents.json`, such as `codex-cli`.
+
+## Results and local artifacts
+
+Published artifacts under `results/` are tracked compatibility data. Their
+directory layout and schemas are part of the repository contract. New raw logs,
+temporary workspaces, downloaded repositories, and provider state belong under
+the ignored `raw/` or `.tura/` directories, not under `results/`.
+
+All benchmark task, harness, and published artifact links use the canonical
+repository `https://github.com/Tura-AI/benchmark`. Tura CLI release and runtime
+metadata intentionally use `https://github.com/Tura-AI/tura`; those links refer
+to the CLI itself, not to benchmark source code.
+
+## Quality gates
+
+```sh
+npm run format
+npm run check
+```
+
+`npm run check` runs formatting, TypeScript checks, all local tests, schema
+validation against published results, benchmark-link auditing, and Knip dead
+code analysis. It does not launch a live agent or consume provider quota.
 
 ## Architecture
 
@@ -42,7 +122,7 @@ modules are the compatibility runtime used by task-local runners. A file in
 ## Directory design
 
 ```text
-benchmark/
+./
 ├── config/
 │   └── agents.json        Editable CLI profile and launch defaults
 ├── lib/                   Runtime compatibility helpers used by runners
@@ -110,7 +190,7 @@ and must not be synthesized.
 benchmarks. When it is unset, runners use
 `~/Documents/tura-benchmark/raw`. `COMMAND_RUN_BENCHMARK_RAW_ROOT` remains a
 compatibility alias; task runners must resolve their run directories through
-`benchmark/lib/business_paths.mjs` rather than constructing another output
+`lib/business_paths.mjs` rather than constructing another output
 root.
 
 Source-port benchmark runs must start Tura through the normal
