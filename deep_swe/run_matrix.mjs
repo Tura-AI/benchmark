@@ -14,6 +14,7 @@ import {
   priorityEnabled,
   runGenericAgentCli,
 } from "../lib/generic_agent_cli.mjs";
+import { projectPython } from "../lib/python_runtime.mjs";
 import {
   HARNESS_CONCURRENCY,
   VERIFIER_COMMAND,
@@ -806,7 +807,7 @@ async function validateScheme(job, result, container) {
       ]),
     );
   const schemaResult = await runProcess(
-    "python",
+    projectPython(repoRoot),
     [path.join(scriptDir, "validate_rounds.py"), result.rounds_jsonl_path],
     { timeoutMs: 120_000 },
   );

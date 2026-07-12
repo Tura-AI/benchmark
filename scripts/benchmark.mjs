@@ -6,6 +6,8 @@ import process from "node:process";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { projectPython } from "../lib/python_runtime.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
 const command = args._[0] || "help";
@@ -252,7 +254,7 @@ function resolveAgent(id) {
 
 function validate() {
   const result = spawnSync(
-    "python",
+    projectPython(root),
     [path.join(root, "schema", "validate.py"), "--benchmark-data", root],
     { cwd: root, stdio: "inherit", windowsHide: true },
   );
