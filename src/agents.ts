@@ -7,9 +7,7 @@ import type { JsonObject } from "./contracts.js";
 import type { AgentLaunchConfig } from "./preparer.js";
 
 export const AGENT_CLI_CONFIG_SCHEMA = "tura.benchmark.agent-cli-config.v1";
-export const DEFAULT_BENCHMARK_AGENTS = ["pi", "codex-cli", "claudecode", "opencode", "tura"] as const;
-
-export type BenchmarkAgentId = (typeof DEFAULT_BENCHMARK_AGENTS)[number];
+export type BenchmarkAgentId = string;
 
 export interface BenchmarkAgentCliProfile {
   id: BenchmarkAgentId;
@@ -39,7 +37,16 @@ export interface BenchmarkAgentCliProfile {
 export interface BenchmarkAgentCliConfig {
   schema: typeof AGENT_CLI_CONFIG_SCHEMA;
   defaultAgents: BenchmarkAgentId[];
+  runtimeAliases?: BenchmarkRuntimeAgent[];
   agents: BenchmarkAgentCliProfile[];
+}
+
+export interface BenchmarkRuntimeAgent {
+  id: string;
+  profile: string;
+  aliases: string[];
+  kind: string;
+  mode: string;
 }
 
 export interface ResolveBenchmarkAgentCliOptions {
@@ -70,25 +77,36 @@ export async function readAgentCliConfig(configPath = defaultAgentConfigPath()):
 
 export function validateAgentCliConfig(config: BenchmarkAgentCliConfig): void {
   if (config.schema !== AGENT_CLI_CONFIG_SCHEMA) throw new Error("invalid benchmark agent cli config schema");
-  const supportedIds = new Set<string>(DEFAULT_BENCHMARK_AGENTS);
   const ids = new Set<string>();
   for (const profile of config.agents) {
-    if (!supportedIds.has(profile.id)) throw new Error(`unsupported benchmark agent id: ${profile.id}`);
+    if (!profile.id || !Array.isArray(profile.aliases)) throw new Error("agent profile identity is incomplete");
     if (ids.has(profile.id)) throw new Error(`duplicate benchmark agent id: ${profile.id}`);
     ids.add(profile.id);
     if (!profile.commandEnv || !profile.defaultCommand) throw new Error(`agent command mapping is incomplete: ${profile.id}`);
     if (!Array.isArray(profile.defaultArgs)) throw new Error(`agent args must be an array: ${profile.id}`);
   }
-  for (const id of DEFAULT_BENCHMARK_AGENTS) {
-    if (!ids.has(id)) throw new Error(`missing benchmark agent profile: ${id}`);
-  }
   for (const id of config.defaultAgents) {
-    if (!ids.has(id)) throw new Error(`default benchmark agent is not declared: ${id}`);
+    const runtime = config.runtimeAliases?.find((candidate) => candidate.id === id);
+    if (!ids.has(id) && !runtime) throw new Error(`default benchmark agent is not declared: ${id}`);
+  }
+  const runtimeNames = new Set<string>();
+  for (const runtime of config.runtimeAliases ?? []) {
+    if (!runtime.id || !ids.has(runtime.profile) || !runtime.kind || !runtime.mode) {
+      throw new Error(`runtime agent mapping is incomplete: ${runtime.id || "unknown"}`);
+    }
+    for (const name of [runtime.id, ...runtime.aliases]) {
+      if (runtimeNames.has(name)) throw new Error(`duplicate runtime agent name: ${name}`);
+      runtimeNames.add(name);
+    }
   }
 }
 
 export function normalizeBenchmarkAgentId(agentId: string, config: BenchmarkAgentCliConfig): BenchmarkAgentId {
   const normalized = agentId.trim().toLowerCase();
+  const runtime = config.runtimeAliases?.find(
+    (candidate) => candidate.id === normalized || candidate.aliases.includes(normalized),
+  );
+  if (runtime) return runtime.profile;
   const profile = config.agents.find((candidate) => candidate.id === normalized || candidate.aliases.includes(normalized));
   if (!profile) throw new Error(`unknown benchmark agent: ${agentId}`);
   return profile.id;
@@ -99,6 +117,10 @@ export function resolveBenchmarkAgentCli(
   options: ResolveBenchmarkAgentCliOptions,
   config: BenchmarkAgentCliConfig,
 ): AgentLaunchConfig {
+  const requestedId = agentId.trim().toLowerCase();
+  const runtime = config.runtimeAliases?.find(
+    (candidate) => candidate.id === requestedId || candidate.aliases.includes(requestedId),
+  );
   const normalizedId = normalizeBenchmarkAgentId(agentId, config);
   const profile = config.agents.find((candidate) => candidate.id === normalizedId);
   if (!profile) throw new Error(`missing benchmark agent profile: ${normalizedId}`);
@@ -111,11 +133,12 @@ export function resolveBenchmarkAgentCli(
     model,
     reasoning,
     ...profile.defaultVariables,
+    ...(runtime?.kind === "tura" ? { turaAgentId: runtime.id } : {}),
     ...options.variables,
   };
   const cliArgs = [...profile.defaultArgs.map((arg) => expandTemplate(arg, variables)), ...(options.extraArgs ?? [])];
   return {
-    agentId: normalizedId,
+    agentId: runtime?.id ?? normalizedId,
     agentName: profile.agentName,
     agentVersion: options.agentVersion ?? readEnv(env, profile.versionEnv) ?? profile.defaultVersion ?? model,
     agentApplicationVersion: options.agentApplicationVersion ?? readEnv(env, profile.versionEnv) ?? profile.defaultVersion ?? model,

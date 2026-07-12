@@ -11,13 +11,13 @@ import {
   genericAgentMode,
   parseGenericAgents,
   runGenericAgentCli,
-} from "./lib/generic_agent_cli.mjs"
-import { benchmarkRawRoot } from "./lib/business_paths.mjs"
+} from "../lib/generic_agent_cli.mjs"
+import { benchmarkRawRoot } from "../lib/business_paths.mjs"
 
-const benchmarkDir = path.dirname(fileURLToPath(import.meta.url))
-const repoRoot = path.dirname(benchmarkDir)
+const scriptDir = path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.dirname(scriptDir)
 const taskId = requiredEnv("COMMAND_RUN_DESIGN_TASK")
-const taskDir = path.join(benchmarkDir, "tasks", "design", safeSegment(taskId))
+const taskDir = path.join(repoRoot, "tasks", "design", safeSegment(taskId))
 const task = readJson(path.join(taskDir, "task.json"))
 assert.equal(task.id, taskId, "task id does not match its directory")
 assert.equal(task.category, "design", "design runner only accepts design tasks")

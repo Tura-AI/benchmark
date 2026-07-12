@@ -6,13 +6,13 @@ import process from "node:process"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
-import { benchmarkRawRoot } from "./lib/business_paths.mjs"
-import { parseGenericAgents } from "./lib/generic_agent_cli.mjs"
+import { benchmarkRawRoot } from "../lib/business_paths.mjs"
+import { parseGenericAgents } from "../lib/generic_agent_cli.mjs"
 
-const benchmarkDir = path.dirname(fileURLToPath(import.meta.url))
-const repoRoot = path.dirname(benchmarkDir)
-const taskRoot = path.join(benchmarkDir, "tasks", "design")
-const agents = parseGenericAgents(process.env.COMMAND_RUN_DESIGN_MATRIX_AGENTS, "tura-direct,codex-cli")
+const scriptDir = path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.dirname(scriptDir)
+const taskRoot = path.join(repoRoot, "tasks", "design")
+const agents = parseGenericAgents(process.env.COMMAND_RUN_DESIGN_MATRIX_AGENTS, "direct,codex-cli")
 const selectedTasks = selectTasks(process.env.COMMAND_RUN_DESIGN_MATRIX_TASKS)
 const defaultReplicates = positiveInteger(process.env.COMMAND_RUN_DESIGN_MATRIX_DEFAULT_REPLICATES || 1, "default replicate count")
 const replicateOverrides = parseReplicateOverrides(process.env.COMMAND_RUN_DESIGN_MATRIX_REPLICATES_BY_TASK)
@@ -131,7 +131,7 @@ function runJob(job) {
       COMMAND_RUN_DESIGN_RUN_SUFFIX: job.suffix,
       COMMAND_RUN_AGENT_AGENTS: job.agentId,
     }
-    const child = spawn(process.execPath, [path.join(benchmarkDir, "run_design_task.mjs")], {
+    const child = spawn(process.execPath, [path.join(scriptDir, "run_design_task.mjs")], {
       cwd: repoRoot,
       env,
       stdio: ["ignore", stdoutFd, stderrFd],
@@ -250,7 +250,7 @@ function parseList(value) {
 }
 
 function agentShort(agentId) {
-  return agentId === "tura-direct" ? "td" : agentId === "codex-cli" ? "cx" : safeName(agentId)
+  return agentId === "direct" ? "td" : agentId === "codex-cli" ? "cx" : safeName(agentId)
 }
 
 function safeName(value) {

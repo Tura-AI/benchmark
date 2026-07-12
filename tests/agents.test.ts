@@ -2,21 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_BENCHMARK_AGENTS,
   normalizeBenchmarkAgentId,
   readAgentCliConfig,
   resolveBenchmarkAgentCli,
   resolveBenchmarkAgentMatrix,
 } from "../src/agents.js";
 
-test("agent cli config declares the required five-agent benchmark matrix", async () => {
+test("agent cli config declares a configurable default matrix", async () => {
   const config = await readAgentCliConfig();
 
-  assert.deepEqual(config.defaultAgents, [...DEFAULT_BENCHMARK_AGENTS]);
-  assert.deepEqual(
-    config.agents.map((agent) => agent.id),
-    ["pi", "codex-cli", "claudecode", "opencode", "tura"],
-  );
+  assert.ok(config.defaultAgents.length > 0);
+  assert.ok(config.defaultAgents.every((id) => config.runtimeAliases?.some((agent) => agent.id === id)));
+  assert.ok(config.runtimeAliases?.some((agent) => agent.id === "balanced"));
+  assert.ok(config.runtimeAliases?.some((agent) => agent.id === "direct"));
+  assert.ok(config.runtimeAliases?.some((agent) => agent.id === "direct-text-only"));
 });
 
 test("agent aliases normalize to canonical ids", async () => {
@@ -26,14 +25,16 @@ test("agent aliases normalize to canonical ids", async () => {
   assert.equal(normalizeBenchmarkAgentId("codex-cli", config), "codex-cli");
   assert.equal(normalizeBenchmarkAgentId("claude-code", config), "claudecode");
   assert.equal(normalizeBenchmarkAgentId("open-code", config), "opencode");
-  assert.equal(normalizeBenchmarkAgentId("tura-fast-shll", config), "tura");
+  assert.equal(normalizeBenchmarkAgentId("balanced", config), "tura");
+  assert.throws(() => normalizeBenchmarkAgentId("unknown-agent", config), /unknown benchmark agent/);
 });
 
-test("all agent profiles default to GPT-5.6-Sol", async () => {
+test("all agent profiles expose configurable command and model environment names", async () => {
   const config = await readAgentCliConfig();
 
   for (const agent of config.agents) {
-    assert.match(agent.defaultModel ?? "", /(?:^|\/)gpt-5\.6-sol$/, agent.id);
+    assert.ok(agent.commandEnv, agent.id);
+    assert.ok(agent.modelEnv, agent.id);
   }
 });
 
@@ -42,11 +43,11 @@ test("agent cli resolver maps each agent to an editable launch command", async (
   const workspaceDirectory = "C:/workspace/task";
   const matrix = resolveBenchmarkAgentMatrix(config.defaultAgents, { workspaceDirectory, reasoning: "low" }, config);
   const byId = new Map(matrix.map((agent) => [agent.agentId, agent]));
-  const pi = mustGet(byId, "pi");
+  const pi = mustGet(byId, "pi-agent");
   const codex = mustGet(byId, "codex-cli");
-  const claudecode = mustGet(byId, "claudecode");
+  const claudecode = mustGet(byId, "claude-code");
   const opencode = mustGet(byId, "opencode");
-  const tura = mustGet(byId, "tura");
+  const tura = mustGet(byId, "balanced");
 
   assert.equal(pi.cliLaunchCommandName, "pi");
   assert.deepEqual(pi.cliArgs?.slice(0, 2), ["--mode", "json"]);
@@ -63,6 +64,7 @@ test("agent cli resolver maps each agent to an editable launch command", async (
   assert.deepEqual(opencode.cliArgs?.slice(0, 2), ["run", "--model"]);
   assert.equal(tura.cliLaunchCommandName, "tura");
   assert.ok(tura.cliArgs?.includes("--cwd"));
+  assert.ok(tura.cliArgs?.includes("balanced"));
   assert.equal(tura.env?.TURA_COMMAND_RUN_STRICT_JSON, "0");
 });
 

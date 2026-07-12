@@ -9,7 +9,7 @@ import { benchmarkRawRoot, businessRunPaths, normalizeBusinessSummary } from "..
 
 test("source-port benchmark prohibits Tura embedded mode", () => {
   const runner = fs.readFileSync(
-    path.resolve(import.meta.dirname, "..", "tasks", "refactoring", "source-port-python", "runner.mjs"),
+    path.resolve(import.meta.dirname, "..", "tasks", "rewrite", "source-port-python", "runner.mjs"),
     "utf8",
   )
   assert.match(runner, /Tura embedded mode is prohibited for source-port benchmarks/)
@@ -18,10 +18,10 @@ test("source-port benchmark prohibits Tura embedded mode", () => {
 
 test("TanStack benchmark uses codex-cli and prohibits Tura embedded sandbox runs", () => {
   const runner = fs.readFileSync(
-    path.resolve(import.meta.dirname, "..", "tasks", "refactoring", "prompt-gallery-tanstack-rebuild", "runner.mjs"),
+    path.resolve(import.meta.dirname, "..", "tasks", "rewrite", "prompt-gallery-tanstack-rebuild", "runner.mjs"),
     "utf8",
   )
-  assert.match(runner, /\["codex-cli", "codex-cli"\]/)
+  assert.match(runner, /parseGenericAgents\(process\.env\.COMMAND_RUN_AGENT_AGENTS, "codex-cli,balanced"\)/)
   assert.match(runner, /Tura embedded mode is prohibited for benchmark runs/)
   assert.doesNotMatch(runner, /turaEmbedded\s*\?\s*\["--embedded"\]/)
   assert.doesNotMatch(runner, /^\s*"--sandbox",\s*$/m)
@@ -208,7 +208,7 @@ test("source-port result bridge aggregates lifecycle events into per-agent round
     run_root: runRoot,
     summary_path: path.join(runRoot, "summary.json"),
   }
-  const turaDir = path.join(runRoot, "zip-password-finder", "tura-direct-1")
+  const turaDir = path.join(runRoot, "zip-password-finder", "direct-1")
   const codexDir = path.join(runRoot, "zip-password-finder", "codex-cli-2")
   fs.mkdirSync(path.join(turaDir, "context-and-calls"), { recursive: true })
   fs.mkdirSync(codexDir, { recursive: true })
@@ -273,7 +273,7 @@ test("source-port result bridge aggregates lifecycle events into per-agent round
     service_tier: "default",
     results: [
       {
-        agent: "tura-direct",
+        agent: "direct",
         task: "zip-password-finder",
         stdout: turaStdout,
         stdout_path: path.join(turaDir, "stdout.jsonl"),
@@ -305,7 +305,7 @@ test("source-port result bridge aggregates lifecycle events into per-agent round
   const harnessReport = JSON.parse(fs.readFileSync(summary.benchmark_contracts.harness_report_path, "utf8"))
   assert.equal(summary.ok, false)
   assert.equal(taskReport.rounds.length, 4)
-  assert.deepEqual(taskReport.rounds.map((round) => round.metadata.agentId), ["tura-direct", "codex-cli", "codex-cli", "codex-cli"])
+  assert.deepEqual(taskReport.rounds.map((round) => round.metadata.agentId), ["direct", "codex-cli", "codex-cli", "codex-cli"])
   assert.deepEqual(taskReport.rounds.map((round) => round.metadata.agentKind), ["tura", "codex", "codex", "codex"])
   assert.deepEqual(taskReport.rounds.map((round) => round.metadata.agentMode), ["direct", "cli", "cli", "cli"])
   assert.deepEqual(taskReport.rounds.map((round) => round.metadata.model), ["openai/gpt-5.5", "gpt-5.5", "gpt-5.5", "gpt-5.5"])
@@ -321,7 +321,7 @@ test("source-port result bridge aggregates lifecycle events into per-agent round
   assert.deepEqual(taskReport.rounds[2].toolCalls.map((tool) => [tool.kind, tool.commandLine]), [["command", "python first.py"]])
   assert.deepEqual(taskReport.rounds[3].toolCalls.map((tool) => [tool.kind, tool.commandLine]), [["command", "python second.py"]])
   assert.deepEqual(harnessReport.scores.map((score) => [score.details.agent, score.details.passed, score.details.failed, score.passed]), [
-    ["tura-direct", 12, 3, false],
+    ["direct", 12, 3, false],
     ["codex-cli", 15, 0, true],
     ["codex-cli", 1, 0, true],
   ])
@@ -338,7 +338,7 @@ test("result bridge expands provider calls and codex token updates into contract
     run_root: runRoot,
     summary_path: path.join(runRoot, "summary.json"),
   }
-  const turaDir = path.join(runRoot, "task", "tura-balanced-1")
+  const turaDir = path.join(runRoot, "task", "balanced-1")
   const codexDir = path.join(runRoot, "task", "codex-cli-2")
   fs.mkdirSync(path.join(turaDir, "context-and-calls"), { recursive: true })
   fs.mkdirSync(codexDir, { recursive: true })
@@ -402,7 +402,7 @@ test("result bridge expands provider calls and codex token updates into contract
     service_tier: "default",
     results: [
       {
-        agent: "tura-balanced",
+        agent: "balanced",
         task: "task",
         context_archive: { provider_calls_full_path: providerCallsPath },
         provider_calls: providerRecords,
@@ -423,8 +423,8 @@ test("result bridge expands provider calls and codex token updates into contract
   const webRun = JSON.parse(fs.readFileSync(summary.benchmark_contracts.web_run_path, "utf8"))
   const roundLogLines = fs.readFileSync(summary.benchmark_contracts.rounds_jsonl_path, "utf8").trim().split(/\r?\n/)
   assert.deepEqual(taskReport.rounds.map((round) => [round.metadata.agentId, round.metadata.roundSource, round.roundId, round.usage.totalTokens]), [
-    ["tura-balanced", "provider-log", "call-tura-1", 120],
-    ["tura-balanced", "provider-log", "call-tura-2", 160],
+    ["balanced", "provider-log", "call-tura-1", 120],
+    ["balanced", "provider-log", "call-tura-2", 160],
     ["codex-cli", "token-usage-jsonl", "token-usage-4", 12],
     ["codex-cli", "token-usage-jsonl", "token-usage-6", 14],
   ])
@@ -448,13 +448,13 @@ test("result bridge expands provider calls and codex token updates into contract
   assert.deepEqual(webRun.metadata.result_tabs.map((tab) => [tab.id, tab.status, tab.resultCount]), [
     ["build", "real", 2],
     ["debug", "empty", 0],
-    ["refactoring", "empty", 0],
+    ["rewrite", "empty", 0],
     ["research", "mock", 0],
     ["docs", "mock", 0],
   ])
   assert.equal(webRun.metadata.visible_source_metrics.cost_usd, 0.0021)
   assert.deepEqual(webRun.metadata.raw_summary.results.map((result) => [result.agent_id, result.cost_usd, result.pricing.ratesPer1M.output]), [
-    ["tura-balanced", 0.001885, 30],
+    ["balanced", 0.001885, 30],
     ["codex-cli", 0.000215, 30],
   ])
   assert.deepEqual(webRun.rounds.map((round) => [round.id, round.inputTokens, round.outputTokens, round.cacheInputTokens]), [

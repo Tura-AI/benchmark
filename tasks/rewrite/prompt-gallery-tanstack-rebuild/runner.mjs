@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url"
 import { agentEventStats, agentUsageFromJsonl, claudeCodeArgs, findClaudeExe, findPiExe, piAgentArgs } from "../../../lib/agent_cli.mjs"
 import { businessRunPaths, normalizeBusinessSummary } from "../../../lib/business_paths.mjs"
 import { codexTokenUsageReport, writeCodexTokenUsageArtifacts } from "../../../lib/codex_token_usage.mjs"
+import { genericAgentKind, genericAgentMode, parseGenericAgents } from "../../../lib/generic_agent_cli.mjs"
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, "..", "..", "..", "..")
@@ -26,7 +27,7 @@ const turaModel = process.env.COMMAND_RUN_AGENT_TURA_MODEL || (model.includes("/
 const reasoning = process.env.COMMAND_RUN_AGENT_REASONING_EFFORT || "low"
 const serviceTier = process.env.COMMAND_RUN_AGENT_SERVICE_TIER || "default"
 const timeoutMs = Number(process.env.COMMAND_RUN_AGENT_TIMEOUT_MS || 25 * 60_000)
-const agents = parseAgents(process.env.COMMAND_RUN_AGENT_AGENTS || "codex,tura")
+const agents = parseGenericAgents(process.env.COMMAND_RUN_AGENT_AGENTS, "codex-cli,balanced")
 const prepOnly = (process.env.COMMAND_RUN_AGENT_PREP_ONLY || "0") === "1"
 const evaluateOnly = (process.env.COMMAND_RUN_AGENT_EVALUATE_ONLY || "0") === "1"
 const skipEval = (process.env.COMMAND_RUN_AGENT_SKIP_EVAL || "0") === "1"
@@ -58,44 +59,10 @@ const codexMainExe = path.join(
 function resolveSourceHtml() {
   const candidates = [
     process.env.COMMAND_RUN_MAKEUP_HTML,
-    "/Users/jayden/Downloads/makeup.html",
     path.join(homeDir, "Downloads", "makeup.html"),
     path.join(scriptDir, "makeup.html"),
   ].filter(Boolean)
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[candidates.length - 1]
-}
-
-function parseAgents(value) {
-  const alias = new Map([
-    ["codex", "codex"],
-    ["codex-current", "codex"],
-    ["current", "codex"],
-    ["codex-main", "codex-main"],
-    ["main", "codex-main"],
-    ["codex-cli", "codex-cli"],
-    ["tura", "tura-fast"],
-    ["tura-fast", "tura-fast"],
-    ["tura-fast-shll", "tura-fast"],
-    ["tura-balanced", "tura-balanced"],
-    ["balanced", "tura-balanced"],
-    ["tura-direct", "tura-direct"],
-    ["direct", "tura-direct"],
-    ["tura-thinking", "tura-thinking"],
-    ["tura-think", "tura-thinking"],
-    ["thinking", "tura-thinking"],
-    ["tura-coding", "tura-thinking"],
-    ["tura-shll", "tura-thinking"],
-    ["claude", "claude-code"],
-    ["claude-code", "claude-code"],
-    ["claude-opus", "claude-code"],
-    ["pi", "pi-agent"],
-    ["pi-agent", "pi-agent"],
-    ["pi-coding-agent", "pi-agent"],
-  ])
-  return String(value)
-    .split(",")
-    .map((item) => alias.get(item.trim().toLowerCase()))
-    .filter(Boolean)
 }
 
 function mkdirp(dir) {
@@ -477,17 +444,7 @@ function projectDirectoryName(agent) {
   if (agent === "codex") return "makeup-codex"
   if (agent === "codex-main") return "makeup-codex-main"
   if (agent === "codex-cli") return "makeup-codex-cli"
-  if (agent === "tura-fast") return "makeup-tura-fast"
-  if (agent === "tura-thinking") return "makeup-tura-thinking"
-  if (agent === "tura-balanced") return "makeup-tura-balanced"
-  if (agent === "tura-direct") return "makeup-tura-direct"
   return `makeup-${agent.replace(/[^a-z0-9-]/gi, "-").toLowerCase()}`
-}
-
-function turaAgentPrompt(agent) {
-  if (agent === "tura-balanced") return "balanced"
-  if (agent === "tura-direct") return "direct"
-  return agent === "tura-thinking" ? "thinking" : "fast"
 }
 
 function taskReadme(agent) {
@@ -652,7 +609,7 @@ async function runTura(agent, workspace, agentDir, onProgress = null) {
     "--skip-git-repo-check",
     ...(turaExplicitSessionId ? ["--session-id", sessionId] : []),
     "--agent-id",
-    turaAgentPrompt(agent),
+    agent,
     "-m",
     turaModel,
     ...turaServiceTierConfigArgs(),
@@ -1617,7 +1574,7 @@ async function main() {
   if (agents.includes("codex")) assert(fs.existsSync(codexExe), `missing codex exe ${codexExe}`)
   if (agents.includes("codex-main")) assert(fs.existsSync(codexMainExe), `missing codex-main exe ${codexMainExe}`)
   if (agents.includes("codex-cli")) assert(fs.existsSync(codexMainExe), `missing codex-cli exe ${codexMainExe}`)
-  if (agents.some((agent) => agent.startsWith("tura-"))) {
+  if (agents.some((agent) => genericAgentKind(agent) === "tura")) {
     if (!skipTuraBuild || !fs.existsSync(turaExe)) {
       runOk("cargo", ["build", "-p", "gateway", "--bin", "tura_exec"], { cwd: repoRoot, timeoutMs: 5 * 60_000 })
     }

@@ -9,11 +9,12 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-from jsonschema import Draft202012Validator, FormatChecker, RefResolver
+from jsonschema import Draft202012Validator, FormatChecker
+from referencing import Registry, Resource
 
 
 SCHEMA_DIR = Path(__file__).resolve().parent
-DEFAULT_BENCHMARK_DATA = Path(r"C:\Users\liuliu\Documents\tura-benchmark")
+DEFAULT_BENCHMARK_DATA = SCHEMA_DIR.parent
 
 
 def load_json(path: Path):
@@ -22,22 +23,22 @@ def load_json(path: Path):
 
 
 @lru_cache(maxsize=1)
-def schema_store() -> dict[str, object]:
-    store: dict[str, object] = {}
+def schema_registry() -> Registry:
+    registry = Registry()
     for path in SCHEMA_DIR.glob("*.schema.json"):
         schema = load_json(path)
-        store[path.as_uri()] = schema
+        resource = Resource.from_contents(schema)
+        registry = registry.with_resource(path.as_uri(), resource)
         if schema.get("$id"):
-            store[schema["$id"]] = schema
-    return store
+            registry = registry.with_resource(schema["$id"], resource)
+    return registry
 
 
 @lru_cache(maxsize=None)
 def validator(schema_name: str) -> Draft202012Validator:
     schema_path = SCHEMA_DIR / schema_name
     schema = load_json(schema_path)
-    resolver = RefResolver(base_uri=schema_path.as_uri(), referrer=schema, store=schema_store())
-    return Draft202012Validator(schema, resolver=resolver, format_checker=FormatChecker())
+    return Draft202012Validator(schema, registry=schema_registry(), format_checker=FormatChecker())
 
 
 def check_schema_files(errors: list[str]) -> None:
@@ -117,7 +118,7 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
 
 
 def validate_task_declarations(tura_root: Path, errors: list[str]) -> int:
-    paths = sorted(tura_root.glob("benchmark/tasks/*/*/benchmark.task.json"))
+    paths = sorted(tura_root.glob("tasks/*/*/benchmark.task.json"))
     for path in paths:
         validate_json(path, "task-declaration.schema.json", errors)
     return len(paths)
@@ -167,7 +168,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark-data", type=Path, default=DEFAULT_BENCHMARK_DATA)
     parser.add_argument("--website-root", type=Path)
-    parser.add_argument("--tura-root", type=Path, default=SCHEMA_DIR.parents[1])
+    parser.add_argument("--tura-root", type=Path, default=SCHEMA_DIR.parent)
     parser.add_argument("--include-raw", action="store_true")
     parser.add_argument("--website-limit", type=int, default=12, help="Validate this many deterministic run/repo website shards; 0 validates all")
     parser.add_argument("--max-errors", type=int, default=100)

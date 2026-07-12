@@ -22,7 +22,9 @@ import {
 } from "./harness.mjs"
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
-const repoRoot = path.resolve(scriptDir, "..", "..")
+const repoRoot = path.resolve(scriptDir, "..")
+const benchmarkConfig = readJson(path.resolve(process.env.TURA_BENCHMARK_CONFIG || path.join(repoRoot, "config", "benchmark.json")))
+const deepSweConfig = benchmarkConfig?.deepSwe || {}
 try {
   process.loadEnvFile?.(path.join(repoRoot, ".env"))
 } catch (error) {
@@ -31,33 +33,26 @@ try {
 
 const runRoot = path.resolve(requiredEnv("DEEP_SWE_RUN_ROOT"))
 const harnessCompletedOnly = process.env.DEEP_SWE_HARNESS_COMPLETED_ONLY === "1"
-const tasksRoot = path.resolve(process.env.DEEP_SWE_TASKS_ROOT || "C:\\Users\\liuliu\\Documents\\benchmark\\deep-swe\\tasks")
+const tasksRoot = path.resolve(requiredEnv("DEEP_SWE_TASKS_ROOT"))
 const selectionPath = path.resolve(process.env.DEEP_SWE_SELECTION || path.join(runRoot, "selection.json"))
 const selection = readJson(selectionPath)
 const runId = path.basename(runRoot)
 const manifestPath = path.join(runRoot, "manifest.json")
 const progressPath = path.join(runRoot, "PROGRESS.md")
 const workspacesRoot = path.join(runRoot, "_workspaces")
-const concurrency = Number(process.env.DEEP_SWE_CONCURRENCY || 6)
-const monitorMs = Number(process.env.DEEP_SWE_MONITOR_MS || 120_000)
+const concurrency = positiveInteger(process.env.DEEP_SWE_CONCURRENCY || deepSweConfig.concurrency || 1, "DeepSWE concurrency")
+const monitorMs = positiveInteger(process.env.DEEP_SWE_MONITOR_MS || deepSweConfig.monitorMs || 120_000, "DeepSWE monitor interval")
 const diskSafetyFloorGb = Number(process.env.DEEP_SWE_DISK_SAFETY_FLOOR_GB || 5)
 const keepWorkspaces = truthy(process.env.DEEP_SWE_KEEP_WORKSPACES)
 const turaExe = process.env.COMMAND_RUN_AGENT_TURA_EXE || path.join(repoRoot, "target", "debug", "tura_exec.exe")
 const turaRouterExe = process.env.TURA_ROUTER_BIN || path.join(repoRoot, "target", "debug", "tura_router.exe")
 const codexExe = process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE
-const variants = [
-  { agent: "tura-balanced", replicate: 1, reasoning: "high" },
-  { agent: "tura-balanced", replicate: 2, reasoning: "high" },
-  { agent: "tura-direct", replicate: 1, reasoning: "high" },
-  { agent: "tura-direct", replicate: 2, reasoning: "high" },
-  { agent: "tura-direct", replicate: 3, reasoning: "high" },
-  { agent: "codex-cli", replicate: 1, reasoning: "medium" },
-  { agent: "codex-cli", replicate: 2, reasoning: "medium" },
-]
+const variants = parseVariants(process.env.DEEP_SWE_VARIANTS, deepSweConfig.variants)
+const expectedTaskCount = Number(process.env.DEEP_SWE_EXPECTED_TASK_COUNT ?? deepSweConfig.expectedTaskCount ?? 0)
 
 assert(selection?.schema === "tura.benchmark.deep-swe-selection.v1", `invalid selection: ${selectionPath}`)
-assert(selection.tasks?.length === 20, `selection must contain 20 tasks: ${selectionPath}`)
-assert.equal(concurrency, 6, "DeepSWE matrix concurrency must remain 6")
+assert(Array.isArray(selection.tasks) && selection.tasks.length > 0, `selection must contain at least one task: ${selectionPath}`)
+if (expectedTaskCount > 0) assert.equal(selection.tasks.length, expectedTaskCount, `selection must contain ${expectedTaskCount} tasks: ${selectionPath}`)
 assert(fs.existsSync(turaExe), `missing debug Tura executable: ${turaExe}`)
 assert(fs.existsSync(turaRouterExe), `missing debug Tura router: ${turaRouterExe}`)
 assert(codexExe && fs.existsSync(codexExe), `missing modified codex-cli executable: ${codexExe || "unset"}`)
@@ -69,7 +64,7 @@ process.env.COMMAND_RUN_AGENT_TURA_SHELL = "bash"
 process.env.COMMAND_RUN_AGENT_TURA_EXE = turaExe
 process.env.TURA_ROUTER_BIN = turaRouterExe
 process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE = codexExe
-ensureGenericAgentExecutables(["tura-balanced", "tura-direct", "codex-cli"], { repoRoot, turaExe, codexCliExe: codexExe })
+ensureGenericAgentExecutables([...new Set(variants.map((variant) => variant.agent))], { repoRoot, turaExe, codexCliExe: codexExe })
 
 fs.mkdirSync(runRoot, { recursive: true })
 fs.mkdirSync(workspacesRoot, { recursive: true })
@@ -176,11 +171,7 @@ async function main() {
     await runCompletedOnlyHarness()
     return
   }
-  const probeJobs = [
-    jobFor(selection.tasks[0].task_id, "tura-balanced", 1),
-    jobFor(selection.tasks[0].task_id, "tura-direct", 1),
-    jobFor(selection.tasks[0].task_id, "codex-cli", 1),
-  ]
+  const probeJobs = configuredProbeJobs()
   manifest.phase = "scheme-probes"
   writeState("scheme-probes")
   await Promise.all(probeJobs.map((job) => job.state === "completed" ? Promise.resolve(job) : runAgentJob(job)))
@@ -194,7 +185,7 @@ async function main() {
   }
 
   manifest.phase = "agent-runs"
-  writeState("all three scheme probes passed; releasing remaining matrix")
+  writeState(`all ${probeJobs.length} scheme probes passed; releasing remaining matrix`)
   monitorTimer = setInterval(() => {
     recordMonitor("scheduled two-minute monitor")
     console.log(formatMonitorLine())
@@ -223,7 +214,7 @@ async function main() {
   }
 
   manifest.phase = "harness"
-  writeState(`all ${jobs.length} agent runs have non-empty patches; starting official verifier one task image at a time with seven variants in parallel`)
+  writeState(`all ${jobs.length} agent runs have non-empty patches; starting official verifier one task image at a time with ${variants.length} variants in parallel`)
   await runHarnessBatches()
   if (stopped || jobs.some((job) => job.harness_state !== "completed")) {
     manifest.phase = "harness-stopped"
@@ -308,7 +299,7 @@ async function runAgentJob(job) {
       job.run_generation = "post-tdd-debug-prompt"
       job.prompt_revision = promptRevision.revision
       job.prompt_revision_marked_at = promptRevision.marked_at
-      job.tdd_debug_runtime_prompt_applies = job.agent.startsWith("tura-")
+      job.tdd_debug_runtime_prompt_applies = genericAgentKind(job.agent) === "tura"
     }
     assertDiskCapacity()
     archivePreviousAttempt(job)
@@ -439,7 +430,7 @@ async function runAgentJob(job) {
       agent_mode: genericAgentMode(job.agent),
       replicate: job.replicate,
       model: job.agent === "codex-cli" ? "gpt-5.6-sol" : "openai/gpt-5.6-sol",
-      tura_model: job.agent.startsWith("tura-") ? "openai/gpt-5.6-sol" : null,
+      tura_model: genericAgentKind(job.agent) === "tura" ? "openai/gpt-5.6-sol" : null,
       reasoning: job.reasoning,
       service_tier: "default",
       priority_enabled: false,
@@ -596,7 +587,7 @@ async function validateScheme(job, result, container) {
   if (args.includes("--embedded")) errors.push("Tura embedded flag is present")
 
   let dockerRoutingOk = true
-  if (job.agent.startsWith("tura-")) {
+  if (genericAgentKind(job.agent) === "tura") {
     if (args.slice(0, 3).join(" ") !== "exec bash --json") errors.push(`Tura args do not start with exec bash --json: ${args.slice(0, 3).join(" ")}`)
     if (invocation.env?.TURA_BASH_DOCKER_CONTAINER !== container) errors.push("Tura invocation did not archive the assigned Docker container")
     if (invocation.env?.TURA_BASH_DOCKER_WORKDIR !== "/app") errors.push("Tura Docker workdir is not /app")
@@ -787,26 +778,25 @@ function writeManifest() {
 function writeProgress() {
   const latest = manifest.monitor_log.at(-1)
   const lines = [
-    "# DeepSWE 20 × 7 progress",
+    `# DeepSWE ${selection.tasks.length} x ${variants.length} progress`,
     "",
     `- Run ID: \`${runId}\``,
     "- Benchmark: DeepSWE v1.1",
-    `- Planned runs: ${jobs.length} (\`20 tasks × (2 Balanced + 3 Direct + 2 Codex)\`)`,
-    "- Concurrency: 6 worker slots",
-    "- Tura: `openai/gpt-5.6-sol`, high reasoning, bash mode, embedded/sandbox/priority disabled",
-    "- Codex CLI: `gpt-5.6-sol`, medium reasoning, priority disabled",
+    `- Planned runs: ${jobs.length} (\`${selection.tasks.length} tasks x ${variants.length} configured variants\`)`,
+    `- Concurrency: ${concurrency} worker slots`,
+    `- Variants: ${variants.map((variant) => `${variant.agent}#${variant.replicate}:${variant.reasoning}`).join(", ")}`,
     `- Harness: deferred until all ${jobs.length} agent runs finish; official images are retained and reused`,
     "- Disk: monitored only; stop without cleanup at the configured safety floor",
     "",
     "## Current status",
     "",
     `- Phase: ${manifest.phase}`,
-    `- Active worker slots: ${latest?.active ?? 0} / 6`,
+    `- Active worker slots: ${latest?.active ?? 0} / ${concurrency}`,
     `- Completed agent runs: ${jobs.filter((job) => job.state === "completed").length} / ${jobs.length}`,
     `- Failed agent runs: ${jobs.filter((job) => job.state === "failed").length}`,
     `- Completed harness runs: ${jobs.filter((job) => job.harness_state === "completed").length} / ${jobs.length}`,
     `- Failed harness runs: ${jobs.filter((job) => job.harness_state === "failed").length}`,
-    `- Scheme probes passed: ${["tura-balanced", "tura-direct", "codex-cli"].filter((agent) => jobFor(selection.tasks[0].task_id, agent, 1).scheme_ok === true && jobFor(selection.tasks[0].task_id, agent, 1).docker_routing_ok === true).length} / 3`,
+    `- Scheme probes passed: ${configuredProbeJobs().filter((job) => job.scheme_ok === true && job.docker_routing_ok === true).length} / ${configuredProbeJobs().length}`,
     `- C: free space: ${(latest?.free_gb ?? diskFreeGb()).toFixed(2)} GB`,
     `- Stop reason: ${manifest.stop_reason || "none"}`,
     "",
@@ -822,7 +812,7 @@ function writeProgress() {
     "",
     "| Agent | Completed | Failed | Harness completed | Harness passed | Tokens |",
     "|---|---:|---:|---:|---:|---:|",
-    ...["tura-balanced", "tura-direct", "codex-cli"].map((agent) => {
+    ...[...new Set(variants.map((variant) => variant.agent))].map((agent) => {
       const subset = jobs.filter((job) => job.agent === agent)
       return `| ${agent} | ${subset.filter((job) => job.state === "completed").length}/${subset.length} | ${subset.filter((job) => job.state === "failed").length} | ${subset.filter((job) => job.harness_state === "completed").length}/${subset.length} | ${subset.filter((job) => job.harness_score === 1).length} | ${subset.reduce((total, job) => total + Number(job.total_tokens || 0), 0)} |`
     }),
@@ -831,7 +821,7 @@ function writeProgress() {
     "",
     "| Time (UTC) | Phase | Active | Agent runs | Harness | C: free | Note |",
     "|---|---|---:|---:|---:|---:|---|",
-    ...manifest.monitor_log.map((entry) => `| ${entry.at} | ${entry.phase} | ${entry.active}/6 | ${entry.agent_completed}/${jobs.length} | ${entry.harness_completed}/${jobs.length} | ${entry.free_gb.toFixed(2)} GB | ${String(entry.note).replaceAll("|", "\\|")} |`),
+    ...manifest.monitor_log.map((entry) => `| ${entry.at} | ${entry.phase} | ${entry.active}/${concurrency} | ${entry.agent_completed}/${jobs.length} | ${entry.harness_completed}/${jobs.length} | ${entry.free_gb.toFixed(2)} GB | ${String(entry.note).replaceAll("|", "\\|")} |`),
     "",
   ]
   fs.writeFileSync(progressPath, lines.join("\n"), "utf8")
@@ -962,6 +952,30 @@ function requiredEnv(name) {
   const value = process.env[name]
   if (!value) throw new Error(`${name} is required`)
   return value
+}
+
+function positiveInteger(value, label) {
+  const number = Number(value)
+  assert(Number.isInteger(number) && number > 0, `${label} must be a positive integer`)
+  return number
+}
+
+function parseVariants(value, configured) {
+  const variants = value ? JSON.parse(value) : configured
+  assert(Array.isArray(variants) && variants.length > 0, "configure at least one DeepSWE variant")
+  for (const variant of variants) {
+    assert(typeof variant.agent === "string" && variant.agent, "each DeepSWE variant requires an agent")
+    positiveInteger(variant.replicate, "DeepSWE variant replicate")
+    assert(typeof variant.reasoning === "string" && variant.reasoning, "each DeepSWE variant requires reasoning")
+  }
+  return variants
+}
+
+function configuredProbeJobs() {
+  const firstTaskId = selection.tasks[0].task_id
+  return [...new Set(variants.map((variant) => variant.agent))]
+    .map((agent) => variants.find((variant) => variant.agent === agent))
+    .map((variant) => jobFor(firstTaskId, variant.agent, variant.replicate))
 }
 
 function truthy(value) {

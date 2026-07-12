@@ -20,6 +20,7 @@ test("generic agents accept only the codex-cli identifier for Codex", () => {
     "opencode",
   ])
   assert.throws(() => parseGenericAgents("unknown-agent"), /unsupported benchmark agent: unknown-agent/)
+  assert.deepEqual(parseGenericAgents("balanced,direct,direct-text-only"), ["balanced", "direct", "direct-text-only"])
 })
 
 test("codex-cli executable resolver honors an explicit spawnable binary", () => {
@@ -384,7 +385,7 @@ test("event round count is reconciled with provider usage events", () => {
     { type: "turn.completed" },
   ].map((event) => JSON.stringify(event)).join("\n")
 
-  const events = eventsForAgent(stdout, "tura-balanced")
+  const events = eventsForAgent(stdout, "balanced")
   assert.equal(events.llm_rounds, 1)
 
   const reconciled = eventsWithUsageRounds(events, { usage_events: 14 })
@@ -524,7 +525,7 @@ test("round validation rejects bootstrap-only callbacks without model tokens", (
     { type: "turn.completed", status: "failed", usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }, error: "session db unavailable" },
   ].map((event) => JSON.stringify(event)).join("\n")
   const rounds = buildGenericAgentRoundContracts({ stdout }, {
-    agentId: "tura-balanced",
+    agentId: "balanced",
     agentDir,
     model: "openai/gpt-5.6-sol",
     reasoning: "high",

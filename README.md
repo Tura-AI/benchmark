@@ -59,15 +59,15 @@ benchmark/
 │   ├── build/             Functional implementation tasks
 │   ├── design/            Visual and interactive artifact tasks without harnesses
 │   ├── debug/             Diagnosis and repair tasks
-│   └── refactoring/       Rebuild, port, and compatibility tasks
+│   └── rewrite/           Rebuild, port, and compatibility tasks
 ├── tests/                 Tests for shared benchmark code and contracts
-├── run_debug_matrix.mjs   Debug-suite batch entry point
+├── scripts/benchmark.mjs  Public list, plan, run, and validate CLI
 └── tsconfig.json          TypeScript build boundary
 ```
 
-Empty task-type directories do not need to exist. Generated `dist/`, `raw/`,
-and `reports/` directories are local artifacts and are not part of the source
-layout.
+Empty task-type directories do not need to exist. Generated `dist/` and `raw/`
+directories are local artifacts. Published, reproducible artifacts under
+`results/` are tracked and define the compatibility standard.
 
 ## Task directory contract
 

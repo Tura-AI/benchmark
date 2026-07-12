@@ -11,7 +11,7 @@ import {
   type BenchmarkTaskType,
 } from "./contracts.js";
 
-const TASK_TYPES = new Set<BenchmarkTaskType>(["build", "design", "debug", "refactoring"]);
+const TASK_TYPES = new Set<BenchmarkTaskType>(["build", "design", "debug", "rewrite"]);
 const TASKS_DIRECTORY = "tasks";
 
 export async function discoverTaskDeclarations(root: string): Promise<BenchmarkTaskDeclaration[]> {

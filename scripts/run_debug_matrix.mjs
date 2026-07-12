@@ -6,17 +6,17 @@ import process from "node:process"
 import { spawnSync } from "node:child_process"
 import { fileURLToPath } from "node:url"
 
-import { parseStringList, safeName, timestampId } from "./lib/debug_suite_matrix.mjs"
+import { parseStringList, safeName, timestampId } from "../lib/debug_suite_matrix.mjs"
 
-const benchmarkRoot = path.dirname(fileURLToPath(import.meta.url))
-const repoRoot = path.resolve(benchmarkRoot, "..")
-const debugRoot = path.join(benchmarkRoot, "tasks", "debug")
+const scriptDir = path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.resolve(scriptDir, "..")
+const debugRoot = path.join(repoRoot, "tasks", "debug")
 const args = parseArgs(process.argv.slice(2))
 const runId = args.runId || process.env.COMMAND_RUN_BENCHMARK_RUN_ID || `debug-matrix-${timestampId()}`
 const selectedTaskIds = parseStringList(args.tasks || process.env.COMMAND_RUN_BENCHMARK_TASKS)
 const agents = parseStringList(args.agents || process.env.COMMAND_RUN_BENCHMARK_AGENTS || process.env.COMMAND_RUN_AGENT_AGENTS, [
-  "tura-balanced",
-  "tura-direct",
+  "balanced",
+  "direct",
   "codex-cli",
 ])
 const runHarnessArg = args.runHarness

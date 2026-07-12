@@ -12,6 +12,7 @@ import { agentEventStats, agentUsageFromJsonl, claudeCodeArgs, findClaudeExe, fi
 import { businessRunPaths, normalizeBusinessSummary } from "../../../lib/business_paths.mjs"
 import { codexTokenUsageReport, writeCodexTokenUsageArtifacts } from "../../../lib/codex_token_usage.mjs"
 import { endStream, isolatedProcessOptions, killProcessTree } from "../../../lib/process_helpers.mjs"
+import { parseGenericAgents } from "../../../lib/generic_agent_cli.mjs"
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(scriptDir, "..", "..", "..", "..")
@@ -33,7 +34,7 @@ const turaModel = process.env.COMMAND_RUN_AGENT_TURA_MODEL || (model.includes("/
 const reasoning = process.env.COMMAND_RUN_AGENT_REASONING_EFFORT || "medium"
 const serviceTier = process.env.COMMAND_RUN_AGENT_SERVICE_TIER || "default"
 const timeoutMs = Number(process.env.COMMAND_RUN_AGENT_TIMEOUT_MS || 60 * 60_000)
-const agents = parseAgents(process.env.COMMAND_RUN_AGENT_AGENTS || "tura-planning-shll")
+const agents = parseGenericAgents(process.env.COMMAND_RUN_AGENT_AGENTS, "balanced")
 const printProviderLog = truthy(process.env.COMMAND_RUN_AGENT_PRINT_PROVIDER_LOG || "0")
 const selectedTasksRaw = process.env.SOURCE_PORT_TASKS || process.env.COMMAND_RUN_AGENT_SOURCE_PORT_TASKS || "all"
 const prepOnly = truthy(process.env.COMMAND_RUN_AGENT_PREP_ONLY || "0")
@@ -202,45 +203,6 @@ function findCodexDocumentsExe() {
     path.join(homeDir, "Documents", "Codex"),
   ].filter(Boolean).map((root) => path.join(root, "codex-rs", "target", "debug", exeName))
   return candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0]
-}
-
-function parseAgents(value) {
-  const alias = new Map([
-    ["tura", "tura-planning-shll"],
-    ["tura-balanced", "tura-balanced"],
-    ["balanced", "tura-balanced"],
-    ["tura-direct", "tura-direct"],
-    ["direct", "tura-direct"],
-    ["tura-thinking", "tura-thinking-shll"],
-    ["tura-thinking-shll", "tura-thinking-shll"],
-    ["thinking", "tura-thinking-shll"],
-    ["tura-thinking-visual", "tura-thinking-visual-shll"],
-    ["tura-thinking-visual-shll", "tura-thinking-visual-shll"],
-    ["thinking-visual", "tura-thinking-visual-shll"],
-    ["think-visual", "tura-thinking-visual-shll"],
-    ["tura-planning", "tura-planning-shll"],
-    ["tura-planning-shll", "tura-planning-shll"],
-    ["tura-fast", "tura-fast-shll"],
-    ["tura-fast-shll", "tura-fast-shll"],
-    ["tura-fast-planning", "tura-fast-planning-shll"],
-    ["tura-fast-planning-shll", "tura-fast-planning-shll"],
-    ["codex-cli", "codex-cli"],
-    ["codex-main", "codex-main"],
-    ["main", "codex-main"],
-    ["codex", "codex-documents"],
-    ["codex-documents", "codex-documents"],
-    ["codex-docs", "codex-documents"],
-    ["codex-alt", "codex-documents"],
-    ["codex-ponytail", "codex-ponytail"],
-    ["ponytail", "codex-ponytail"],
-    ["claude", "claude-code"],
-    ["claude-code", "claude-code"],
-    ["claude-opus", "claude-code"],
-    ["pi", "pi-agent"],
-    ["pi-agent", "pi-agent"],
-    ["pi-coding-agent", "pi-agent"],
-  ])
-  return String(value).split(",").map((item) => alias.get(item.trim().toLowerCase())).filter(Boolean)
 }
 
 function parseTasks(value) {
@@ -2089,18 +2051,18 @@ async function runCodexPonytail(workspace, agentDir, prompt, onProgress) {
   return runCodexLike(workspace, agentDir, prompt, onProgress, codexDocumentsExe, "codex-ponytail")
 }
 
-async function runTuraPlanning(workspace, agentDir, prompt, agentPrompt, onProgress) {
+async function runTuraAgent(workspace, agentDir, prompt, agentId, onProgress) {
   assert(
     !truthy(process.env.COMMAND_RUN_AGENT_TURA_EMBEDDED || "0"),
     "Tura embedded mode is prohibited for source-port benchmarks; use the normal tura_exec + tura_router path",
   )
   assert(fs.existsSync(turaExe), `missing Tura exe: ${turaExe}`)
-  const launchId = `source-port-${agentPrompt}-${process.pid}-${Date.now()}`
+  const launchId = `source-port-${agentId}-${process.pid}-${Date.now()}`
   const sessionCwd = prepareTuraSessionCwd(launchId)
   const providerLogPath = path.join(agentDir, "provider-log")
-  snapshotTuraInternalPrompt(agentDir, agentPrompt)
-  snapshotTuraAgentConfig(agentDir, agentPrompt)
-  const planningMode = planningOverride ?? path.basename(agentDir).includes("planning")
+  snapshotTuraInternalPrompt(agentDir, agentId)
+  snapshotTuraAgentConfig(agentDir, agentId)
+  const planningMode = planningOverride
   const command = turaExe
   const args = [
     "exec",
@@ -2111,11 +2073,11 @@ async function runTuraPlanning(workspace, agentDir, prompt, agentPrompt, onProgr
     ...(turaGoalEnabled ? ["--goal"] : []),
     ...(turaExplicitSessionId ? ["--session-id", launchId] : []),
     "--agent-id",
-    agentPrompt,
+    agentId,
     "-m",
     turaModel,
     ...turaServiceTierConfigArgs(),
-    ...(planningOverride !== null || path.basename(agentDir).includes("planning") ? ["--planning", planningMode ? "on" : "off"] : []),
+    ...(planningMode !== null ? ["--planning", planningMode ? "on" : "off"] : []),
     "--model-reasoning-effort",
     reasoning,
     "--cwd",
@@ -2136,7 +2098,7 @@ async function runTuraPlanning(workspace, agentDir, prompt, agentPrompt, onProgr
       "TURA_ROUTER_STDERR_LOG",
       "TURA_DEBUG_RUNTIME",
     ]),
-    ...(planningMode ? { TURA_FORCE_EXECUTE_TOOLS_PLANNING: "1" } : {}),
+    ...(planningMode === true ? { TURA_FORCE_EXECUTE_TOOLS_PLANNING: "1" } : {}),
     COMMAND_RUN_AGENT_TIMEOUT_MS: String(timeoutMs),
     COMMAND_RUN_AGENT_CONTEXT_ARCHIVE: "1",
   }
@@ -2587,14 +2549,7 @@ async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = nu
   const prompt = sourcePortPrompt(task)
   let result
   const started = performance.now()
-  const agentPrompt =
-    agentId === "tura-fast-shll" || agentId === "tura-fast-planning-shll" ? "fast" :
-    agentId === "tura-balanced" ? "balanced" :
-    agentId === "tura-direct" ? "direct" :
-    agentId === "tura-thinking-shll" ? "thinking" :
-    agentId === "tura-thinking-visual-shll" ? "thinking-visual" :
-    agentId === "tura-planning-shll" ? "thinking-planning" :
-    null
+  const turaAgentId = ["balanced", "direct", "direct-text-only"].includes(agentId) ? agentId : null
   let lastContextArchive = null
   let lastContextArchiveRefreshMs = 0
   const seenProviderDebugRows = new Set()
@@ -2643,7 +2598,7 @@ async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = nu
       stdout_path: path.join(agentDir, "stdout.jsonl"),
       stderr_path: path.join(agentDir, "stderr.log"),
       provider_log_path: path.join(agentDir, "provider-log"),
-      tura_capability_info: turaCapabilityInfo(agentPrompt, agentDir),
+      tura_capability_info: turaCapabilityInfo(turaAgentId, agentDir),
       usage: agentId === "claude-code" || agentId === "pi-agent" ? agentUsageFromJsonl(liveResult.stdout || "") : usageInfo.usage,
       usage_source: agentId === "claude-code" || agentId === "pi-agent" ? `${agentId}-jsonl` : usageInfo.usage_source,
       provider_calls: usageInfo.provider_calls,
@@ -2657,13 +2612,7 @@ async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = nu
   else if (agentId === "codex-main") result = await runCodexMain(prep.workspace, agentDir, prompt, publishProgress)
   else if (agentId === "codex-documents") result = await runCodexDocuments(prep.workspace, agentDir, prompt, publishProgress)
   else if (agentId === "codex-ponytail") result = await runCodexPonytail(prep.workspace, agentDir, prompt, publishProgress)
-  else if (agentId === "tura-fast-shll") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "fast", publishProgress)
-  else if (agentId === "tura-fast-planning-shll") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "fast", publishProgress)
-  else if (agentId === "tura-balanced") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "balanced", publishProgress)
-  else if (agentId === "tura-direct") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "direct", publishProgress)
-  else if (agentId === "tura-thinking-shll") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "thinking", publishProgress)
-  else if (agentId === "tura-thinking-visual-shll") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "thinking-visual", publishProgress)
-  else if (agentId === "tura-planning-shll") result = await runTuraPlanning(prep.workspace, agentDir, prompt, "thinking-planning", publishProgress)
+  else if (turaAgentId) result = await runTuraAgent(prep.workspace, agentDir, prompt, turaAgentId, publishProgress)
   else if (agentId === "claude-code" || agentId === "pi-agent") result = await runExternalCliAgent(prep.workspace, agentDir, prompt, agentId, publishProgress)
   else throw new Error(`unsupported agent ${agentId}`)
 
@@ -2686,7 +2635,7 @@ async function runAgent(agentId, task, taskIndex, agentIndex, onAgentUpdate = nu
     stdout_path: path.join(agentDir, "stdout.jsonl"),
     stderr_path: path.join(agentDir, "stderr.log"),
     provider_log_path: path.join(agentDir, "provider-log"),
-    tura_capability_info: turaCapabilityInfo(agentPrompt, agentDir),
+    tura_capability_info: turaCapabilityInfo(turaAgentId, agentDir),
     usage: agentId === "claude-code" || agentId === "pi-agent" ? agentUsageFromJsonl(result.stdout) : usageInfo.usage,
     usage_source: agentId === "claude-code" || agentId === "pi-agent" ? `${agentId}-jsonl` : usageInfo.usage_source,
     provider_calls: usageInfo.provider_calls,
