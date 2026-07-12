@@ -62,11 +62,13 @@ const diskSafetyFloorGb = Number(
 const keepWorkspaces = truthy(process.env.DEEP_SWE_KEEP_WORKSPACES);
 const turaExe =
   process.env.COMMAND_RUN_AGENT_TURA_EXE ||
-  path.join(repoRoot, "target", "debug", "tura_exec.exe");
+  findCommand("tura") ||
+  path.join(repoRoot, "target", "debug", executableName("tura_exec"));
 const turaRouterExe =
   process.env.TURA_ROUTER_BIN ||
-  path.join(repoRoot, "target", "debug", "tura_router.exe");
-const codexExe = process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE;
+  path.join(repoRoot, "target", "debug", executableName("tura_router"));
+const codexExe =
+  process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE || findCommand("codex");
 const variants = parseVariants(
   process.env.DEEP_SWE_VARIANTS,
   deepSweConfig.variants,
@@ -91,23 +93,21 @@ if (expectedTaskCount > 0)
     expectedTaskCount,
     `selection must contain ${expectedTaskCount} tasks: ${selectionPath}`,
   );
-assert(fs.existsSync(turaExe), `missing debug Tura executable: ${turaExe}`);
-assert(
-  fs.existsSync(turaRouterExe),
-  `missing debug Tura router: ${turaRouterExe}`,
+const selectedAgentKinds = new Set(
+  variants.map((variant) => genericAgentKind(variant.agent)),
 );
-assert(
-  codexExe && fs.existsSync(codexExe),
-  `missing modified codex-cli executable: ${codexExe || "unset"}`,
-);
+if (selectedAgentKinds.has("tura"))
+  assert(fs.existsSync(turaExe), `missing Tura executable: ${turaExe}`);
+if (variants.some((variant) => variant.agent === "codex-cli"))
+  assert(codexExe, "missing codex-cli executable");
 
 delete process.env.COMMAND_RUN_AGENT_TURA_EMBEDDED;
 delete process.env.COMMAND_RUN_AGENT_TURA_SANDBOX;
 delete process.env.TURA_COMMAND_RUN_SANDBOX;
 process.env.COMMAND_RUN_AGENT_TURA_SHELL = "bash";
 process.env.COMMAND_RUN_AGENT_TURA_EXE = turaExe;
-process.env.TURA_ROUTER_BIN = turaRouterExe;
-process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE = codexExe;
+if (fs.existsSync(turaRouterExe)) process.env.TURA_ROUTER_BIN = turaRouterExe;
+if (codexExe) process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE = codexExe;
 ensureGenericAgentExecutables(
   [...new Set(variants.map((variant) => variant.agent))],
   { repoRoot, turaExe, codexCliExe: codexExe },
@@ -1355,6 +1355,23 @@ function requiredEnv(name) {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function executableName(name) {
+  return process.platform === "win32" ? `${name}.exe` : name;
+}
+
+function findCommand(name) {
+  const result = spawnSync(
+    process.platform === "win32" ? "where.exe" : "sh",
+    process.platform === "win32" ? [name] : ["-lc", `command -v ${name}`],
+    { encoding: "utf8", windowsHide: true },
+  );
+  return result.status === 0
+    ? String(result.stdout || "")
+        .split(/\r?\n/)
+        .find(Boolean)
+    : null;
 }
 
 function positiveInteger(value, label) {

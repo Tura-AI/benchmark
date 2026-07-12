@@ -45,6 +45,47 @@ The public commands are:
 - `run`: execute the resolved jobs with bounded concurrency;
 - `validate`: validate configuration and task declarations without a live run.
 
+## Re-run DeepSWE v1.1
+
+The DeepSWE entry point is declared at
+`tasks/debug/deep-swe-v1.1/benchmark.task.json`; it does not depend on a
+machine-specific runner path. Start with the cost-free plan:
+
+```sh
+npm run benchmark:deep-swe -- --agents balanced
+```
+
+After reviewing the paths, agent and provider cost, launch the default Tura
+job with the explicit live script:
+
+```sh
+npm run benchmark:deep-swe:run
+```
+
+`balanced` is the script default, so `npm run benchmark:deep-swe` alone is a
+safe plan. For overrides, call the public entry point directly; passing several
+agents creates one isolated run directory per agent:
+
+```sh
+node scripts/run_debug_matrix.mjs --run --agents balanced,direct --run-id my-rerun
+```
+
+On the first live run, the adapter performs a filtered checkout of the pinned
+`datacurve-ai/deep-swe` revision under `raw/_cache/deep-swe`, creates the
+selection file, and then invokes `deep_swe/run_matrix.mjs`. Later runs reuse
+that checkout and Docker's image cache. Configure the repository/revision and
+task-directory layout in `config/benchmark.json`; use `DEEP_SWE_TASKS_ROOT` to
+point directly at an existing task corpus or `DEEP_SWE_SELECTION` to reuse a
+selection.
+Set `DEEP_SWE_PREPARE_ONLY=1` through `--env` to verify the pinned checkout and
+selection generation without launching Docker or an agent.
+
+Live requirements are Docker, Git, Python 3.11+, and the selected agent CLI on
+`PATH` (or its documented `COMMAND_RUN_AGENT_*_EXE` override). Provider login
+remains outside tracked configuration. Tura jobs are always launched through
+the Bash command surface (`tura exec bash --json`) and route repository shell
+commands into the task container.
+
 ## Configuration
 
 Runtime defaults and matrices live in `config/benchmark.json`. Agent commands,
@@ -79,6 +120,35 @@ All benchmark task, harness, and published artifact links use the canonical
 repository `https://github.com/Tura-AI/benchmark`. Tura CLI release and runtime
 metadata intentionally use `https://github.com/Tura-AI/tura`; those links refer
 to the CLI itself, not to benchmark source code.
+
+### Result-reporting discipline
+
+Result directories and manifests describe benchmark **subsets**, not curated
+local result groups. A subset is a fixed, disclosed selection of tasks; it must
+not be presented as the complete upstream benchmark or as a representative
+estimate beyond its declared task set.
+
+Published and compared results must follow the
+[Tura benchmark methodology](https://github.com/Tura-AI/tura/blob/main/docs/benchmark/benchmark-methodology.md):
+
+- freeze and identify the benchmark revision, subset selection, task matrix,
+  agent and model configuration, effort, timeout, replicate count, and execution
+  period before interpreting results;
+- retain every valid task outcome, including failures; replicates are
+  independent observations, and a run may be replaced only when a documented
+  infrastructure failure made it invalid;
+- preserve raw events, normalized records, verifier output, repository diffs,
+  and retry lineage; never infer or manufacture missing evidence, usage, or
+  scores;
+- report DeepSWE, rebuild, and design subsets separately, keep non-harness
+  design results outside harness aggregates, and disclose any optional aggregate
+  formula before use;
+- publish counts and denominators with every rate, disclose exclusions, reruns,
+  harness revisions, and manual judgments, and report uncertainty for repeated
+  outcomes; and
+- compare runs only when task and harness revisions, model and effort settings,
+  timeout and network policies, and replicate counts are compatible. Otherwise,
+  label the comparison as non-equivalent rather than implying a ranking.
 
 ## Quality gates
 

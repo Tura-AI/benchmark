@@ -18,16 +18,17 @@ const repoRoot = path.resolve(benchmarkRoot, "..");
 test("discovers the current benchmark task declarations", async () => {
   const declarations = await discoverTaskDeclarations(benchmarkRoot);
 
-  assert.equal(declarations.length, 5);
+  assert.equal(declarations.length, 6);
   assert.deepEqual(countByType(declarations), {
     build: 0,
     design: 0,
-    debug: 0,
+    debug: 1,
     rewrite: 5,
   });
   assert.deepEqual(
     declarations.map((declaration) => declaration.id),
     [
+      "deep-swe-v1.1",
       "prompt-gallery-tanstack-fullstack-rebuild",
       "source-port-python-default-eza",
       "source-port-python-default-nushell",

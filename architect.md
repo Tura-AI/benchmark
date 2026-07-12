@@ -18,6 +18,9 @@ machine-specific paths or agent-specific orchestration code. The checked-in
    publishable verification artifacts and is never ignored.
 6. `schema/validate.py` discovers artifacts from the current `results/` layout
    and validates every recognized contract without relying on a developer path.
+7. Executable suites such as DeepSWE have one checked-in task declaration and a
+   thin adapter. The adapter owns portable cache/run paths and delegates actual
+   execution to the suite runner; matrix scripts never guess runner locations.
 
 ## Compatibility contract
 
