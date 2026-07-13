@@ -2,8 +2,8 @@
 
 DeepSWE debug runs historically retained `model.patch` and verifier evidence but
 removed their temporary `_workspaces` checkout after patch capture. Published
-Codex runs therefore had `git-diff.patch` but no browsable `workspace/`
-directory.
+Codex and Tura runs therefore had `git-diff.patch` but no browsable
+`workspace/` directory.
 
 The recovery command rebuilds a deterministic **changed-files workspace** for
 each selected run:
@@ -44,6 +44,15 @@ normalization. For those runs the command uses the retained, normalized
 pinned repository metadata; the workspace manifest records this fallback as
 `published-diff-raw-copy`.
 
+One interrupted legacy Tura run stopped before `model.patch` was written, but
+its raw Git checkout was retained. For this case the command builds a temporary
+Git index at the pinned base commit, stages the retained final worktree without
+changing it, and generates the binary diff used for the published snapshot.
+The manifest records `retained-raw-git-workspace`,
+`originalPatchAvailable: false`, and verification against the retained
+worktree; it does not claim comparison with an original patch that never
+existed.
+
 It refuses to publish a workspace when the raw and published patches differ or
 when the exact baseline blobs cannot be recovered. Use `--offline` to prohibit
 network access and rely only on the cache. Use `--overwrite` only when replacing
@@ -59,7 +68,8 @@ node scripts/recover_debug_workspaces.mjs --task abs-stepped-slices
 # Inspect mappings without writing
 node scripts/recover_debug_workspaces.mjs --dry-run
 
-# Recover all agent types, not only Codex
+# The default covers Codex, Tura Balanced, and Tura Direct.
+# Use this for any additional agent types.
 node scripts/recover_debug_workspaces.mjs --all-agents
 ```
 
@@ -69,7 +79,9 @@ node scripts/recover_debug_workspaces.mjs --all-agents
 raw agent run at `runs/<task>/<agent>-r<N>/workspace/` immediately after it
 writes `model.patch` and before it removes the temporary checkout. The
 directory is created even for an empty or deletion-only patch because it always
-contains `.benchmark-workspace.json`.
+contains `.benchmark-workspace.json`. This capture is in the shared agent path,
+so it runs for Codex, Tura Balanced, Tura Direct, and any other configured
+matrix agent.
 
 Consequently, new publications copy an already captured raw workspace. The Git
 blob reconstruction path exists for legacy raw batches only. Run `--check` as

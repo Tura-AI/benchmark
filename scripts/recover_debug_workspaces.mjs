@@ -18,7 +18,9 @@ const result = recoverDebugWorkspaces({
   cacheRoot: args["cache-root"]
     ? path.resolve(root, args["cache-root"])
     : undefined,
-  agents: args["all-agents"] ? ["*"] : list(args.agents || "codex-cli"),
+  agents: args["all-agents"]
+    ? ["*"]
+    : list(args.agents || "codex-cli,tura-balanced,tura-direct"),
   reports: list(args.report),
   tasks: list(args.task),
   overwrite: Boolean(args.overwrite),
@@ -61,7 +63,7 @@ Options:
   --raw-root DIR       Raw artifact root (default: raw)
   --results-root DIR   Published debug root (default: results/debug)
   --cache-root DIR     Partial Git mirror cache
-  --agents IDS         Comma-separated agents (default: codex-cli)
+  --agents IDS         Comma-separated agents (default: all debug agents)
   --all-agents         Recover every agent
   --report IDS         Comma-separated report directory names
   --task IDS           Comma-separated task IDs
