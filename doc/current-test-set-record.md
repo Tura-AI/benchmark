@@ -8,6 +8,16 @@ enough to support a causal claim. It is intentionally stricter than a product
 summary. A result is stated confidently only when the published artifacts can
 be recomputed or directly inspected.
 
+The report evaluates the strategy-level proposition described in the
+[Tura agent repository](https://github.com/Tura-AI/tura): architectural savings
+from fewer repeated-context model calls can either be retained as lower token
+and round use or reinvested in deeper reasoning, investigation, and
+verification. The public [benchmark article](https://turaai.net/benchmark)
+presents the cost-versus-harness-score view; the numbers and limitations in
+this report are grounded in the canonical artifacts in the
+[Tura Benchmark repository](https://github.com/Tura-AI/benchmark), not inferred
+from the article.
+
 ## 1. Scope and evidence levels
 
 The current record covers three different evaluation surfaces:
@@ -352,7 +362,14 @@ should publish the captures alongside both agents' artifacts.
 The artifacts are published under
 [`results/design/paris-summer-temperature-3d`](../results/design/paris-summer-temperature-3d/).
 
-## 11. How fewer tokens funded more verification
+## 11. How architecture savings support two budget strategies
+
+The published configurations represent two strategy-level uses of the claimed
+architecture advantage. Tura Balanced reinvests part of the reduced
+model-context and round-trip budget in higher reasoning effort, investigation,
+and verification. Tura Direct retains more of that advantage as lower token and
+round use while still performing task verification. These are complete agent
+policies, not isolated interventions.
 
 The observed pattern is not “Tura does less.” Tura makes fewer model round
 trips, batches independent commands into one structured execution step, and
@@ -371,7 +388,10 @@ not come from avoiding execution and verification.
 The causal mechanism remains a hypothesis until feature ablations are run.
 The observed system-level fact is already strong: fewer aggregate model tokens
 coexisted with more archived verification activity and, for Balanced, more
-DeepSWE verifier passes.
+DeepSWE verifier passes. For Direct, the relevant question is different: how
+much token, round, and cost reduction can be retained without an unacceptable
+verified-outcome loss. The current near-comparison is descriptive because no
+formal non-inferiority margin was predeclared.
 
 ## 12. Limitations
 
@@ -417,6 +437,24 @@ DeepSWE verifier passes.
    rubric and inter-rater agreement.
 8. Retain browser captures for every design agent so visual claims can be
    reviewed symmetrically after publication.
+
+## 14. Repository and article citations
+
+| Source                                                                                                                                         | Role in this report                                                                   |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| [Tura agent repository](https://github.com/Tura-AI/tura)                                                                                       | Architecture, orchestration, context-management, and strategy framing                 |
+| [Public benchmark article](https://turaai.net/benchmark)                                                                                       | Public cost-versus-harness-score presentation                                         |
+| [Tura Benchmark repository](https://github.com/Tura-AI/benchmark)                                                                              | Report source, task declarations, schemas, runners, and published evidence            |
+| [Benchmark methodology](https://github.com/Tura-AI/benchmark/blob/main/doc/benchmark-methodology.md)                                           | Selection, scoring, normalization, reporting, and strategy-level interpretation rules |
+| [DeepSWE replicate 1](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r01/manifest.json)      | Canonical 60-session manifest for replicate 1                                         |
+| [DeepSWE replicate 2](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r02/manifest.json)      | Canonical 60-session manifest for replicate 2                                         |
+| [DeepSWE replicate 3](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r03/manifest.json)      | Canonical 60-session manifest for replicate 3                                         |
+| [Rewrite canonical manifest](https://github.com/Tura-AI/benchmark/blob/main/results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json) | Canonical 30-session rewrite scores, token totals, and computed costs                 |
+
+The agent repository and public article state the hypothesis and summarize the
+result. The benchmark repository and manifests are the evidence sources used
+for recomputation. None of these citations turns the current system-level
+comparison into a feature-level ablation.
 
 ## Conclusion
 

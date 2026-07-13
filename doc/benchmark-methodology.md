@@ -12,15 +12,29 @@ The resulting suite contains **27 tasks in total**. Of these, **25 are harness-s
 
 This document describes the task-selection criteria, data normalization rules, evaluation boundaries, known anomalies, and limitations. The task inventory, executable contracts, selection logic, and published result artifacts are maintained in this repository; the [current test-set evidence record](current-test-set-record.md) applies the methodology to the July 2026 artifacts.
 
+### 1.1 Primary strategy question
+
+The benchmark's primary purpose is to test a **system-level budget-allocation strategy**, not merely to rank agents or measure an isolated feature. Tura's public architecture and benchmark framing proposes that batching independent tool work, reducing repeated context, and reducing model round trips can create a token and cost advantage. That advantage can then be used in two ways.[^tura-repository] [^tura-benchmark-article]
+
+| Strategy                      | Budget policy                                                                                 | Strategy-level question                                                                                  |
+| ----------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Verification reinvestment** | Reinvest part of the saved budget in higher reasoning effort, investigation, and verification | Can the configured system achieve better verified outcomes while still using fewer tokens or lower cost? |
+| **Token-and-round reduction** | Preserve more of the saved budget as fewer model tokens and fewer model round trips           | Can the configured system retain comparable verified outcomes at materially lower resource use?          |
+
+Tura Balanced represents the verification-reinvestment policy in the published matrix; Tura Direct represents the stronger token-and-round-reduction policy. The comparison must therefore report outcome quality and resource use together: verifier or harness results, observed model tokens, model rounds, computed cost when available, and traceable verification activity. Lower token use without acceptable task outcomes is not a successful strategy, and more verification without a favorable total cost-outcome tradeoff does not establish the claimed benefit.
+
+This is **not a feature-level ablation study**. The unit under test is the complete configured agent strategy, including its runtime architecture, tool orchestration, context policy, reasoning effort, instructions, and verification behavior. The benchmark does not attribute an observed difference to `command_run`, context compaction, backward reasoning, an operation manual, or any other component in isolation. Such causal attribution requires a separately predeclared crossed experiment that holds the remaining system and effort settings constant. Where the current matrix compares different effort settings, it supports a system-level cost-outcome comparison rather than a pure architecture effect.
+
 ## 2. Design principles
 
-The suite follows five principles.
+The suite follows six principles.
 
 - **Behavior before implementation shape.** Where an automated verifier is available, success is based on observable behavior rather than matching a reference patch or reproducing internal symbol names. This follows the behavioral-verifier rationale described by DeepSWE and the broader repository-level evaluation setup established by SWE-bench.[^deepswe-methodology] [^swebench-paper]
 - **Coverage before convenience.** DeepSWE sampling is stratified by programming language and estimated difficulty rather than drawn only from the easiest or most common tasks.
 - **Pinned, auditable inputs.** Rewrite tasks identify the source repository, commit, tag, target language, and stable harness items. Run artifacts retain task, agent, model, and runtime metadata.
 - **No invented evidence.** Missing logs, assertion text, token fields, or scores remain missing. They are not reconstructed from model summaries or inferred from nearby runs.
 - **Separate objective and subjective evaluation.** Deterministic or programmatic checks belong in the harness. Design quality remains outside the harness until a validated human-review or multimodal-evaluation protocol is defined.
+- **Strategy before feature attribution.** Interpret each agent configuration as a complete budget-and-verification policy. Do not relabel a system-level result as evidence that one architectural component caused it.
 
 These choices are also consistent with reproducible benchmark practice: the experimental design, software versions, parameters, and result metadata should remain tied together rather than being reported as disconnected tables.[^summarized-benchmark]
 
@@ -267,13 +281,25 @@ Report the three subsets separately:
 - **Rewrite:** assertion score per task, the five-task macro average, and the separately labeled assertion-weighted micro rate;
 - **Design:** artifact validity and separate rubric dimensions or qualitative findings, explicitly labeled non-harness.
 
+For every strategy comparison, report these outcome metrics beside observed total model tokens, model rounds, and computed cost when the provider usage record supports it. Also retain task-level distributions and severe long tails; aggregate savings alone can hide expensive failures. Verification activity may be summarized from traceable test, build, lint, browser, link, source, or rerun evidence, but raw command counts must not be treated as equal atomic work units across runtimes with different batching granularity.
+
 For comparisons between agents, use the same task revision, model where the agent comparison requires it, effort setting, timeout policy, network policy, and replicate count. Publish the run matrix before interpreting differences.
 
-### 8.2 Optional overall summaries
+### 8.2 Strategy-level interpretation
+
+Evaluate the two budget policies separately before making any overall statement.
+
+- **Verification reinvestment:** compare verified task outcomes against tokens, rounds, cost, and retained verification evidence. The intended claim is a better cost-outcome frontier, not simply a larger number of tool commands.
+- **Token-and-round reduction:** compare tokens, rounds, and cost against the verified outcome gap. Describe outcomes as comparable only with a predeclared tolerance or with suitably cautious descriptive language; an informal near-tie is not a formal non-inferiority result.
+- **Mechanism boundary:** label conclusions as system-level strategy results. Component-level causal claims require ablations or a crossed design and must not be inferred from these comparisons.
+
+When reasoning effort differs between configurations, report that difference prominently. A lower-cost, higher-outcome configured system can still be a valid strategy-level result, but it does not identify how much of the result came from architecture, effort, instructions, or their interaction.
+
+### 8.3 Optional overall summaries
 
 If an overall engineering score is required, use a task-level macro average over the **25 harness-scored tasks** so that each task contributes equally after its own harness has produced a task score. Label the formula and keep the subset scores adjacent. Do not include the two design tasks unless a separate, predeclared scoring protocol exists.
 
-### 8.3 Uncertainty
+### 8.4 Uncertainty
 
 Always show counts with percentages. For repeated binary task outcomes, report replicate dispersion or a confidence interval and avoid treating small differences as meaningful. Twenty DeepSWE tasks are sufficient for a controlled comparison on this subset, but not for precise estimates of the full 113-task benchmark. The official DeepSWE site likewise reports uncertainty and cautions against overinterpreting small qualitative frequencies.[^deepswe-home] [^deepswe-methodology]
 
@@ -380,4 +406,10 @@ Before publishing or comparing a run:
 
 [^summarized-benchmark]: Stephanie C. Mangul, Lana S. Martin, Brian L. Hill, Angela Ka-Mei Lam, Margaret G. Distler, Eleazar Eskin, and Jonathan Flint, “Reproducible and replicable comparisons using SummarizedBenchmark,” _Bioinformatics_ 35(8), 2019, <https://doi.org/10.1093/bioinformatics/bty627>.
 
-Additional implementation evidence is available in the [DeepSWE selection implementation](../deep_swe/select_tasks.py), [task definitions and harnesses](../tasks/), [runtime schemas](../schema/), and [published result manifests](../results/).
+[^tura-repository]: Tura AI, “Tura,” agent architecture, tool orchestration, context-management design, and public strategy-level benchmark framing, <https://github.com/Tura-AI/tura> (accessed 2026-07-13).
+
+[^tura-benchmark-article]: Tura AI, “Tura benchmark: Capability under pressure,” public cost-versus-harness-score article, <https://turaai.net/benchmark> (accessed 2026-07-13).
+
+[^benchmark-repository]: Tura AI, “Tura Benchmark,” methodology, task definitions, canonical manifests, and published evidence, <https://github.com/Tura-AI/benchmark> (accessed 2026-07-13).
+
+Additional implementation evidence is available in the [Tura Benchmark repository][^benchmark-repository], [DeepSWE selection implementation](../deep_swe/select_tasks.py), [task definitions and harnesses](../tasks/), [runtime schemas](../schema/), and [published result manifests](../results/).
