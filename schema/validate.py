@@ -85,6 +85,7 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
         "task-report.schema.json": "results/*/*/*/*/*/metadata/contracts/task-report.json",
         "benchmark-web-run.schema.json": "results/*/*/*/*/*/metadata/contracts/benchmark-web-run.json",
         "contract-manifest.schema.json": "results/*/*/*/*/*/metadata/contracts/contract-manifest.json",
+        "changed-workspace.schema.json": "results/debug/*/*/*/*/metadata/workspace-recovery.json",
         "design-task.schema.json": "results/design/*/design-task.json",
         "design-run.schema.json": "results/design/*/*/*/metadata/contracts/design-run.json",
     }
@@ -94,6 +95,11 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
         counts[schema_name] = len(paths)
         for path in paths:
             validate_json(path, schema_name, errors)
+
+    workspace_paths = sorted(root.glob("results/debug/*/*/*/*/workspace/.benchmark-workspace.json"))
+    counts["changed workspace manifests"] = len(workspace_paths)
+    for path in workspace_paths:
+        validate_json(path, "changed-workspace.schema.json", errors)
 
     deepswe_patterns = {
         "DeepSWE task contracts": ("task.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-*/*/task.json"),

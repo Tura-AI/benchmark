@@ -21,6 +21,7 @@ import {
   buildHarnessBatches,
   validHarnessReport,
 } from "./harness.mjs";
+import { captureChangedWorkspace } from "../lib/debug_workspace_recovery.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -603,6 +604,20 @@ async function runAgentJob(job) {
     );
     const patchPath = path.join(agentDir, "model.patch");
     fs.writeFileSync(patchPath, patchResult.stdout, "utf8");
+    const workspaceSnapshot = captureChangedWorkspace({
+      sourceWorkspace: workspace,
+      outputDirectory: path.join(agentDir, "workspace"),
+      patchText: patchResult.stdout,
+      provenance: {
+        taskId: job.task.task_id,
+        sourceRun: `runs/${job.task.task_id}/${job.agent}-r${job.replicate}`,
+        repository: job.task.repository_url,
+        baseCommit: job.task.base_commit_hash,
+        baselineTree,
+        recoverySource: "captured-before-raw-workspace-cleanup",
+        diffVerifiedByteForByte: true,
+      },
+    });
 
     const scheme = await validateScheme(job, result, container);
     writeJson(path.join(agentDir, "scheme-validation.json"), scheme);
@@ -655,6 +670,7 @@ async function runAgentJob(job) {
         changed_files: changedFiles(patchResult.stdout),
         baseline_tree: baselineTree,
       },
+      workspace_snapshot: workspaceSnapshot,
     };
     writeJson(agentSummaryPath(job), summary);
     job.exit_code = result.status;

@@ -101,10 +101,15 @@ quota.
 - [Architecture and repository contracts](doc/architecture.md)
 - [Benchmark methodology](doc/benchmark-methodology.md)
 - [Current test-set evidence record](doc/current-test-set-record.md)
+- [Debug workspace recovery](doc/debug-workspace-recovery.md)
 
 Published, reproducible artifacts live under `results/`. Local logs, caches,
 downloaded repositories, workspaces, and provider state belong under the
 ignored `raw/` and `.tura/` directories.
+
+Legacy DeepSWE debug runs can rebuild their published changed-file workspaces
+from raw patches with `npm run recover:debug-workspaces`.
+Use `npm run check:debug-workspaces` as a publication gate.
 
 ## License
 

