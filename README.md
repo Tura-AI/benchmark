@@ -3,7 +3,10 @@
 Tura Benchmark is the reproducible evaluation repository for long-horizon
 coding agents. It contains portable task definitions, agent and runtime
 configuration, benchmark runners, validation schemas, and published result
-artifacts for debug, rewrite, and design evaluations.
+artifacts for debug, rewrite, and design evaluations. The published Rewrite
+cohort contains five tasks, three configurations, two replicates, and 30
+canonical sessions; its scoring and recomputed results are documented in the
+methodology and current evidence record below.
 
 ## Requirements
 

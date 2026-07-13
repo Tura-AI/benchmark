@@ -10,21 +10,25 @@ be recomputed or directly inspected.
 
 ## 1. Scope and evidence levels
 
-The current record covers two different evaluation surfaces:
+The current record covers three different evaluation surfaces:
 
 | Surface                 |                            Published observations | Evaluation                                          |
 | ----------------------- | ------------------------------------------------: | --------------------------------------------------- |
 | DeepSWE v1.1 subset     | 20 tasks x 3 agents x 3 replicates = 180 sessions | Official binary verifier                            |
+| Rewrite subset          |   5 tasks x 3 agents x 2 replicates = 30 sessions | Task-specific stable multi-item harnesses           |
 | Design/front-end subset |    2 tasks x 2 agents x 2 replicates = 8 sessions | Artifact and process audit; no scalar quality score |
 
 The DeepSWE numbers are recomputed from the 180 published `summary.json` and
 `source-harness-report.json` files under the three
-[`results/debug`](../results/debug/) reports. The design findings come from the
-eight archived [`design-run.json`](../results/design/) contracts, their HTML
-workspaces, and their recorded tool calls. The two evidence types are not
-interchangeable: verifier pass rates support quantitative capability claims;
-eight unblinded design runs support concrete artifact and process findings,
-not statistical generalization.
+[`results/debug`](../results/debug/) reports. Rewrite scores and usage totals are
+recomputed from the 30-run
+[`canonical-manifest.json`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json)
+and can be traced to each run's normalized harness report. The design findings
+come from the eight archived [`design-run.json`](../results/design/) contracts,
+their HTML workspaces, and their recorded tool calls. These evidence types are
+not interchangeable: verifier and harness results support quantitative
+capability claims; eight unblinded design runs support concrete artifact and
+process findings, not statistical generalization.
 
 The task definitions, selection method, and reporting rules are documented in
 the [benchmark methodology](benchmark-methodology.md),
@@ -55,7 +59,24 @@ The matrix used the default service tier, bounded 90-minute agent runs, and
 isolated workspaces. Tura was routed through its normal runtime and Bash command
 surface. The same 20 task IDs appear in each of the three published replicates.
 
-### 2.2 Design and front-end cohort
+### 2.2 Rewrite cohort
+
+The rewrite subset contains four Rust-to-Python CLI source ports (`eza`,
+`nushell`, `xsv`, and `zip-password-finder`) plus one benchmark-owned HTML
+reference rebuilt as a TypeScript/TanStack Start full-stack application. Each
+task was run twice with Codex CLI Medium, Tura Balanced High, and Tura Direct
+High, all using GPT-5.6 SOL and the default service tier. This yields 10
+sessions per configuration and 30 canonical sessions in total.
+
+The CLI harnesses compare the rebuilt executable with the pinned reference for
+exit status, stdout, and stderr across declared behavior families. The
+full-stack harness checks application structure, visual fidelity, marketplace
+flows, backend and database behavior, computed analytics, tests, browser
+robustness, and code quality. The five harnesses contain 236 stable items per
+replicate; because each configuration has two replicates, its pooled denominator
+is 472 valid harness items.
+
+### 2.3 Design and front-end cohort
 
 The design subset contains an East Asian squid recipe slide deck and an
 interactive Paris summer-temperature 3D experience. Each was run twice with
@@ -75,10 +96,11 @@ The benchmark keeps three evidence layers.
    reports. Cumulative usage snapshots are deduplicated; absent usage remains
    absent rather than being estimated.
 3. **Published layer.** Compact run manifests, normalized summaries, source
-   agent summaries, source harness reports, patches, and design workspaces are
-   copied under [`results/`](../results/). Every published DeepSWE run retains
-   task ID, agent ID, model, effort, replicate, source batch, token usage,
-   rounds, elapsed time, patch metadata, and verifier outcome.
+   agent summaries, source harness reports, patches, rewrite workspaces, and
+   design workspaces are copied under [`results/`](../results/). Every published
+   DeepSWE and rewrite run retains task ID, agent ID, model, effort, replicate,
+   source batch, token usage, rounds, elapsed time, patch or workspace metadata,
+   and verifier or harness outcome.
 
 The collection and normalization boundaries are implemented in
 [`deep_swe/run_matrix.mjs`](../deep_swe/run_matrix.mjs),
@@ -132,7 +154,40 @@ These results support two strong statements.
 
 They do not prove that one isolated runtime feature caused the difference.
 
-## 6. Anomalies and severe long tails were retained
+## 6. Recomputed rewrite result
+
+Every number in this section was recomputed from the 30 entries in the
+[`canonical-manifest.json`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json).
+Each configuration has two valid replicates of all five tasks. The assertion
+micro rate is `sum(passed) / sum(total)` across those runs; the task macro
+average first pools each task's two replicates, computes five task rates, and
+then gives those five rates equal weight. Run percentages are never averaged.
+
+| Configuration      | Harness checks | Micro rate | Task macro avg | Aggregate tokens | Token change vs Codex |
+| ------------------ | -------------: | ---------: | -------------: | ---------------: | --------------------: |
+| Codex CLI Medium   |        351/472 |      74.4% |          76.4% |       62,609,358 |              baseline |
+| Tura Balanced High |        389/472 |      82.4% |          84.2% |       24,997,927 |                -60.1% |
+| Tura Direct High   |        353/472 |      74.8% |          77.4% |        8,368,639 |                -86.6% |
+
+The task-level pooled results make the heterogeneous harnesses visible instead
+of hiding them inside one percentage:
+
+| Rewrite task                                | Items per replicate | Codex CLI Medium | Tura Balanced High | Tura Direct High |
+| ------------------------------------------- | ------------------: | ---------------: | -----------------: | ---------------: |
+| `eza`                                       |                  52 |   74/104 (71.2%) |     93/104 (89.4%) |   83/104 (79.8%) |
+| `nushell`                                   |                  48 |    59/96 (61.5%) |      71/96 (74.0%) |    61/96 (63.5%) |
+| `prompt-gallery-tanstack-fullstack-rebuild` |                  63 |  123/126 (97.6%) |    121/126 (96.0%) |  119/126 (94.4%) |
+| `xsv`                                       |                  55 |   60/110 (54.5%) |     68/110 (61.8%) |   54/110 (49.1%) |
+| `zip-password-finder`                       |                  18 |    35/36 (97.2%) |     36/36 (100.0%) |   36/36 (100.0%) |
+
+Balanced passed 38 more of 472 checks than Codex, an 8.1 percentage-point
+micro-rate gain, while using 60.1% fewer aggregate tokens. Direct passed two
+more checks than Codex while using 86.6% fewer tokens. Codex scored highest on
+the TanStack rebuild; Balanced scored highest or tied highest on all four CLI
+ports. These are results for the named High-versus-Medium configurations, not
+an isolated measurement of runtime architecture or reasoning effort.
+
+## 7. Anomalies and severe long tails were retained
 
 The totals include behavior that makes Tura look worse. This is deliberate.
 
@@ -162,7 +217,7 @@ This is what retaining long-tail evidence means: aggregate efficiency is not a
 median-only story, and operational failures are not removed because they are
 embarrassing.
 
-## 7. Why Tura High is compared with Codex Medium
+## 8. Why Tura High is compared with Codex Medium
 
 This is a comparison of named product configurations, not a controlled
 reasoning-effort experiment. Tura uses High because its Balanced mode is meant
@@ -185,7 +240,7 @@ The correct interpretation is therefore:
 - still required: a crossed 2x2 matrix running Tura and Codex at both Medium
   and High under otherwise identical benchmark conditions.
 
-## 8. Compact context and missing ablations
+## 9. Compact context and missing ablations
 
 Tura's archived contracts contain explicit `task_status.compact_context`
 interventions. The product README reports an average 2.6 rounds from those
@@ -200,7 +255,7 @@ the rest of Tura fixed. There is likewise no completed isolation of
 management, or provider-cache effects. Claims that any one of these features
 alone caused the aggregate savings would exceed the evidence.
 
-## 9. Design and front-end evidence
+## 10. Design and front-end evidence
 
 Across the eight same-model, same-High-effort design runs, Tura used fewer
 tokens and turns while recording substantially more evidence-gathering and
@@ -219,7 +274,7 @@ browser/Playwright checks, link probes, and responsive-state verification.
 The Codex runs record no equivalent media inspection and no archived browser
 capture review.
 
-### 9.1 Squid recipe links
+### 10.1 Squid recipe links
 
 The four public HTML artifacts can be inspected directly:
 
@@ -264,7 +319,7 @@ the cited source.
 The artifacts are published under
 [`results/design/east-asian-squid-recipes-slides`](../results/design/east-asian-squid-recipes-slides/).
 
-### 9.2 Paris 3D implementation and validation
+### 10.2 Paris 3D implementation and validation
 
 The four public HTML artifacts can be inspected directly:
 
@@ -297,7 +352,7 @@ should publish the captures alongside both agents' artifacts.
 The artifacts are published under
 [`results/design/paris-summer-temperature-3d`](../results/design/paris-summer-temperature-3d/).
 
-## 10. How fewer tokens funded more verification
+## 11. How fewer tokens funded more verification
 
 The observed pattern is not “Tura does less.” Tura makes fewer model round
 trips, batches independent commands into one structured execution step, and
@@ -318,12 +373,18 @@ The observed system-level fact is already strong: fewer aggregate model tokens
 coexisted with more archived verification activity and, for Balanced, more
 DeepSWE verifier passes.
 
-## 11. Limitations
+## 12. Limitations
 
 - The DeepSWE subset is deterministic and stratified, not a random sample of
   all software work.
 - Three replicates reduce stochastic noise but do not create 60 independent
   tasks; outcomes within a task and repository are correlated.
+- The rewrite subset has only five heterogeneous tasks and two replicates. Its
+  472 harness checks per configuration are not 472 independent tasks; both the
+  task-macro and assertion-micro rates must remain visible.
+- Four rewrite tasks cover Rust-to-Python CLI ports and one covers a single
+  TanStack product shape, so the result does not generalize to arbitrary
+  language pairs, frameworks, or application categories.
 - High-versus-Medium confounds agent/runtime and effort.
 - Compact-context and feature-level effects have not been ablated.
 - Token totals measure observed provider usage, not a universal dollar cost;
@@ -337,7 +398,7 @@ DeepSWE verifier passes.
 - A verifier can be imperfect. Passing the current harness proves conformance
   to that harness, not maintainability, security, or upstream acceptance.
 
-## 12. Next experiments
+## 13. Next experiments
 
 1. Run the crossed Tura/Codex x Medium/High effort matrix with identical task,
    timeout, service-tier, and concurrency policies.
@@ -347,12 +408,14 @@ DeepSWE verifier passes.
    publish both intent-to-run and valid-verifier denominators.
 4. Report paired task-level confidence intervals and bootstrap sensitivity,
    not only pooled session percentages.
-5. Add a deterministic design integrity harness for link type, HTTP status,
+5. Expand rewrite coverage to additional source/target language pairs and
+   full-stack product shapes while retaining task-level macro reporting.
+6. Add a deterministic design integrity harness for link type, HTTP status,
    video-page identity, local assets, browser console state, viewport captures,
    WebGL availability, and interaction paths.
-6. Add blinded multi-reviewer visual and editorial scoring with a predeclared
+7. Add blinded multi-reviewer visual and editorial scoring with a predeclared
    rubric and inter-rater agreement.
-7. Retain browser captures for every design agent so visual claims can be
+8. Retain browser captures for every design agent so visual claims can be
    reviewed symmetrically after publication.
 
 ## Conclusion
@@ -362,7 +425,10 @@ system-level result: on this fixed 20-task DeepSWE cohort, Tura Balanced passed
 more verifiers with fewer aggregate tokens and rounds, while Tura Direct
 matched the reference pass count within one run at a fraction of the token and
 round budget. Severe Tura long tails and failures were retained rather than
-trimmed. In the small same-effort design cohort, Tura also used fewer tokens
+trimmed. On the five-task rewrite cohort, Balanced achieved an 84.2% task-macro
+average and 82.4% assertion-micro rate while using 60.1% fewer tokens than
+Codex; Direct achieved 77.4% and 74.8% respectively while using 86.6% fewer
+tokens. In the small same-effort design cohort, Tura also used fewer tokens
 while preserving far more source, media, link, browser, and responsive
 verification evidence.
 

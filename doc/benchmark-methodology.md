@@ -5,7 +5,7 @@
 This benchmark evaluates coding agents on three complementary forms of long-horizon work:
 
 1. **DeepSWE subset (20 tasks):** repository-level software-engineering tasks selected from DeepSWE v1.1, with balanced language coverage and difficulty stratification.
-2. **Rebuild subset (5 tasks):** four open-source command-line tools rebuilt from Rust to Python, plus one single-page HTML reference rebuilt as a full-stack TanStack Start application.
+2. **Rewrite subset (5 tasks):** four open-source command-line tools rewritten from Rust to Python, plus one single-page HTML reference rebuilt as a full-stack TanStack Start application.
 3. **Design subset (2 tasks):** open-ended visual and interactive HTML deliverables. These tasks are executed and archived, but are intentionally excluded from the automated scoring harness.
 
 The resulting suite contains **27 tasks in total**. Of these, **25 are harness-scored** and **2 are design-mode tasks without a harness**. The three subsets measure different capabilities and should be reported separately. A single aggregate score is not the primary result because binary repository repair, behavioral compatibility, full-stack reconstruction, and visual design are not commensurate measurements.
@@ -18,7 +18,7 @@ The suite follows five principles.
 
 - **Behavior before implementation shape.** Where an automated verifier is available, success is based on observable behavior rather than matching a reference patch or reproducing internal symbol names. This follows the behavioral-verifier rationale described by DeepSWE and the broader repository-level evaluation setup established by SWE-bench.[^deepswe-methodology] [^swebench-paper]
 - **Coverage before convenience.** DeepSWE sampling is stratified by programming language and estimated difficulty rather than drawn only from the easiest or most common tasks.
-- **Pinned, auditable inputs.** Rebuild tasks identify the source repository, commit, tag, target language, and stable harness items. Run artifacts retain task, agent, model, and runtime metadata.
+- **Pinned, auditable inputs.** Rewrite tasks identify the source repository, commit, tag, target language, and stable harness items. Run artifacts retain task, agent, model, and runtime metadata.
 - **No invented evidence.** Missing logs, assertion text, token fields, or scores remain missing. They are not reconstructed from model summaries or inferred from nearby runs.
 - **Separate objective and subjective evaluation.** Deterministic or programmatic checks belong in the harness. Design quality remains outside the harness until a validated human-review or multimodal-evaluation protocol is defined.
 
@@ -29,7 +29,7 @@ These choices are also consistent with reproducible benchmark practice: the expe
 | Subset              |  Tasks | Primary capability                                                      | Evaluation mode                                      | Included in harness aggregate |
 | ------------------- | -----: | ----------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------- |
 | DeepSWE v1.1 subset |     20 | Repository exploration, implementation, debugging, and verification     | Official program-based verifier; binary task outcome | Yes                           |
-| Rebuild subset      |      5 | Behavioral compatibility, source porting, and full-stack reconstruction | Task-specific multi-item harness                     | Yes                           |
+| Rewrite subset      |      5 | Behavioral compatibility, source porting, and full-stack reconstruction | Task-specific multi-item harness                     | Yes                           |
 | Design subset       |      2 | Visual communication, research, interaction, and artifact quality       | Artifact capture and separate review                 | No                            |
 | **Total**           | **27** | Mixed long-horizon agent work                                           | Mixed                                                | **25 scored, 2 unscored**     |
 
@@ -140,11 +140,11 @@ Each run starts from the task's pinned base commit and isolated environment. The
 
 Infrastructure outcomes are not task failures. A non-zero verifier process exit, missing report, malformed reward, unavailable image, workspace-preparation failure, timeout outside the task contract, or artifact-write failure is labeled **invalid/infrastructure failure** and excluded from the pass-rate denominator until rerun or explicitly reported as missing. Treating infrastructure failures as zero would confound agent capability with benchmark availability.
 
-## 5. Rebuild subset
+## 5. Rewrite subset
 
 ### 5.1 Selection criteria
 
-The rebuild subset is designed to test whether an agent can recover and reproduce behavior from an existing artifact or codebase rather than implement a narrowly localized issue. A task is included when it has:
+The rewrite subset is designed to test whether an agent can recover and reproduce behavior from an existing artifact or codebase rather than implement a narrowly localized issue. The repository and result category is named `rewrite`; “rebuild” describes the work performed inside these tasks, not a separate benchmark subset. A task is included when it has:
 
 - a legally accessible and inspectable source or reference artifact;
 - a pinned source commit/tag or benchmark-owned reference snapshot;
@@ -155,7 +155,7 @@ The rebuild subset is designed to test whether an agent can recover and reproduc
 
 The four CLI tasks use differential or reference-equivalence checks: the target implementation is exercised with representative commands and compared with the pinned reference behavior. The HTML task combines structural, browser, backend, database, test, and maintainability checks. Harness item counts describe the number of stable assertions, not five directly comparable percentage scales.
 
-### 5.2 Complete rebuild task inventory
+### 5.2 Complete rewrite task inventory
 
 | Task                                        | Source and pin                                                                                                                                 | Target                      | Harness items | Scope                                                                                                                                                                                                                                                                                                                                                        |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- | ------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -165,7 +165,7 @@ The four CLI tasks use differential or reference-equivalence checks: the target 
 | `zip-password-finder`                       | [zip-password-finder](https://github.com/agourlay/zip-password-finder), Rust, tag `v0.11.1`, commit `7c1a4c93841220fc740ed81d3b97784e450fc6a6` | Python CLI                  |            18 | Rebuild the single-command interface, argument validation, dictionary search, and brute-force ZIP password search behavior.                                                                                                                                                                                                                                  |
 | `prompt-gallery-tanstack-fullstack-rebuild` | Benchmark-owned `makeup.html`, snapshot tag `report-20260708-20260709`                                                                         | TypeScript / TanStack Start |            63 | Convert a single-page prompt-marketplace reference into a functioning full-stack application. Checks cover TanStack Start structure, visual fidelity, storefront/detail/cart/checkout/filter/favorite/creator/admin flows, server operations, local database schema and seed data, computed analytics, runnable tests, browser robustness, and code quality. |
 
-### 5.3 Rebuild scoring
+### 5.3 Rewrite scoring
 
 Each task reports passed assertions and total valid assertions from its own harness. Recommended reporting is:
 
@@ -173,15 +173,27 @@ Each task reports passed assertions and total valid assertions from its own harn
 task_score = passed valid harness items / total valid harness items
 ```
 
-Report both the numerator and denominator. A macro average across the five tasks may be shown only as a secondary summary:
+For replicated runs, pool valid harness items within each task before computing that task's score. Report both the numerator and denominator. The task-level macro average gives each of the five tasks equal weight:
 
 ```text
-rebuild_macro_average = mean(task_score for the five rebuild tasks)
+rewrite_macro_average = mean(task_score for the five rewrite tasks)
 ```
 
-Do not pool all 236 harness items into the primary score. A pooled micro average would give the 63-item HTML rebuild 3.5 times the weight of the 18-item ZIP task merely because its harness is more granular.
+The published README also reports an assertion-weighted micro rate from the canonical manifest:
+
+```text
+rewrite_micro_rate = sum(passed valid harness items) / sum(total valid harness items)
+```
+
+Keep the macro and micro rates labeled and adjacent. The micro rate gives the 63-item HTML rebuild 3.5 times the weight of the 18-item ZIP task merely because its harness is more granular; it is useful as an auditable count of all checks, but it is not a task-balanced score. Never average run percentages directly.
 
 The harness does not require source-level similarity. Alternative implementations are acceptable when they satisfy the declared behavior. Conversely, compilation or visual resemblance alone is insufficient when behavioral checks fail.
+
+### 5.4 Execution and published evidence
+
+Each rewrite run starts in an isolated workspace containing the pinned source or benchmark-owned reference, the task prompt, and the required build contract. The four CLI tasks prohibit internet search, existing ports, wrappers around the reference binary, and Docker; agents must produce a Python implementation plus an idempotent `compile.sh` and directly runnable `executable` entrypoint. The evaluator runs the reference and candidate with matched arguments, input files, standard input, and environment, then compares exit status, stdout, and stderr. The TanStack task evaluates the rebuilt application across structure, visual fidelity, product flows, backend behavior, database behavior, analytics, tests, browser robustness, and code quality.
+
+The July 2026 publication contains five tasks, three named configurations, and two replicates per configuration: **30 canonical sessions**. Its source of truth is [`results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json). Per-run prompts, normalized rounds, token usage, patches or workspaces, and harness reports are retained beneath the same report directory. The recomputed totals and task-level table are recorded in the [current test-set evidence record](current-test-set-record.md).
 
 ## 6. Design subset
 
@@ -202,7 +214,7 @@ Simple existence checks such as “`index.html` was created” are useful integr
 
 ### 7.1 Immutable task identity
 
-Every task is keyed by a stable task ID. Repository tasks additionally retain the repository URL and base commit. Rebuild tasks retain their source tag/commit and target runtime. Results from different task revisions must not be merged under one ID without a revision field or migration record.
+Every task is keyed by a stable task ID. Repository tasks additionally retain the repository URL and base commit. Rewrite tasks retain their source tag/commit and target runtime. Results from different task revisions must not be merged under one ID without a revision field or migration record.
 
 ### 7.2 Run identity and repeats
 
@@ -252,7 +264,7 @@ Use explicit states rather than coercing all anomalies to zero:
 Report the three subsets separately:
 
 - **DeepSWE:** passes / valid task runs and pass rate, with replicate-level results retained;
-- **Rebuild:** assertion score per task plus the five-task macro average;
+- **Rewrite:** assertion score per task, the five-task macro average, and the separately labeled assertion-weighted micro rate;
 - **Design:** artifact validity and separate rubric dimensions or qualitative findings, explicitly labeled non-harness.
 
 For comparisons between agents, use the same task revision, model where the agent comparison requires it, effort setting, timeout policy, network policy, and replicate count. Publish the run matrix before interpreting differences.
@@ -309,7 +321,7 @@ The benchmark measures performance under specific prompts, tools, timeouts, envi
 
 DeepSWE covers five languages but excludes major ecosystems such as Java and C++. Its official corpus is concentrated in TypeScript, Go, and Python, and is drawn from established open-source repositories; DeepSWE's authors note these same coverage limits.[^deepswe-methodology] Equal-language sampling further differs from real-world language prevalence.
 
-The rebuild subset is small and intentionally heterogeneous. All four CLI ports begin with Rust sources and target Python, so the result should not be generalized to arbitrary language pairs. The HTML task tests one framework and one product shape.
+The rewrite subset is small and intentionally heterogeneous. All four CLI ports begin with Rust sources and target Python, so the result should not be generalized to arbitrary language pairs. The HTML task tests one framework and one product shape.
 
 ### 10.3 Selection bias
 
@@ -327,7 +339,7 @@ Model APIs, agent implementations, package registries, benchmark artifacts, and 
 
 ### 10.6 Statistical power and dependence
 
-Twenty DeepSWE tasks and five rebuild tasks provide limited power. Outcomes within a repository, language, or agent runtime may be correlated, so treating every harness assertion as an independent sample understates uncertainty. Replicates reduce stochastic noise but do not create new independent tasks.
+Twenty DeepSWE tasks and five rewrite tasks provide limited power. Outcomes within a repository, language, or agent runtime may be correlated, so treating every harness assertion as an independent sample understates uncertainty. Replicates reduce stochastic noise but do not create new independent tasks.
 
 ### 10.7 Cost and timeout effects
 
@@ -345,7 +357,7 @@ Before publishing or comparing a run:
 - publish the agent/model/effort matrix, replicate count, timeout, concurrency, and network policy;
 - preserve raw events, normalized rounds, repository diffs, verifier output, and retry lineage;
 - distinguish valid task failures from infrastructure-invalid runs;
-- report DeepSWE, rebuild, and design results separately;
+- report DeepSWE, rewrite, and design results separately;
 - include counts and denominators with every rate;
 - keep design tasks outside harness aggregation;
 - document every exclusion, rerun, harness revision, and manual judgment.
