@@ -96,15 +96,15 @@ This command checks local executables and the Docker daemon only. It does not
 verify provider credentials, pull images, launch agents, or consume provider
 quota.
 
-### Rebuild the official mini-swe-agent sample
+### Rebuild the official mini-swe-agent 20-task matrix
 
-The repository publishes a summary-only normalization of the first three tasks
-in the Tura DeepSWE inventory for official GPT-5.6 SOL Medium and High
-`mini-swe-agent` trials. Rebuild the eight reports and 24 runs from the current
+The repository publishes a summary-only normalization of all 20 tasks in the
+Tura DeepSWE inventory for official GPT-5.6 SOL Medium and High
+`mini-swe-agent` trials. Rebuild the eight reports and 160 runs from the current
 official trial index with:
 
 ```sh
-npm run import:deep-swe:official:first3
+npm run import:deep-swe:official
 ```
 
 The import records the source SHA-256 and keeps every official trial row beside

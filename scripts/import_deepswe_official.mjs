@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -45,7 +45,7 @@ const TASK_ORDER = [
 
 function parseArgs(argv) {
   const args = {
-    taskCount: 3,
+    taskCount: TASK_ORDER.length,
     outputRoot: path.join(ROOT, "results", "debug"),
     trials: TRIALS_URL,
   };
@@ -118,6 +118,7 @@ export function selectOfficialTrials(rows, taskIds) {
       row.eval_scope === "full" &&
       row.included_in_score === true &&
       row.model === MODEL_SOURCE &&
+      row.provider === PROVIDER &&
       row.harness === AGENT &&
       EFFORTS.includes(row.reasoning_effort),
   );
@@ -621,14 +622,29 @@ export async function importOfficialSubset(options) {
     ),
   );
 
-  for (const effort of EFFORTS) {
-    for (let replicate = 1; replicate <= REPLICATES; replicate += 1) {
-      await rm(path.join(options.outputRoot, reportIdFor(effort, replicate)), {
-        recursive: true,
-        force: true,
-      });
-    }
-  }
+  const outputEntries = await readdir(options.outputRoot, {
+    withFileTypes: true,
+  });
+  await Promise.all(
+    outputEntries
+      .filter(
+        (entry) =>
+          (entry.isDirectory() &&
+            /^report-deepswe-v1\.1-gpt56-sol-mini-swe-agent-[a-z]+-r\d{2}$/u.test(
+              entry.name,
+            )) ||
+          (entry.isFile() &&
+            /^deepswe-v1\.1-gpt56-sol-mini-swe-agent-.*-audit\.json$/u.test(
+              entry.name,
+            )),
+      )
+      .map((entry) =>
+        rm(path.join(options.outputRoot, entry.name), {
+          recursive: entry.isDirectory(),
+          force: true,
+        }),
+      ),
+  );
 
   const reportRuns = new Map();
   for (const trial of trials) {
@@ -683,7 +699,10 @@ export async function importOfficialSubset(options) {
         agentVersion: AGENT_VERSION,
         replicate,
         selection: {
-          method: `First ${taskIds.length} tasks in the published Tura DeepSWE 20-task inventory order.`,
+          method:
+            taskIds.length === TASK_ORDER.length
+              ? "All 20 tasks in the published Tura DeepSWE inventory order."
+              : `First ${taskIds.length} tasks in the published Tura DeepSWE 20-task inventory order.`,
           taskIds,
         },
         taskCount: taskIds.length,
@@ -712,7 +731,7 @@ export async function importOfficialSubset(options) {
     }
   }
 
-  const auditName = `deepswe-v1.1-gpt56-sol-mini-swe-agent-first${taskIds.length}-audit.json`;
+  const auditName = `deepswe-v1.1-gpt56-sol-mini-swe-agent-high-medium-full${taskIds.length}-audit.json`;
   const audit = {
     schema: "tura.benchmark.deepswe-official-subset-audit.v1",
     benchmark: "datacurve-ai/deep-swe",

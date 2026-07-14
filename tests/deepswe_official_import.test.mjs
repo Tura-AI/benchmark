@@ -13,6 +13,7 @@ test("official trial selection assigns chronological replicates", () => {
     eval_scope: "full",
     included_in_score: true,
     model: "gpt-5-6-sol",
+    provider: "openai",
     harness: "mini-swe-agent",
     reasoning_effort: "high",
     started_at: `2026-07-0${day}T00:00:00Z`,
@@ -40,19 +41,19 @@ test("official trial selection assigns chronological replicates", () => {
   );
 });
 
-test("committed first-three import is complete and internally consistent", async () => {
+test("committed 20-task import is complete and internally consistent", async () => {
   const root = path.resolve(import.meta.dirname, "..");
   const auditPath = path.join(
     root,
     "results",
     "debug",
-    "deepswe-v1.1-gpt56-sol-mini-swe-agent-first3-audit.json",
+    "deepswe-v1.1-gpt56-sol-mini-swe-agent-high-medium-full20-audit.json",
   );
   const audit = JSON.parse(await readFile(auditPath, "utf8"));
-  assert.equal(audit.taskCount, 3);
-  assert.equal(audit.runCount, 24);
+  assert.equal(audit.taskCount, 20);
+  assert.equal(audit.runCount, 160);
   assert.equal(audit.reportCount, 8);
-  assert.equal(audit.summaryOnlyRuns, 24);
+  assert.equal(audit.summaryOnlyRuns, 160);
   assert.equal(audit.detailedArtifactImported, 0);
 
   const trialNames = new Set();
@@ -63,9 +64,9 @@ test("committed first-three import is complete and internally consistent", async
         "utf8",
       ),
     );
-    assert.equal(manifest.taskCount, 3);
-    assert.equal(manifest.runCount, 3);
-    assert.equal(manifest.runs.length, 3);
+    assert.equal(manifest.taskCount, 20);
+    assert.equal(manifest.runCount, 20);
+    assert.equal(manifest.runs.length, 20);
     for (const run of manifest.runs) {
       assert.equal(trialNames.has(run.trialName), false);
       trialNames.add(run.trialName);
@@ -85,5 +86,5 @@ test("committed first-three import is complete and internally consistent", async
       assert.equal(agentMetadata.provider, "openai");
     }
   }
-  assert.equal(trialNames.size, 24);
+  assert.equal(trialNames.size, 160);
 });
