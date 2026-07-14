@@ -255,6 +255,12 @@ Agentic runs are stochastic. Replicates are independent observations, not backup
 
 Normalization may rename or structure fields, but it must not invent commands, tool results, token counts, assertions, or scores. Cumulative usage updates must be deduplicated before summation; otherwise repeated provider snapshots inflate cost and token totals.
 
+#### 7.3.1 Codex CLI instrumentation and publication boundary
+
+The Codex CLI runs in the published matrix used a locally modified build, identified in result metadata as `(local modified)`, rather than an unmodified official release binary. The modification exposed per-round command records and detailed metadata needed for the command, usage, timing, and provenance analyses in this repository. Published Codex result artifacts retain those normalized command and metadata fields but omit the input, output, and message payloads from normalized per-round contracts and their embedded copies. Complete run-level input and output archives remain retained.
+
+This instrumentation changes the official Codex CLI code path and may therefore produce results that differ from the corresponding official version. The current matrix does not isolate or estimate that effect. Reproductions using an official build, a locally modified build, or a crossed comparison of both are welcome, especially where they can test whether the version change causes a material and repeatable difference in outcomes or resource use.
+
 ### 7.4 Missing and malformed data
 
 Use explicit states rather than coercing all anomalies to zero:

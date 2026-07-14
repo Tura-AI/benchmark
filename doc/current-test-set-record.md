@@ -59,11 +59,11 @@ access, and is evaluated by the corresponding official verifier.
 
 The published configurations are:
 
-| Configuration | Model       | Reasoning effort | Sessions |
-| ------------- | ----------- | ---------------- | -------: |
-| Codex CLI     | GPT-5.6 SOL | Medium           |       60 |
-| Tura Balanced | GPT-5.6 SOL | High             |       60 |
-| Tura Direct   | GPT-5.6 SOL | High             |       60 |
+| Configuration | CLI build        | Model       | Reasoning effort | Sessions |
+| ------------- | ---------------- | ----------- | ---------------- | -------: |
+| Codex CLI     | (local modified) | GPT-5.6 SOL | Medium           |       60 |
+| Tura Balanced | published build  | GPT-5.6 SOL | High             |       60 |
+| Tura Direct   | published build  | GPT-5.6 SOL | High             |       60 |
 
 The matrix used the default service tier, bounded 90-minute agent runs, and
 isolated workspaces. Tura was routed through its normal runtime and Bash command
@@ -111,6 +111,24 @@ The benchmark keeps three evidence layers.
    DeepSWE and rewrite run retains task ID, agent ID, model, effort, replicate,
    source batch, token usage, rounds, elapsed time, patch or workspace metadata,
    and verifier or harness outcome.
+
+### 3.1 Codex CLI modification disclosure
+
+The Codex sessions were collected with a locally modified Codex CLI build so
+that each model round exposed its command records and detailed metadata. Result
+metadata therefore reports the Codex CLI build as `(local modified)`, not as the
+corresponding official release version. The public `results/` tree retains the
+normalized commands, token usage, timing, source identifiers, and reconstruction
+metadata, but omits input, output, and message payloads from Codex normalized
+per-round contracts and their embedded copies. Complete run-level input and
+output archives remain retained.
+
+Because this instrumentation modifies the official execution path, these data
+may differ from data produced by the corresponding official Codex CLI version.
+This report does not claim that the modification has zero effect. Independent
+reproductions are welcome, particularly crossed official-versus-modified runs
+that can show whether the version change causes a material, repeatable result
+difference.
 
 The collection and normalization boundaries are implemented in
 [`deep_swe/run_matrix.mjs`](../deep_swe/run_matrix.mjs),
