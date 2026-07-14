@@ -75,7 +75,9 @@ Create the default cost-free plan:
 npm run benchmark:deep-swe
 ```
 
-Launch the default live Tura Balanced run only after reviewing that plan:
+Launch the configured live Codex CLI matrix only after reviewing that plan. The
+current matrix is 20 tasks x 3 High-reasoning replicates, released as four
+sequential batches of 5 tasks x 3 replicates with 15 workers:
 
 ```sh
 npm run benchmark:deep-swe:run

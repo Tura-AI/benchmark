@@ -67,15 +67,23 @@ test("debug matrix defaults to a cost-free public CLI plan", () => {
     [
       path.join(root, "scripts", "run_debug_matrix.mjs"),
       "--agents",
-      "balanced",
+      "codex-cli",
     ],
     { cwd: root, encoding: "utf8", windowsHide: true },
   );
   assert.equal(result.status, 0, result.stderr);
   const plan = JSON.parse(result.stdout);
-  assert.equal(plan.jobs.length, 1);
-  assert.equal(plan.jobs[0].task, "deep-swe-v1.1");
-  assert.match(plan.jobs[0].runner, /deep-swe-v1\.1[\\/]runner\.mjs$/);
+  assert.equal(plan.task, "deep-swe-v1.1");
+  assert.equal(plan.expected_task_count, 20);
+  assert.equal(plan.task_batch_size, 5);
+  assert.equal(plan.concurrency, 15);
+  assert.equal(plan.planned_runs, 60);
+  assert.equal(plan.monitor_interval_ms, 60_000);
+  assert.deepEqual(plan.variants, [
+    { agent: "codex-cli", replicate: 1, reasoning: "high" },
+    { agent: "codex-cli", replicate: 2, reasoning: "high" },
+    { agent: "codex-cli", replicate: 3, reasoning: "high" },
+  ]);
 });
 
 test("package scripts keep planning and paid execution visibly separate", () => {
@@ -84,7 +92,21 @@ test("package scripts keep planning and paid execution visibly separate", () => 
   );
   assert.doesNotMatch(packageJson.scripts["benchmark:deep-swe"], /--run/);
   assert.match(packageJson.scripts["benchmark:deep-swe:run"], /--run/);
-  assert.match(packageJson.scripts["benchmark:deep-swe"], /--agents balanced/);
+  assert.match(packageJson.scripts["benchmark:deep-swe"], /--agents codex-cli/);
+});
+
+test("DeepSWE runner uses an exact 5-task x 3-replicate batch barrier", () => {
+  const runner = fs.readFileSync(
+    path.join(root, "deep_swe", "run_matrix.mjs"),
+    "utf8",
+  );
+  assert.match(runner, /taskBatchSize \* variants\.length/);
+  assert.match(runner, /await runAgentBatches\(\)/);
+  assert.match(runner, /await runQueue\(pending, concurrency, runAgentJob\)/);
+  assert.match(
+    runner,
+    /batchJobs\.length,[\s\S]*manifest\.runs_per_task_batch/,
+  );
 });
 
 test("DeepSWE Tura launch is guarded by the bash argument preflight", () => {

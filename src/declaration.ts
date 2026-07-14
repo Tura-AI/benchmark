@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   CLI_METADATA_SCHEMA,
   HARNESS_REPORT_SCHEMA,
+  HARNESS_REPORT_SCHEMA_V2,
   ROUND_SCHEMA,
   TASK_DECLARATION_SCHEMA,
   TASK_REPORT_SCHEMA,
@@ -68,7 +69,10 @@ export function validateTaskDeclaration(
     throw new Error(`invalid round contract for ${declaration.id}`);
   if (declaration.contract.taskReport !== TASK_REPORT_SCHEMA)
     throw new Error(`invalid task report contract for ${declaration.id}`);
-  if (declaration.contract.harnessReport !== HARNESS_REPORT_SCHEMA)
+  if (
+    declaration.contract.harnessReport !== HARNESS_REPORT_SCHEMA &&
+    declaration.contract.harnessReport !== HARNESS_REPORT_SCHEMA_V2
+  )
     throw new Error(`invalid harness report contract for ${declaration.id}`);
   if (!Array.isArray(declaration.variants) || declaration.variants.length === 0)
     throw new Error(`no variants declared for ${declaration.id}`);

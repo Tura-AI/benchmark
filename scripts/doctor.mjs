@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { npmInvocation } from "../lib/npm_runtime.mjs";
 import { projectPython } from "../lib/python_runtime.mjs";
+import { findCodexCliExe } from "../lib/generic_agent_cli.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -79,7 +80,10 @@ function checkAgent(config, id) {
     (item) => item.id === profileId || item.aliases?.includes(profileId),
   );
   if (!profile) return record(`Agent ${id}`, false, "unknown agent ID");
-  const command = process.env[profile.commandEnv] || profile.defaultCommand;
+  const command =
+    runtime?.id === "codex-cli"
+      ? findCodexCliExe(root)
+      : process.env[profile.commandEnv] || profile.defaultCommand;
   checkCommand(`Agent ${id}`, command, helpArgs(runtime?.kind || profile.id));
 }
 

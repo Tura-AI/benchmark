@@ -7,6 +7,7 @@ export const CLI_METADATA_SCHEMA = "tura.benchmark.cli-metadata.v1";
 export const ROUND_SCHEMA = "tura.benchmark.agent-round.v1";
 export const TASK_REPORT_SCHEMA = "tura.benchmark.task-report.v1";
 export const HARNESS_REPORT_SCHEMA = "tura.benchmark.harness-report.v1";
+export const HARNESS_REPORT_SCHEMA_V2 = "tura.benchmark.harness-report.v2";
 export const TASK_DECLARATION_SCHEMA = "tura.benchmark.task-declaration.v1";
 
 export type BenchmarkTaskType = "build" | "design" | "debug" | "rewrite";
@@ -208,7 +209,8 @@ export interface BenchmarkTaskDeclaration {
     cliMetadata: typeof CLI_METADATA_SCHEMA;
     round: typeof ROUND_SCHEMA;
     taskReport: typeof TASK_REPORT_SCHEMA;
-    harnessReport: typeof HARNESS_REPORT_SCHEMA;
+    harnessReport:
+      typeof HARNESS_REPORT_SCHEMA | typeof HARNESS_REPORT_SCHEMA_V2;
   };
   variants: BenchmarkTaskVariantDeclaration[];
   duplicatePolicy: "merged-variant" | "none";

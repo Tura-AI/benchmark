@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   ensureGenericAgentExecutables,
+  findCodexCliExe,
   genericAgentKind,
   genericAgentMode,
   priorityEnabled,
@@ -22,6 +23,7 @@ import {
   validHarnessReport,
 } from "./harness.mjs";
 import { captureChangedWorkspace } from "../lib/debug_workspace_recovery.mjs";
+import { costEstimateForUsage } from "../lib/business_paths.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -54,6 +56,10 @@ const concurrency = positiveInteger(
   process.env.DEEP_SWE_CONCURRENCY || deepSweConfig.concurrency || 1,
   "DeepSWE concurrency",
 );
+const taskBatchSize = positiveInteger(
+  process.env.DEEP_SWE_TASK_BATCH_SIZE || deepSweConfig.taskBatchSize || 1,
+  "DeepSWE task batch size",
+);
 const monitorMs = positiveInteger(
   process.env.DEEP_SWE_MONITOR_MS || deepSweConfig.monitorMs || 120_000,
   "DeepSWE monitor interval",
@@ -69,8 +75,12 @@ const turaExe =
 const turaRouterExe =
   process.env.TURA_ROUTER_BIN ||
   path.join(repoRoot, "target", "debug", executableName("tura_router"));
-const codexExe =
-  process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE || findCommand("codex");
+const codexExe = findCodexCliExe(repoRoot);
+const expectedCodexCliVersion = String(
+  process.env.DEEP_SWE_CODEX_CLI_VERSION ||
+    deepSweConfig.codexCliVersion ||
+    "0.144.1",
+);
 const variants = parseVariants(
   process.env.DEEP_SWE_VARIANTS,
   deepSweConfig.variants,
@@ -95,13 +105,40 @@ if (expectedTaskCount > 0)
     expectedTaskCount,
     `selection must contain ${expectedTaskCount} tasks: ${selectionPath}`,
   );
+assert.equal(
+  selection.tasks.length % taskBatchSize,
+  0,
+  "DeepSWE task count must divide evenly into task batches",
+);
+assert.equal(
+  concurrency,
+  taskBatchSize * variants.length,
+  "DeepSWE concurrency must equal taskBatchSize x configured variants",
+);
 const selectedAgentKinds = new Set(
   variants.map((variant) => genericAgentKind(variant.agent)),
 );
 if (selectedAgentKinds.has("tura"))
   assert(fs.existsSync(turaExe), `missing Tura executable: ${turaExe}`);
-if (variants.some((variant) => variant.agent === "codex-cli"))
+let codexCliVersion = null;
+if (variants.some((variant) => variant.agent === "codex-cli")) {
   assert(codexExe, "missing codex-cli executable");
+  const versionResult = spawnSync(codexExe, ["--version"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (versionResult.error) throw versionResult.error;
+  assert.equal(versionResult.status, 0, "failed to read codex-cli version");
+  codexCliVersion = String(versionResult.stdout || versionResult.stderr || "")
+    .trim()
+    .replace(/^codex-cli\s+/i, "");
+  assert.equal(
+    codexCliVersion,
+    expectedCodexCliVersion,
+    "DeepSWE Codex CLI version mismatch",
+  );
+}
 
 delete process.env.COMMAND_RUN_AGENT_TURA_EMBEDDED;
 delete process.env.COMMAND_RUN_AGENT_TURA_SANDBOX;
@@ -122,6 +159,7 @@ const jobs = selection.tasks.flatMap((task, taskIndex) =>
   variants.map((variant) => ({
     key: `${task.task_id}__${variant.agent}__r${variant.replicate}`,
     taskIndex,
+    batch_index: Math.floor(taskIndex / taskBatchSize) + 1,
     task,
     ...variant,
     state: "pending",
@@ -132,6 +170,10 @@ const jobs = selection.tasks.flatMap((task, taskIndex) =>
     error: null,
     round_count: 0,
     tool_call_count: 0,
+    input_tokens: 0,
+    cached_input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
     total_tokens: 0,
     patch_bytes: 0,
     scheme_ok: null,
@@ -199,10 +241,16 @@ const manifest = {
   planned_agent_runs: jobs.length,
   planned_harness_runs: jobs.length,
   concurrency,
+  task_batch_size: taskBatchSize,
+  task_batch_count: selection.tasks.length / taskBatchSize,
+  runs_per_task_batch: taskBatchSize * variants.length,
+  task_batches_are_sequential: true,
   model: "gpt-5.6-sol",
+  codex_cli_executable: codexExe,
+  codex_cli_version: codexCliVersion,
   tura_model: "openai/gpt-5.6-sol",
-  tura_reasoning: "high",
-  codex_reasoning: "medium",
+  tura_reasoning: uniqueReasoning("tura"),
+  codex_reasoning: uniqueReasoning("codex"),
   service_tier: "default",
   priority_enabled: false,
   tura_embedded: false,
@@ -232,40 +280,17 @@ async function main() {
     await runCompletedOnlyHarness();
     return;
   }
-  const probeJobs = configuredProbeJobs();
-  manifest.phase = "scheme-probes";
-  writeState("scheme-probes");
-  await Promise.all(
-    probeJobs.map((job) =>
-      job.state === "completed" ? Promise.resolve(job) : runAgentJob(job),
-    ),
-  );
-  const failedProbes = probeJobs.filter(
-    (job) =>
-      job.state !== "completed" ||
-      job.scheme_ok !== true ||
-      job.docker_routing_ok !== true,
-  );
-  if (failedProbes.length > 0) {
-    manifest.phase = "scheme-gate-failed";
-    manifest.stop_reason = `scheme probes failed: ${failedProbes.map((job) => job.key).join(", ")}`;
-    writeState(manifest.stop_reason);
-    process.exitCode = 1;
-    return;
-  }
-
   manifest.phase = "agent-runs";
   writeState(
-    `all ${probeJobs.length} scheme probes passed; releasing remaining matrix`,
+    `starting ${manifest.task_batch_count} sequential task batches; each batch has ${taskBatchSize} tasks x ${variants.length} replicates = ${manifest.runs_per_task_batch} concurrent runs`,
   );
   monitorTimer = setInterval(() => {
-    recordMonitor("scheduled two-minute monitor");
+    recordMonitor(`scheduled ${Math.round(monitorMs / 1000)}-second monitor`);
     console.log(formatMonitorLine());
   }, monitorMs);
   monitorTimer.unref?.();
 
-  const remaining = jobs.filter((job) => job.state !== "completed");
-  await runQueue(remaining, concurrency, runAgentJob);
+  await runAgentBatches();
   if (stopped || jobs.some((job) => job.state !== "completed")) {
     manifest.phase = "agent-runs-stopped";
     writeState(manifest.stop_reason || "agent matrix did not complete");
@@ -325,7 +350,7 @@ async function runCompletedOnlyHarness() {
     `starting official verifier for ${harnessJobs.length} completed outputs; one task image at a time`,
   );
   monitorTimer = setInterval(() => {
-    recordMonitor("scheduled two-minute monitor");
+    recordMonitor(`scheduled ${Math.round(monitorMs / 1000)}-second monitor`);
     console.log(formatMonitorLine());
   }, monitorMs);
   monitorTimer.unref?.();
@@ -344,6 +369,49 @@ async function runCompletedOnlyHarness() {
     `${harnessJobs.length} completed agent outputs passed through harness`,
   );
   if (monitorTimer) clearInterval(monitorTimer);
+}
+
+async function runAgentBatches() {
+  for (
+    let batchIndex = 1;
+    batchIndex <= manifest.task_batch_count;
+    batchIndex += 1
+  ) {
+    const batchJobs = jobs.filter((job) => job.batch_index === batchIndex);
+    assert.equal(
+      batchJobs.length,
+      manifest.runs_per_task_batch,
+      `agent batch ${batchIndex} must contain exactly ${manifest.runs_per_task_batch} runs`,
+    );
+    const pending = batchJobs.filter((job) => job.state !== "completed");
+    if (pending.length === 0) {
+      writeState(
+        `agent batch ${batchIndex}/${manifest.task_batch_count} already complete`,
+      );
+      continue;
+    }
+    manifest.current_batch = batchIndex;
+    writeState(
+      `agent batch ${batchIndex}/${manifest.task_batch_count}: ${taskBatchSize} tasks x ${variants.length} replicates; pending=${pending.length}; worker-capacity=${concurrency}`,
+    );
+    await runQueue(pending, concurrency, runAgentJob);
+    const invalid = batchJobs.filter(
+      (job) =>
+        job.state !== "completed" ||
+        job.scheme_ok !== true ||
+        job.docker_routing_ok !== true,
+    );
+    if (stopped || invalid.length > 0) {
+      manifest.stop_reason =
+        manifest.stop_reason ||
+        `agent batch ${batchIndex} contract gate failed: ${invalid.map((job) => job.key).join(", ")}`;
+      return;
+    }
+    writeState(
+      `agent batch ${batchIndex}/${manifest.task_batch_count} complete and contract-valid`,
+    );
+  }
+  manifest.current_batch = null;
 }
 
 async function runHarnessBatches(harnessJobs = jobs, allowPartial = false) {
@@ -409,6 +477,10 @@ async function runAgentJob(job) {
     job.error = null;
     job.round_count = 0;
     job.tool_call_count = 0;
+    job.input_tokens = 0;
+    job.cached_input_tokens = 0;
+    job.output_tokens = 0;
+    job.reasoning_tokens = 0;
     job.total_tokens = 0;
     job.patch_bytes = 0;
     job.scheme_ok = null;
@@ -677,7 +749,7 @@ async function runAgentJob(job) {
     job.exit_code = result.status;
     job.round_count = result.rounds.length;
     job.tool_call_count = result.round_contract_validation.tool_call_count;
-    job.total_tokens = Number(result.usage_info?.usage?.total_tokens || 0);
+    assignUsage(job, result.usage_info?.usage);
     job.patch_bytes = summary.patch.patch_bytes;
     job.scheme_ok = scheme.round_contract_ok;
     job.docker_routing_ok = scheme.docker_routing_ok;
@@ -1097,6 +1169,11 @@ function diskFreeGb() {
 }
 
 function recordMonitor(note) {
+  const usage = aggregateJobUsage();
+  const cost = costEstimateForUsage(usage, {
+    model: "gpt-5.6-sol",
+    serviceTier: "default",
+  });
   const entry = {
     at: new Date().toISOString(),
     phase: manifest.phase,
@@ -1108,6 +1185,20 @@ function recordMonitor(note) {
     harness_completed: jobs.filter((job) => job.harness_state === "completed")
       .length,
     harness_failed: jobs.filter((job) => job.harness_state === "failed").length,
+    llm_turns: jobs.reduce(
+      (total, job) => total + Number(job.round_count || 0),
+      0,
+    ),
+    tool_calls: jobs.reduce(
+      (total, job) => total + Number(job.tool_call_count || 0),
+      0,
+    ),
+    input_tokens: usage.input_tokens,
+    cached_input_tokens: usage.cached_input_tokens,
+    output_tokens: usage.output_tokens,
+    reasoning_tokens: usage.reasoning_tokens,
+    total_tokens: usage.total_tokens,
+    estimated_cost_usd: cost.costUsd,
     free_gb: diskFreeGb(),
     note,
   };
@@ -1124,7 +1215,8 @@ function writeState(note) {
 }
 
 function formatMonitorLine() {
-  return `phase=${manifest.phase} active=${jobs.filter((job) => job.state === "running" || job.harness_state === "running").length}/6 agent=${jobs.filter((job) => job.state === "completed").length}/${jobs.length} harness=${jobs.filter((job) => job.harness_state === "completed").length}/${jobs.length} free=${diskFreeGb().toFixed(2)}GB`;
+  const latest = manifest.monitor_log.at(-1) || {};
+  return `phase=${manifest.phase} batch=${manifest.current_batch || "-"}/${manifest.task_batch_count} active=${jobs.filter((job) => job.state === "running" || job.harness_state === "running").length}/${concurrency} agent=${jobs.filter((job) => job.state === "completed").length}/${jobs.length} harness=${jobs.filter((job) => job.harness_state === "completed").length}/${jobs.length} turns=${latest.llm_turns || 0} input=${latest.input_tokens || 0} output=${latest.output_tokens || 0} tokens=${latest.total_tokens || 0} cost=$${Number(latest.estimated_cost_usd || 0).toFixed(6)} free=${diskFreeGb().toFixed(2)}GB`;
 }
 
 function writeManifest() {
@@ -1140,6 +1232,7 @@ function writeProgress() {
     "- Benchmark: DeepSWE v1.1",
     `- Planned runs: ${jobs.length} (\`${selection.tasks.length} tasks x ${variants.length} configured variants\`)`,
     `- Concurrency: ${concurrency} worker slots`,
+    `- Agent batches: ${manifest.task_batch_count} sequential batches of ${taskBatchSize} tasks x ${variants.length} replicates`,
     `- Variants: ${variants.map((variant) => `${variant.agent}#${variant.replicate}:${variant.reasoning}`).join(", ")}`,
     `- Harness: deferred until all ${jobs.length} agent runs finish; official images are retained and reused`,
     "- Disk: monitored only; stop without cleanup at the configured safety floor",
@@ -1152,7 +1245,11 @@ function writeProgress() {
     `- Failed agent runs: ${jobs.filter((job) => job.state === "failed").length}`,
     `- Completed harness runs: ${jobs.filter((job) => job.harness_state === "completed").length} / ${jobs.length}`,
     `- Failed harness runs: ${jobs.filter((job) => job.harness_state === "failed").length}`,
-    `- Scheme probes passed: ${configuredProbeJobs().filter((job) => job.scheme_ok === true && job.docker_routing_ok === true).length} / ${configuredProbeJobs().length}`,
+    `- Contract-valid agent runs: ${jobs.filter((job) => job.scheme_ok === true && job.docker_routing_ok === true).length} / ${jobs.length}`,
+    `- LLM turns: ${latest?.llm_turns ?? 0}`,
+    `- Input / cached input / output / reasoning tokens: ${latest?.input_tokens ?? 0} / ${latest?.cached_input_tokens ?? 0} / ${latest?.output_tokens ?? 0} / ${latest?.reasoning_tokens ?? 0}`,
+    `- Total tokens: ${latest?.total_tokens ?? 0}`,
+    `- Estimated token cost: $${Number(latest?.estimated_cost_usd || 0).toFixed(6)}`,
     `- C: free space: ${(latest?.free_gb ?? diskFreeGb()).toFixed(2)} GB`,
     `- Stop reason: ${manifest.stop_reason || "none"}`,
     "",
@@ -1187,17 +1284,6 @@ function writeProgress() {
     "",
   ];
   fs.writeFileSync(progressPath, lines.join("\n"), "utf8");
-}
-
-function jobFor(taskId, agent, replicate) {
-  const job = jobs.find(
-    (item) =>
-      item.task.task_id === taskId &&
-      item.agent === agent &&
-      item.replicate === replicate,
-  );
-  assert(job, `missing job ${taskId}/${agent}/${replicate}`);
-  return job;
 }
 
 function agentDirectory(job) {
@@ -1256,6 +1342,10 @@ function recoverManifestFromArtifacts() {
         roundContract?.tool_call_count || scheme?.tool_call_count || 0,
       ),
       total_tokens: Number(summary.usage?.total_tokens || 0),
+      input_tokens: Number(summary.usage?.input_tokens || 0),
+      cached_input_tokens: Number(summary.usage?.cached_input_tokens || 0),
+      output_tokens: Number(summary.usage?.output_tokens || 0),
+      reasoning_tokens: Number(summary.usage?.reasoning_tokens || 0),
       patch_bytes: Number(summary.patch?.patch_bytes || 0),
       scheme_ok: scheme?.round_contract_ok === true,
       docker_routing_ok: scheme?.docker_routing_ok === true,
@@ -1369,6 +1459,36 @@ function emptyUsage() {
   };
 }
 
+function assignUsage(job, usage = {}) {
+  job.input_tokens = Number(usage?.input_tokens || 0);
+  job.cached_input_tokens = Number(usage?.cached_input_tokens || 0);
+  job.output_tokens = Number(usage?.output_tokens || 0);
+  job.reasoning_tokens = Number(usage?.reasoning_tokens || 0);
+  job.total_tokens = Number(
+    usage?.total_tokens || job.input_tokens + job.output_tokens,
+  );
+}
+
+function aggregateJobUsage() {
+  return jobs.reduce(
+    (total, job) => {
+      total.input_tokens += Number(job.input_tokens || 0);
+      total.cached_input_tokens += Number(job.cached_input_tokens || 0);
+      total.output_tokens += Number(job.output_tokens || 0);
+      total.reasoning_tokens += Number(job.reasoning_tokens || 0);
+      total.total_tokens += Number(job.total_tokens || 0);
+      return total;
+    },
+    {
+      input_tokens: 0,
+      cached_input_tokens: 0,
+      output_tokens: 0,
+      reasoning_tokens: 0,
+      total_tokens: 0,
+    },
+  );
+}
+
 function requiredEnv(name) {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
@@ -1421,11 +1541,15 @@ function parseVariants(value, configured) {
   return variants;
 }
 
-function configuredProbeJobs() {
-  const firstTaskId = selection.tasks[0].task_id;
-  return [...new Set(variants.map((variant) => variant.agent))]
-    .map((agent) => variants.find((variant) => variant.agent === agent))
-    .map((variant) => jobFor(firstTaskId, variant.agent, variant.replicate));
+function uniqueReasoning(kind) {
+  const values = [
+    ...new Set(
+      variants
+        .filter((variant) => genericAgentKind(variant.agent) === kind)
+        .map((variant) => variant.reasoning),
+    ),
+  ];
+  return values.length === 0 ? null : values.length === 1 ? values[0] : values;
 }
 
 function truthy(value) {

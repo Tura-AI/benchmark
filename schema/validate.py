@@ -109,8 +109,10 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
         "DeepSWE official subset manifests": ("deepswe-official-subset.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-mini-swe-agent-*-r*/manifest.json"),
         "DeepSWE official subset audits": ("deepswe-official-subset-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-mini-swe-agent-*-audit.json"),
         "DeepSWE local batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-local-r*/manifest.json"),
+        "DeepSWE Codex High batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-codex-cli-high-r*/manifest.json"),
         "DeepSWE import audits": ("deepswe-import-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-import-audit.json"),
         "DeepSWE local audits": ("deepswe-local-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-local-audit.json"),
+        "DeepSWE Codex High audits": ("deepswe-codex-high-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-codex-cli-high-audit.json"),
     }
     for label, (schema_name, pattern) in deepswe_patterns.items():
         paths = sorted(root.glob(pattern))
