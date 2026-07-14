@@ -30,8 +30,12 @@ import {
   killProcessTree,
 } from "../../../lib/process_helpers.mjs";
 import {
+  eventsForAgent as genericEventsForAgent,
+  eventsWithUsageRounds,
   findCodexCliExe,
   parseGenericAgents,
+  refreshContextAndCallArchiveWithRetry as refreshGenericContextArchiveWithRetry,
+  usageForAgent as genericUsageForAgent,
 } from "../../../lib/generic_agent_cli.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -3358,8 +3362,33 @@ async function runAgent(
     task,
     prep.reference_binary,
   );
-  const usageInfo = usageForAgent(agentDir, result.stdout);
-  const contextArchive = refreshContextAndCallArchive(agentDir, result.stdout);
+  const localContextArchive = refreshContextAndCallArchive(
+    agentDir,
+    result.stdout,
+  );
+  const genericContextArchive =
+    agentId === "codex-cli"
+      ? await refreshGenericContextArchiveWithRetry(
+          agentDir,
+          prompt,
+          result.stdout,
+          { codexHome: codexHomeForAgent(agentDir, agentId) },
+        )
+      : null;
+  const contextArchive = genericContextArchive
+    ? { ...localContextArchive, ...genericContextArchive }
+    : localContextArchive;
+  const usageInfo =
+    agentId === "codex-cli"
+      ? genericUsageForAgent(agentDir, result.stdout, agentId)
+      : usageForAgent(agentDir, result.stdout);
+  const genericEvents =
+    agentId === "codex-cli"
+      ? eventsWithUsageRounds(
+          genericEventsForAgent(result.stdout, agentId),
+          usageInfo.usage,
+        )
+      : null;
   const stats = {
     agent: agentId,
     task: task.label,
@@ -3387,9 +3416,10 @@ async function runAgent(
     provider_calls: usageInfo.provider_calls,
     context_archive: contextArchive,
     events:
-      agentId === "claude-code" || agentId === "pi-agent"
+      genericEvents ||
+      (agentId === "claude-code" || agentId === "pi-agent"
         ? agentEventStats(result.stdout)
-        : eventStats(result.stdout),
+        : eventStats(result.stdout)),
     patch,
     eval: evalResult,
   };
@@ -3474,6 +3504,22 @@ function buildSuiteSummary(results, assets, inProgress = false) {
       results,
     },
     runPaths,
+  );
+}
+
+function assertAllLlmTurnsPublished(summary, results) {
+  const taskReportPath = summary.benchmark_contracts?.task_report_path;
+  assert(taskReportPath && fs.existsSync(taskReportPath));
+  const taskReport = JSON.parse(fs.readFileSync(taskReportPath, "utf8"));
+  const expected = results.reduce(
+    (total, result) => total + Number(result?.events?.llm_rounds || 0),
+    0,
+  );
+  assert(expected > 0, "no observed LLM turns were recorded");
+  assert.equal(
+    taskReport.rounds.length,
+    expected,
+    `published ${taskReport.rounds.length} rounds for ${expected} observed LLM turns`,
   );
 }
 
@@ -3578,6 +3624,7 @@ async function main() {
       }
     }
     const summary = buildSuiteSummary(results, assets, false);
+    assertAllLlmTurnsPublished(summary, results);
     writeFile(
       summaryPath,
       JSON.stringify({ ...summary, evaluate_only: true }, null, 2),
@@ -3616,6 +3663,7 @@ async function main() {
   }
   const results = await Promise.all(jobs);
   const summary = buildSuiteSummary(results, assets, false);
+  assertAllLlmTurnsPublished(summary, results);
   finalSummaryWritten = true;
   writeFile(summaryPath, JSON.stringify(summary, null, 2));
   console.log(JSON.stringify(summary, null, 2));

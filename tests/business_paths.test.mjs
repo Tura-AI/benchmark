@@ -8,8 +8,36 @@ import test from "node:test";
 import {
   benchmarkRawRoot,
   businessRunPaths,
+  costEstimateForUsage,
   normalizeBusinessSummary,
 } from "../lib/business_paths.mjs";
+
+test("GPT-5.6 Sol pricing charges cached input once at the official rate", () => {
+  const estimate = costEstimateForUsage(
+    {
+      inputTokens: 1_100_000,
+      cacheInputTokens: 1_000_000,
+      outputTokens: 100_000,
+      reasoningTokens: 25_000,
+      totalTokens: 1_200_000,
+    },
+    { model: "gpt-5.6-sol", serviceTier: "default" },
+  );
+  assert.equal(estimate.costUsd, 4);
+  assert.deepEqual(estimate.ratesPer1M, {
+    input: 5,
+    cachedInput: 0.5,
+    cacheWrite: 6.25,
+    output: 30,
+  });
+  assert.deepEqual(estimate.billableTokens, {
+    input: 100_000,
+    cachedInput: 1_000_000,
+    output: 100_000,
+    reasoning: 25_000,
+    total: 1_200_000,
+  });
+});
 
 test("source-port benchmark prohibits Tura embedded mode", () => {
   const runner = fs.readFileSync(
@@ -299,7 +327,8 @@ test("legacy benchmark summary bridge writes unified per-round contracts", () =>
       ["tura", "tura", "balanced", "openai/gpt-5.5", false],
     ],
   );
-  assert.equal(taskReport.usage.totalTokens, 105);
+  // Cached and reasoning tokens are subsets, so canonical total is input + output.
+  assert.equal(taskReport.usage.totalTokens, 90);
   assert.deepEqual(
     taskReport.rounds
       .at(-1)
@@ -693,7 +722,7 @@ test("source-port result bridge aggregates lifecycle events into per-agent round
     [["command", "python second.py"]],
   );
   assert.deepEqual(
-    harnessReport.scores.map((score) => [
+    harnessReport.legacy.scores.map((score) => [
       score.details.agent,
       score.details.passed,
       score.details.failed,
@@ -705,7 +734,13 @@ test("source-port result bridge aggregates lifecycle events into per-agent round
       ["codex-cli", 1, 0, true],
     ],
   );
-  assert.equal(harnessReport.finalScore, (12 / 15 + 1 + 1) / 3);
+  assert.deepEqual(harnessReport.score, {
+    passed: 28,
+    failed: 3,
+    total: 31,
+    ratio: 28 / 31,
+    label: "28/31",
+  });
 });
 
 test("result bridge expands provider calls and codex token updates into contract rounds", () => {

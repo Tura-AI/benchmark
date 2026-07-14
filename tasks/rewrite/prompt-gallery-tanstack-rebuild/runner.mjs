@@ -23,8 +23,13 @@ import {
   writeCodexTokenUsageArtifacts,
 } from "../../../lib/codex_token_usage.mjs";
 import {
+  eventsForAgent as genericEventsForAgent,
+  eventsWithUsageRounds,
+  findCodexCliExe,
   genericAgentKind,
   parseGenericAgents,
+  refreshContextAndCallArchiveWithRetry as refreshGenericContextArchiveWithRetry,
+  usageForAgent as genericUsageForAgent,
 } from "../../../lib/generic_agent_cli.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -111,6 +116,7 @@ const codexMainExe = path.join(
   "debug",
   process.platform === "win32" ? "codex.exe" : "codex",
 );
+const codexCliExe = findCodexCliExe(repoRoot);
 
 function resolveSourceHtml() {
   const candidates = [
@@ -730,7 +736,26 @@ function codexHomeForAgent(agentDir) {
 
 async function runCodex(agent, workspace, agentDir, onProgress = null) {
   const exe =
-    agent === "codex-main" || agent === "codex-cli" ? codexMainExe : codexExe;
+    agent === "codex-cli"
+      ? codexCliExe
+      : agent === "codex-main"
+        ? codexMainExe
+        : codexExe;
+  if (agent === "codex-cli" && process.env.COMMAND_RUN_AGENT_CODEX_VERSION) {
+    const version = spawnSync(exe, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(version.status, 0, "failed to query codex-cli version");
+    const actualVersion = String(version.stdout || version.stderr || "")
+      .trim()
+      .replace(/^codex-cli\s+/, "");
+    assert.equal(
+      actualVersion,
+      process.env.COMMAND_RUN_AGENT_CODEX_VERSION,
+      `unexpected codex-cli version from ${exe}`,
+    );
+  }
   const codexHome = codexHomeForAgent(agentDir);
   const args = [
     "exec",
@@ -2116,13 +2141,25 @@ function statsFromLiveResult(
   const stdout = result?.stdout || "";
   const events = parseJsonl(stdout);
   const isExternal = agent === "claude-code" || agent === "pi-agent";
-  const usageInfo = isExternal
-    ? {
-        usage: agentUsageFromJsonl(stdout),
-        usage_source: `${agent}-jsonl`,
-        provider_calls: [],
-      }
-    : usageForAgent(agentDir, stdout);
+  const usageInfo =
+    agent === "codex-cli"
+      ? genericUsageForAgent(agentDir, stdout, agent)
+      : isExternal
+        ? {
+            usage: agentUsageFromJsonl(stdout),
+            usage_source: `${agent}-jsonl`,
+            provider_calls: [],
+          }
+        : usageForAgent(agentDir, stdout);
+  const eventInfo =
+    agent === "codex-cli"
+      ? eventsWithUsageRounds(
+          genericEventsForAgent(stdout, agent),
+          usageInfo.usage,
+        )
+      : isExternal
+        ? agentEventStats(stdout)
+        : countEvents(events);
   return {
     id: agent,
     agent,
@@ -2141,8 +2178,52 @@ function statsFromLiveResult(
     provider_calls: usageInfo.provider_calls,
     provider_calls_path: contextArchive?.provider_calls_full_path || null,
     context_archive: contextArchive,
-    events: isExternal ? agentEventStats(stdout) : countEvents(events),
+    events: eventInfo,
+    patch: {
+      capture: "pending-generated-workspace-snapshot",
+      patch_path: null,
+      patch_bytes: 0,
+      changed_files: 0,
+    },
     validation,
+  };
+}
+
+function generatedWorkspacePatchSummary(workspace) {
+  const excludedDirectories = new Set([
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".output",
+    ".vinxi",
+    "coverage",
+  ]);
+  const seedFiles = new Set(["makeup.html", "README-task.md"]);
+  const stack = [workspace];
+  let changedFiles = 0;
+  let patchBytes = 0;
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (entry.isDirectory() && excludedDirectories.has(entry.name)) continue;
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const relative = path.relative(workspace, full);
+      if (seedFiles.has(relative)) continue;
+      changedFiles += 1;
+      patchBytes += fs.statSync(full).size;
+    }
+  }
+  return {
+    capture: "generated-workspace-snapshot",
+    patch_path: null,
+    patch_bytes: patchBytes,
+    changed_files: changedFiles,
   };
 }
 
@@ -2202,6 +2283,22 @@ function buildRunSummary(results, extra = {}) {
       ...extra,
     },
     runPaths,
+  );
+}
+
+function assertAllLlmTurnsPublished(summary, results) {
+  const taskReportPath = summary.benchmark_contracts?.task_report_path;
+  assert(taskReportPath && fs.existsSync(taskReportPath));
+  const taskReport = JSON.parse(fs.readFileSync(taskReportPath, "utf8"));
+  const expected = results.reduce(
+    (total, result) => total + Number(result?.events?.llm_rounds || 0),
+    0,
+  );
+  assert(expected > 0, "no observed LLM turns were recorded");
+  assert.equal(
+    taskReport.rounds.length,
+    expected,
+    `published ${taskReport.rounds.length} rounds for ${expected} observed LLM turns`,
   );
 }
 
@@ -2333,10 +2430,22 @@ async function runAgent(agent, index, onAgentUpdate = null) {
   const validation = skipEval
     ? null
     : await evaluateProject(agent, workspace, agentDir, index);
-  lastContextArchive = refreshContextAndCallArchive(
+  const localContextArchive = refreshContextAndCallArchive(
     agentDir,
     result.stdout || "",
   );
+  const genericContextArchive =
+    agent === "codex-cli"
+      ? await refreshGenericContextArchiveWithRetry(
+          agentDir,
+          conversionPrompt(),
+          result.stdout || "",
+          { codexHome: codexHomeForAgent(agentDir) },
+        )
+      : null;
+  lastContextArchive = genericContextArchive
+    ? { ...localContextArchive, ...genericContextArchive }
+    : localContextArchive;
   const stats = statsFromLiveResult(
     agent,
     workspace,
@@ -2346,6 +2455,7 @@ async function runAgent(agent, index, onAgentUpdate = null) {
     validation,
     lastContextArchive,
   );
+  stats.patch = generatedWorkspacePatchSummary(workspace);
   stats.in_progress = false;
   writeFile(
     path.join(agentDir, "agent-summary.json"),
@@ -2419,6 +2529,7 @@ async function main() {
           total: 0,
         },
         events: prior.events || { turns: 0, commands: 0, failures: 0 },
+        patch: generatedWorkspacePatchSummary(workspace),
         validation,
       };
       writeFile(summaryFile, JSON.stringify(stats, null, 2));
@@ -2440,6 +2551,7 @@ async function main() {
       },
       runPaths,
     );
+    assertAllLlmTurnsPublished(summary, results);
     writeFile(summaryPath, JSON.stringify(summary, null, 2));
     console.log(JSON.stringify(summary, null, 2));
     if (!summary.ok && !allowFailure) process.exitCode = 1;
@@ -2453,10 +2565,7 @@ async function main() {
       `missing codex-main exe ${codexMainExe}`,
     );
   if (agents.includes("codex-cli"))
-    assert(
-      fs.existsSync(codexMainExe),
-      `missing codex-cli exe ${codexMainExe}`,
-    );
+    assert(fs.existsSync(codexCliExe), `missing codex-cli exe ${codexCliExe}`);
   if (agents.some((agent) => genericAgentKind(agent) === "tura")) {
     if (!skipTuraBuild || !fs.existsSync(turaExe)) {
       runOk("cargo", ["build", "-p", "gateway", "--bin", "tura_exec"], {
@@ -2488,6 +2597,7 @@ async function main() {
   );
   finalSummaryWritten = true;
   const summary = buildRunSummary(results, { in_progress: false });
+  assertAllLlmTurnsPublished(summary, results);
   writeFile(summaryPath, JSON.stringify(summary, null, 2));
   console.log(JSON.stringify(summary, null, 2));
   if (!summary.ok && !allowFailure) process.exitCode = 1;

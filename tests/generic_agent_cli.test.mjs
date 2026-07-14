@@ -612,6 +612,27 @@ test("codex rollout archive usage is counted per unique token_count", () => {
     total_tokens: 26,
     latency_ms: 0,
   });
+
+  const rounds = buildGenericAgentRoundContracts(
+    {
+      agent: "codex-cli",
+      task: "rollout-fixture",
+      stdout: "",
+      context_archive: { codex_rollout_paths: [rolloutPath] },
+    },
+    {
+      agentId: "codex-cli",
+      agentDir,
+      model: "gpt-5.6-sol",
+      reasoning: "high",
+      serviceTier: "default",
+    },
+  );
+  assert.equal(rounds.length, 2);
+  assert.deepEqual(
+    rounds.map((round) => round.usage.totalTokens),
+    [12, 14],
+  );
 });
 
 test("event round count is reconciled with provider usage events", () => {
