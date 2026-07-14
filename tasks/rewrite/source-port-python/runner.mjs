@@ -29,7 +29,10 @@ import {
   isolatedProcessOptions,
   killProcessTree,
 } from "../../../lib/process_helpers.mjs";
-import { parseGenericAgents } from "../../../lib/generic_agent_cli.mjs";
+import {
+  findCodexCliExe,
+  parseGenericAgents,
+} from "../../../lib/generic_agent_cli.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..", "..", "..", "..");
@@ -110,6 +113,7 @@ const turaExe =
     "debug",
     process.platform === "win32" ? "tura_exec.exe" : "tura_exec",
   );
+const codexCliExe = findCodexCliExe(repoRoot);
 const codexMainExe = findCodexMainExe();
 const codexDocumentsExe = findCodexDocumentsExe();
 const claudeExe = findClaudeExe();
@@ -2446,6 +2450,21 @@ async function runCodexLike(
   label,
 ) {
   assert(fs.existsSync(codexExe), `missing ${label} exe: ${codexExe}`);
+  if (label === "codex-cli" && process.env.COMMAND_RUN_AGENT_CODEX_VERSION) {
+    const version = spawnSync(codexExe, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(version.status, 0, `failed to query ${label} version`);
+    const actualVersion = String(version.stdout || version.stderr || "")
+      .trim()
+      .replace(/^codex-cli\s+/, "");
+    assert.equal(
+      actualVersion,
+      process.env.COMMAND_RUN_AGENT_CODEX_VERSION,
+      `unexpected ${label} version from ${codexExe}`,
+    );
+  }
   const codexLogDir = path.join(agentDir, "codex-log");
   const codexHome = codexHomeForAgent(agentDir, label);
   const command = codexExe;
@@ -2518,7 +2537,7 @@ async function runCodexCli(workspace, agentDir, prompt, onProgress) {
     agentDir,
     prompt,
     onProgress,
-    codexMainExe,
+    codexCliExe,
     "codex-cli",
   );
 }

@@ -414,37 +414,70 @@ not randomized treatment effects.
 
 ### 12.1 Round count is process length, not an efficiency score
 
-Codex averaged 46.9 rounds and Direct averaged 14.6, yet their weighted harness
-success rates were nearly the same: 73.0% and 72.5%. Balanced averaged 27.1
-rounds and reached 79.0%. A round count alone therefore does not order systems
-by efficiency. It measures process length; an efficiency comparison also needs
-an outcome and at least one resource measure.
+The run-level data show a positive fitted association between round count and
+success in all three groups. The weighted binomial model is
 
-<img src="../assets/model-run-statistics/claim-charts/04-round-count-is-not-efficiency.png" alt="Round count is not an efficiency score" width="800">
+$$
+\operatorname{logit}\!\left(P(\mathrm{success}\mid n)\right)
+= \alpha + \beta\log(1+n),
+$$
 
-No arbitrary scalar efficiency score is imposed here. A system may use fewer
-rounds because it batches work effectively, because it stops early, or because
-it fails before completing the necessary work. The observed coordinates are
-reported instead of collapsing those cases into one number.
+where $n$ is the run's round count and each run contributes its passed and total
+harness-check counts. The logarithmic predictor produces a saturating
+probability curve: fitted gains decline as $n$ increases.
+
+| Agent group   | Fitted $\beta$ | Round-count IQR | Fitted success at IQR endpoints | IQR fitted gain |
+| ------------- | -------------: | --------------: | ------------------------------: | --------------: |
+| Tura Balanced |          0.959 |           19–32 |                     76.4%→84.0% |         +7.6 pp |
+| Tura Direct   |          1.644 |      9.25–17.75 |                     69.3%→85.9% |        +16.6 pp |
+| Codex CLI     |          0.989 |     29.25–60.75 |                     72.9%→84.5% |        +11.6 pp |
+
+<img src="../assets/model-run-statistics/claim-charts/04-round-count-vs-success.png" alt="Run-level round count and success association with fitted curves" width="800">
+
+This does not make round count an efficiency score. Codex averaged 46.9 rounds
+and Direct averaged 14.6, yet their aggregate weighted success rates were nearly
+the same: 73.0% and 72.5%. Rounds measure process length; efficiency also needs
+an outcome and a resource measure. Task difficulty, stopping behavior, timeout
+policy, and agent policy affect both $n$ and success, so the fitted lines are
+descriptive associations rather than causal round-budget effects.
 
 ### 12.2 Balanced is on the observed cost–success frontier
 
-For agent group `g`, the plotted coordinates are
+For agent group $g$, the aggregate coordinates are
 
-`C_g = sum(run cost) / N_g`
+$$
+C_g = \frac{1}{N_g}\sum_{i=1}^{N_g} C_{ig}
+$$
 
 and
 
-`S_g = sum(passed checks) / sum(total checks)`.
+$$
+S_g = \frac{\sum_{i=1}^{N_g} \mathrm{passed}_{ig}}
+{\sum_{i=1}^{N_g} \mathrm{checks}_{ig}}.
+$$
 
-Balanced averaged $3.19 per run at 79.0% weighted success. Direct averaged
-$1.56 at 72.5%, while Codex averaged $4.19 at 73.0%. Under the observed Pareto
-rule, configuration `A` dominates `B` when `C_A <= C_B` and `S_A >= S_B`, with
+Balanced averaged \$3.19 per run at 79.0% weighted success. Direct averaged
+\$1.56 at 72.5%, while Codex averaged \$4.19 at 73.0%. Under the observed Pareto
+rule, configuration $A$ dominates $B$ when $C_A \le C_B$ and $S_A \ge S_B$, with
 at least one strict inequality. Balanced therefore dominates Codex in this
 sample. Direct and Balanced form the two meaningful frontier endpoints: Direct
 is cheaper, while Balanced buys a higher observed success rate.
 
-<img src="../assets/model-run-statistics/claim-charts/05-cost-success-frontier.png" alt="Observed cost-success frontier" width="800">
+The figure below replaces the three isolated aggregate points with all 267
+runs. Each panel uses the same weighted binomial form with $x=C_{\mathrm{USD}}$:
+
+$$
+\operatorname{logit}\!\left(P(\mathrm{success}\mid x)\right)
+= \alpha + \beta\log(1+x).
+$$
+
+| Agent group   | Fitted $\beta$ |      Cost IQR | Fitted success at IQR endpoints | IQR fitted gain |
+| ------------- | -------------: | ------------: | ------------------------------: | --------------: |
+| Tura Balanced |          1.161 | \$2.29–\$3.60 |                     75.4%→81.9% |         +6.5 pp |
+| Tura Direct   |          2.322 | \$1.09–\$1.94 |                     67.7%→82.2% |        +14.5 pp |
+| Codex CLI     |          1.289 | \$2.68–\$4.82 |                     69.8%→80.7% |        +10.8 pp |
+
+<img src="../assets/model-run-statistics/claim-charts/05-cost-vs-success.png" alt="Run-level API cost and success association with fitted curves" width="800">
 
 Calling Balanced the strongest “compromise” is a decision interpretation, not
 a universal optimum. A user who values minimum spend above the observed success
@@ -457,9 +490,11 @@ Total tokens are not a unique dollar-cost measure because token classes have
 different prices. Every run is repriced with the same recorded standard-tier
 identity:
 
-`cost_usd = (5.0 U + 0.5 K + 30.0 O) / 1,000,000`,
+$$
+C_{\mathrm{USD}} = \frac{5.0U + 0.5K + 30.0O}{1{,}000{,}000},
+$$
 
-where `U` is uncached input, `K` is cached input, and `O` is output. Reasoning
+where $U$ is uncached input, $K$ is cached input, and $O$ is output. Reasoning
 tokens are already included in output tokens and are not charged twice.
 
 <img src="../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png" alt="Token volume and cost composition" width="800">
@@ -479,45 +514,53 @@ difference in the bill. Cached input still dominates token volume in every
 group. Total tokens remain useful for measuring context and system load, but
 cost analysis must retain the uncached, cached, and output components.
 
-### 12.4 Success follows a fitted saturation pattern
+### 12.4 More recorded Tura commands are associated with higher success
 
-The success curves use a weighted binomial model,
+For the Tura runs, command count is reconstructed from three normalized contract
+schemas: `summary.events.commands`, legacy `task-report.source.commands`, or the
+sum of `commands[]` entries in `agent-rounds.jsonl`. All 177 included Tura runs
+have a positive count. The fitted model is
 
-`logit(P(success | n)) = alpha + beta log(1 + n)`,
+$$
+\operatorname{logit}\!\left(P(\mathrm{success}\mid m)\right)
+= \alpha + \beta\log(1+m),
+$$
 
-or equivalently
+where $m$ is the number of normalized command records and each run contributes
+its passed and total harness-check counts.
 
-`P(success | n) = sigmoid(alpha + beta log(1 + n))`,
+| Agent group   | Fitted $\beta$ | Command-count IQR | Fitted success at IQR endpoints | IQR fitted gain |
+| ------------- | -------------: | ----------------: | ------------------------------: | --------------: |
+| Tura Balanced |          1.133 |         113–177.5 |                     78.0%→85.5% |         +7.5 pp |
+| Tura Direct   |          1.032 |       39.25–84.75 |                     72.3%→85.1% |        +12.8 pp |
 
-where `n` is the run's round count and each run is weighted by its harness check
-count. This shape rises quickly and then flattens by construction. The observed
-fit shows the expected declining marginal association:
+<img src="../assets/model-run-statistics/claim-charts/07-command-count-vs-success.png" alt="Tura-only run-level command count and success association with fitted curves" width="800">
 
-| Agent group   | Fitted gain, rounds 10→20 | Fitted gain, rounds 20→30 |
-| ------------- | ------------------------: | ------------------------: |
-| Tura Balanced |                  +12.6 pp |                   +5.9 pp |
-| Tura Direct   |                  +16.3 pp |                   +5.3 pp |
-| Codex CLI     |                  +15.5 pp |                   +8.2 pp |
+Codex is deliberately excluded from this command-count inference. A single
+Codex shell/tool call can contain multiple shell commands, while Tura's
+`command_run` contracts expose constituent commands at a different macro
+granularity. The current artifacts cannot split those Codex calls reliably, so
+placing Codex on the same command axis would imply a false common unit.
 
-<img src="../assets/model-run-statistics/claim-charts/07-success-saturation.png" alt="Success saturation by agent group" width="800">
-
-The defensible conclusion is diminishing fitted association, not a universal
-critical round. Task difficulty, stopping behavior, timeouts, and agent policy
-all affect both round count and outcome. A causal threshold requires a
-controlled experiment that randomly varies round budgets for the same tasks and
-configurations.
+Within Tura, both slopes are positive, but the interpretation remains
+descriptive. Harder tasks may require more commands and have different success
+rates; successful agents may also continue into more verification commands.
+Establishing a causal command effect requires controlled command-budget or tool
+ablation experiments.
 
 ### 12.5 Token volume and billed cost have different elasticities
 
 For a common descriptive scale, both quantities are summarized over the
 observed range with
 
-`y(n) = a n^p`.
+$$
+y(n) = an^p.
+$$
 
-The exponent `p` is the fitted elasticity: a 1% increase in rounds corresponds
-to an estimated `p`% increase in `y` within the sampled range.
+The exponent $p$ is the fitted elasticity: a 1% increase in rounds corresponds
+to an estimated $p$% increase in $y$ within the sampled range.
 
-| Agent group   | Total-token exponent `p` | Cost exponent `p` |
+| Agent group   | Total-token exponent $p$ | Cost exponent $p$ |
 | ------------- | -----------------------: | ----------------: |
 | Tura Balanced |                    1.498 |             0.981 |
 | Tura Direct   |                    1.444 |             0.856 |
@@ -535,7 +578,9 @@ Additional context tokens are increasingly likely to be discounted cache hits.
 The power law is used here as a compact elasticity summary, not as a universal
 long-run law. The competing two-parameter context-growth model,
 
-`T(n) = nB + c n(n + 1) / 2`,
+$$
+T(n) = nB + \frac{cn(n+1)}{2},
+$$
 
 has similar leave-one-task-out error and is retained by the predeclared 5%
 tolerance rule for all three groups. The data support “observed superlinear,
@@ -610,7 +655,7 @@ claim-specific outputs under
 | [DeepSWE replicate 3](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r03/manifest.json)      | Canonical 60-session manifest for replicate 3                                         |
 | [Rewrite canonical manifest](https://github.com/Tura-AI/benchmark/blob/main/results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json) | Canonical 30-session rewrite scores, token totals, and computed costs                 |
 | [Filtered run-level relationship data](../assets/model-run-statistics/run-level-data.csv)                                                      | 267-run explanatory sample used for Section 12                                        |
-| [Claim-chart fitted summary](../assets/model-run-statistics/claim-charts/claim-chart-summary.json)                                             | Recomputed coordinates, composition shares, saturation gains, and scaling exponents   |
+| [Claim-chart fitted summary](../assets/model-run-statistics/claim-charts/claim-chart-summary.json)                                             | Recomputed run-level associations, composition shares, and scaling exponents          |
 
 The agent repository and public article state the hypothesis and summarize the
 result. The benchmark repository and manifests are the evidence sources used
@@ -636,9 +681,11 @@ the effort settings controlled. Those are limitations to test next, not reasons
 to dilute the results that are already directly reproducible.
 
 The filtered cross-run sensitivity analysis adds five descriptive observations:
-round count alone is not an efficiency score; Balanced lies on the observed
+rounds and cost both have positive fitted associations with success, but round
+count alone is not an efficiency score; Balanced lies on the observed aggregate
 cost-success frontier; Tura allocates a larger token and dollar share to output
-than Codex; fitted success gains diminish with additional rounds; and discounted
+than Codex; within Tura, more normalized command records are associated with
+higher success, while Codex command granularity is not comparable; and discounted
 cache reuse separates superlinear token growth from near-linear billed cost.
 These observations sharpen the system-level result without turning correlation
 into a feature-level causal claim.

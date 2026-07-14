@@ -61,6 +61,18 @@ test("codex-cli executable resolver honors an explicit spawnable binary", () => 
   }
 });
 
+test("source-port runner resolves codex-cli independently from codex-main", () => {
+  const source = fs.readFileSync(
+    path.resolve("tasks/rewrite/source-port-python/runner.mjs"),
+    "utf8",
+  );
+  assert.match(source, /const codexCliExe = findCodexCliExe\(repoRoot\)/);
+  assert.match(
+    source,
+    /async function runCodexCli[\s\S]*?onProgress,\s*codexCliExe,\s*"codex-cli"/,
+  );
+});
+
 test("codex home prep is isolated and plugin cache seeding is explicit", () => {
   const sourceHome = tempAgentDir();
   const targetHome = tempAgentDir();

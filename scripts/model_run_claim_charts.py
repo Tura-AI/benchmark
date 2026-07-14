@@ -16,10 +16,13 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.font_manager import FontProperties, fontManager
+from scipy.optimize import minimize
 from scipy.special import expit
+from scipy.stats import norm
 
 
 AGENT_ORDER = ("tura-balanced", "tura-direct", "codex-cli")
+TURA_GROUPS = ("tura-balanced", "tura-direct")
 LABELS = {
     "tura-balanced": "Tura Balanced",
     "tura-direct": "Tura Direct",
@@ -57,6 +60,41 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def extract_command_count(row: dict) -> tuple[int, str]:
+    contract_dir = Path(row["source_path"]).parent
+    metadata_dir = contract_dir.parent
+    summary = load_json(metadata_dir / "summary.json")
+    task_report = load_json(contract_dir / "task-report.json")
+
+    summary_commands = (summary.get("events") or {}).get("commands")
+    if summary_commands is not None:
+        return int(summary_commands), "summary.events.commands"
+
+    task_commands = (task_report.get("source") or {}).get("commands")
+    if task_commands is not None:
+        return int(task_commands), "task-report.source.commands"
+
+    rounds_path = contract_dir / "agent-rounds.jsonl"
+    if not rounds_path.exists():
+        raise ValueError(f"No command-count source for {row['run_id']}")
+    round_records = [
+        json.loads(line)
+        for line in rounds_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    count = sum(
+        len(record.get("commands") or record.get("toolCalls") or [])
+        for record in round_records
+    )
+    return count, "agent-rounds.commands[]"
+
+
 def load_rows(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8", newline="") as handle:
         raw = list(csv.DictReader(handle))
@@ -75,6 +113,7 @@ def load_rows(path: Path) -> list[dict]:
             row[key] = int(row[key])
         for key in ("success_rate", "cost_usd"):
             row[key] = float(row[key])
+        row["commands"], row["command_count_source"] = extract_command_count(row)
         rows.append(row)
     if len(rows) != 267:
         raise ValueError(f"Expected 267 filtered runs, found {len(rows)}")
@@ -82,6 +121,8 @@ def load_rows(path: Path) -> list[dict]:
         raise ValueError("Duplicate run IDs")
     if any(row["total_tokens"] <= 0 or row["cost_usd"] <= 0 for row in rows):
         raise ValueError("Claim charts require positive token and cost values")
+    if any(row["commands"] <= 0 for row in rows if row["agent_group"] in TURA_GROUPS):
+        raise ValueError("Tura command-success charts require positive command counts")
     return rows
 
 
@@ -205,128 +246,164 @@ def stable_jitter(run_id: str, width: float) -> float:
     return ((int.from_bytes(digest[:2], "big") / 65535.0) - 0.5) * width
 
 
-def plot_rounds_not_efficiency(summary: dict[str, dict], output_dir: Path) -> None:
-    figure, axis = new_figure(
-        "Claim 1 · descriptive system comparison",
-        "Round count is not an efficiency score",
-        "Codex and Direct reach almost the same weighted success with very different round budgets.",
-    )
-    for group in AGENT_ORDER:
-        item = summary[group]
-        x = item["mean_rounds"]
-        y = item["success_rate"] * 100
-        axis.scatter(
-            x,
-            y,
-            s=330,
-            color=COLORS[group],
-            edgecolor=BACKGROUND,
-            linewidth=2.0,
-            zorder=3,
-        )
-        offsets = {
-            "tura-balanced": (1.8, 0.5),
-            "tura-direct": (1.8, -2.0),
-            "codex-cli": (-15.5, 1.0),
-        }
-        dx, dy = offsets[group]
-        axis.text(x + dx, y + dy, LABELS[group], fontsize=12, weight="bold", color=INK)
-        axis.text(
-            x + dx,
-            y + dy - 1.8,
-            f"{x:.1f} rounds · {y:.1f}% success",
-            fontsize=9,
-            color=MUTED,
-        )
-    direct = summary["tura-direct"]
-    codex = summary["codex-cli"]
-    axis.plot(
-        [direct["mean_rounds"], codex["mean_rounds"]],
-        [direct["success_rate"] * 100, codex["success_rate"] * 100],
-        color=GRID,
-        linewidth=1.2,
-        linestyle="--",
-        zorder=1,
-    )
-    axis.set_xlim(0, 56)
-    axis.set_ylim(67, 83)
-    axis.set_xlabel("Mean agent rounds per run")
-    axis.set_ylabel("Weighted harness success")
-    axis.yaxis.set_major_formatter(mpl.ticker.PercentFormatter(100, decimals=0))
-    figure.text(
-        0.11,
-        0.065,
-        "READING · Rounds measure process length. Efficiency needs an outcome and a resource measure; fewer rounds alone is not better.",
-        color=MUTED,
-        fontsize=9,
-    )
-    save(figure, output_dir, "04-round-count-is-not-efficiency")
+def fit_success_association(rows: list[dict], metric: str) -> dict[str, float | str]:
+    values = np.array([row[metric] for row in rows], dtype=float)
+    predictor = np.log1p(values)
+    passed = np.array([row["passed"] for row in rows], dtype=float)
+    checks = np.array([row["checks"] for row in rows], dtype=float)
+
+    def objective(params: np.ndarray) -> float:
+        logits = params[0] + params[1] * predictor
+        return float(np.sum(checks * np.logaddexp(0, logits) - passed * logits))
+
+    base_rate = np.clip(np.sum(passed) / np.sum(checks), 1e-6, 1 - 1e-6)
+    initial = np.array([math.log(base_rate / (1 - base_rate)), 0.0])
+    result = minimize(objective, initial, method="BFGS")
+    if not result.success and np.linalg.norm(result.jac) > 1e-4:
+        raise RuntimeError(f"Success fit failed for {metric}: {result.message}")
+
+    alpha, beta = result.x
+    fitted = expit(alpha + beta * predictor)
+    design = np.column_stack((np.ones(len(rows)), predictor))
+    weights = checks * fitted * (1 - fitted)
+    covariance = np.linalg.inv(design.T @ (weights[:, None] * design))
+    beta_se = float(np.sqrt(covariance[1, 1]))
+    beta_p_value = float(2 * norm.sf(abs(beta / beta_se)))
+    q1, q3 = np.quantile(values, [0.25, 0.75])
+    q1_probability, q3_probability = expit(alpha + beta * np.log1p([q1, q3]))
+    return {
+        "formula": f"logit(P(success)) = alpha + beta*log(1+{metric})",
+        "alpha": float(alpha),
+        "beta": float(beta),
+        "beta_standard_error": beta_se,
+        "beta_p_value_naive": beta_p_value,
+        "q1": float(q1),
+        "q3": float(q3),
+        "q1_success_percent": float(q1_probability * 100),
+        "q3_success_percent": float(q3_probability * 100),
+        "interquartile_gain_percentage_points": float(
+            (q3_probability - q1_probability) * 100
+        ),
+        "observed_min": float(np.min(values)),
+        "observed_max": float(np.max(values)),
+    }
 
 
-def plot_cost_success_frontier(summary: dict[str, dict], output_dir: Path) -> None:
-    figure, axis = new_figure(
-        "Claim 2 · observed Pareto comparison",
-        "Balanced offers the strongest cost–success compromise",
-        "Direct is the low-cost endpoint; Balanced is the higher-success endpoint and dominates Codex in this sample.",
+def plot_success_panel(
+    axis: plt.Axes,
+    rows: list[dict],
+    group: str,
+    metric: str,
+    model: dict[str, float | str],
+    xlabel: str,
+) -> None:
+    values = np.array([row[metric] for row in rows], dtype=float)
+    rates = np.array([row["success_rate"] for row in rows], dtype=float) * 100
+    checks = np.array([row["checks"] for row in rows], dtype=float)
+    jittered = np.array(
+        [
+            np.clip(rate + stable_jitter(row["run_id"], 2.4), 0, 100)
+            for row, rate in zip(rows, rates)
+        ]
     )
-    frontier = ("tura-direct", "tura-balanced")
-    axis.plot(
-        [summary[group]["mean_cost_usd"] for group in frontier],
-        [summary[group]["success_rate"] * 100 for group in frontier],
-        color=INK,
-        linewidth=1.2,
-        linestyle="--",
-        alpha=0.55,
-        zorder=1,
+    axis.scatter(
+        values,
+        jittered,
+        s=14 + 3.5 * np.sqrt(checks),
+        color=COLORS[group],
+        alpha=0.23,
+        linewidth=0,
+        zorder=2,
     )
-    for group in AGENT_ORDER:
-        item = summary[group]
-        x = item["mean_cost_usd"]
-        y = item["success_rate"] * 100
-        axis.scatter(
-            x,
-            y,
-            s=380 if group == "tura-balanced" else 300,
-            color=COLORS[group],
-            edgecolor=INK if group == "tura-balanced" else BACKGROUND,
-            linewidth=1.8,
-            zorder=3,
-        )
-        dx, dy = {
-            "tura-balanced": (0.10, 0.4),
-            "tura-direct": (0.10, -1.8),
-            "codex-cli": (-0.92, 0.5),
-        }[group]
-        axis.text(x + dx, y + dy, LABELS[group], fontsize=12, weight="bold")
-        axis.text(
-            x + dx,
-            y + dy - 1.7,
-            f"${x:.2f}/run · {y:.1f}%",
-            fontsize=9,
-            color=MUTED,
-        )
-    axis.annotate(
-        "Balanced: lower cost and higher success\nthan Codex in this sample",
-        xy=(summary["tura-balanced"]["mean_cost_usd"], summary["tura-balanced"]["success_rate"] * 100),
-        xytext=(3.42, 76.4),
+    x_line = np.linspace(float(np.min(values)), float(np.max(values)), 300)
+    y_line = expit(
+        float(model["alpha"]) + float(model["beta"]) * np.log1p(x_line)
+    ) * 100
+    axis.plot(x_line, y_line, color=COLORS[group], linewidth=2.6, zorder=3)
+    axis.text(
+        0.04,
+        0.94,
+        LABELS[group],
+        transform=axis.transAxes,
+        va="top",
+        fontsize=11,
+        weight="bold",
+    )
+    axis.text(
+        0.04,
+        0.84,
+        f"IQR fitted gain\n+{float(model['interquartile_gain_percentage_points']):.1f} pp",
+        transform=axis.transAxes,
+        va="top",
         fontsize=9,
         color=MUTED,
-        arrowprops={"arrowstyle": "-", "color": GRID, "linewidth": 1.0},
     )
-    axis.set_xlim(1.25, 4.65)
-    axis.set_ylim(68, 82)
-    axis.set_xlabel("Mean estimated API cost per run (USD)")
-    axis.set_ylabel("Weighted harness success")
-    axis.xaxis.set_major_formatter(mpl.ticker.StrMethodFormatter("${x:.1f}"))
+    axis.set_xlim(0, float(np.max(values)) * 1.05)
+    axis.set_ylim(-2, 102)
+    axis.set_xlabel(xlabel)
     axis.yaxis.set_major_formatter(mpl.ticker.PercentFormatter(100, decimals=0))
+
+
+def plot_rounds_not_efficiency(
+    groups: dict[str, list[dict]], output_dir: Path
+) -> dict[str, dict]:
+    figure, axes = new_panel_figure(
+        "Claim 1 · run-level descriptive association",
+        "More rounds align with higher success — not higher efficiency",
+        "All 267 runs are shown; fitted gains flatten because the model uses log(1 + rounds).",
+        3,
+    )
+    models: dict[str, dict] = {}
+    for axis, group in zip(axes, AGENT_ORDER):
+        models[group] = fit_success_association(groups[group], "rounds")
+        plot_success_panel(axis, groups[group], group, "rounds", models[group], "Agent rounds")
+    axes[0].set_ylabel("Run-level harness success")
+    for axis in axes[1:]:
+        axis.set_yticklabels([])
     figure.text(
-        0.11,
-        0.065,
-        "PARETO RULE · A dominates B when cost_A <= cost_B and success_A >= success_B, with at least one strict inequality.",
+        0.08,
+        0.055,
+        "MODEL · logit(P(success)) = alpha + beta·log(1 + rounds). Association is not a causal round-budget effect.",
         color=MUTED,
         fontsize=9,
     )
-    save(figure, output_dir, "05-cost-success-frontier")
+    save(figure, output_dir, "04-round-count-vs-success")
+    return models
+
+
+def plot_cost_success_frontier(
+    groups: dict[str, list[dict]], output_dir: Path
+) -> dict[str, dict]:
+    figure, axes = new_panel_figure(
+        "Claim 2 · run-level descriptive association",
+        "Higher observed spend aligns with higher success",
+        "Balanced remains the best aggregate cost–success compromise; the panels show the underlying runs and fitted curves.",
+        3,
+    )
+    models: dict[str, dict] = {}
+    for axis, group in zip(axes, AGENT_ORDER):
+        models[group] = fit_success_association(groups[group], "cost_usd")
+        plot_success_panel(
+            axis,
+            groups[group],
+            group,
+            "cost_usd",
+            models[group],
+            "Estimated API cost (USD)",
+        )
+        axis.xaxis.set_major_formatter(mpl.ticker.StrMethodFormatter("${x:g}"))
+    axes[0].set_ylabel("Run-level harness success")
+    for axis in axes[1:]:
+        axis.set_yticklabels([])
+    figure.text(
+        0.08,
+        0.055,
+        "MODEL · logit(P(success)) = alpha + beta·log(1 + cost). Cost and outcome share task and stopping-policy confounders.",
+        color=MUTED,
+        fontsize=9,
+    )
+    save(figure, output_dir, "05-cost-vs-success")
+    return models
 
 
 def component_totals(rows: list[dict]) -> dict[str, float]:
@@ -480,85 +557,38 @@ def plot_token_cost_composition(groups: dict[str, list[dict]], output_dir: Path)
     return composition
 
 
-def plot_success_saturation(
-    groups: dict[str, list[dict]], diagnostics: dict, output_dir: Path
+def plot_command_success(
+    groups: dict[str, list[dict]], output_dir: Path
 ) -> dict[str, dict]:
     figure, axes = new_panel_figure(
-        "Claim 4 · fitted association, not causal treatment",
-        "Success rises along a saturating curve",
-        "The fitted marginal gain declines as rounds increase; the data do not identify one universal threshold.",
-        3,
+        "Claim 4 · Tura-only run-level association",
+        "More recorded Tura commands align with higher success",
+        "Codex is excluded: one shell call can wrap several shell commands, so its command unit is not comparable.",
+        2,
     )
-    saturation: dict[str, dict] = {}
-    for axis, group in zip(axes, AGENT_ORDER):
-        rows = groups[group]
-        params = diagnostics["success_models"][group]
-        alpha = float(params["alpha"])
-        beta = float(params["beta"])
-        rounds = np.array([row["rounds"] for row in rows], dtype=float)
-        rates = np.array([row["success_rate"] for row in rows], dtype=float) * 100
-        checks = np.array([row["checks"] for row in rows], dtype=float)
-        jittered = np.array(
-            [
-                np.clip(rate + stable_jitter(row["run_id"], 2.4), 0, 100)
-                for row, rate in zip(rows, rates)
-            ]
+    models: dict[str, dict] = {}
+    for axis, group in zip(axes, TURA_GROUPS):
+        models[group] = fit_success_association(groups[group], "commands")
+        plot_success_panel(
+            axis,
+            groups[group],
+            group,
+            "commands",
+            models[group],
+            "Recorded command records",
         )
-        axis.scatter(
-            rounds,
-            jittered,
-            s=14 + 3.5 * np.sqrt(checks),
-            color=COLORS[group],
-            alpha=0.23,
-            linewidth=0,
-            zorder=2,
-        )
-        x_line = np.linspace(max(1, min(rounds)), max(rounds), 300)
-        y_line = expit(alpha + beta * np.log1p(x_line)) * 100
-        axis.plot(x_line, y_line, color=COLORS[group], linewidth=2.6, zorder=3)
-        probability = lambda n: float(expit(alpha + beta * math.log1p(n)))
-        gain_10_20 = (probability(20) - probability(10)) * 100
-        gain_20_30 = (probability(30) - probability(20)) * 100
-        saturation[group] = {
-            "gain_10_to_20_percentage_points": gain_10_20,
-            "gain_20_to_30_percentage_points": gain_20_30,
-            "observed_min_rounds": int(min(rounds)),
-            "observed_max_rounds": int(max(rounds)),
-        }
-        axis.text(
-            0.04,
-            0.94,
-            LABELS[group],
-            transform=axis.transAxes,
-            va="top",
-            fontsize=11,
-            weight="bold",
-        )
-        axis.text(
-            0.04,
-            0.84,
-            f"10→20: +{gain_10_20:.1f} pp\n20→30: +{gain_20_30:.1f} pp",
-            transform=axis.transAxes,
-            va="top",
-            fontsize=9,
-            color=MUTED,
-        )
-        axis.set_xlim(0, max(rounds) * 1.05)
-        axis.set_ylim(-2, 102)
-        axis.set_xlabel("Rounds")
-        axis.yaxis.set_major_formatter(mpl.ticker.PercentFormatter(100, decimals=0))
     axes[0].set_ylabel("Run-level harness success")
     for axis in axes[1:]:
         axis.set_yticklabels([])
     figure.text(
         0.08,
         0.055,
-        "MODEL · logit(P(success)) = alpha + beta·log(1 + rounds). Curves stop at each group's observed maximum.",
+        "MODEL · logit(P(success)) = alpha + beta·log(1 + recorded commands). Counts come from normalized Tura contracts.",
         color=MUTED,
         fontsize=9,
     )
-    save(figure, output_dir, "07-success-saturation")
-    return saturation
+    save(figure, output_dir, "07-command-count-vs-success")
+    return models
 
 
 def plot_scaling(
@@ -636,11 +666,14 @@ def main() -> None:
     groups = group_rows(rows)
     summary = aggregate_summary(groups)
     configure_style(input_dir)
-    plot_rounds_not_efficiency(summary, output_dir)
-    plot_cost_success_frontier(summary, output_dir)
+    round_success = plot_rounds_not_efficiency(groups, output_dir)
+    cost_success = plot_cost_success_frontier(groups, output_dir)
     composition = plot_token_cost_composition(groups, output_dir)
-    saturation = plot_success_saturation(groups, diagnostics, output_dir)
+    command_success = plot_command_success(groups, output_dir)
     scaling = plot_scaling(groups, diagnostics, output_dir)
+    command_sources: dict[str, int] = defaultdict(int)
+    for row in rows:
+        command_sources[row["command_count_source"]] += 1
     output = {
         "sample": {
             "runs": len(rows),
@@ -648,8 +681,16 @@ def main() -> None:
             "source": str((input_dir / "run-level-data.csv").resolve()),
         },
         "agent_summary": summary,
+        "round_success_association": round_success,
+        "cost_success_association": cost_success,
         "token_cost_composition": composition,
-        "success_saturation": saturation,
+        "command_success_association": command_success,
+        "command_count_sources": dict(sorted(command_sources.items())),
+        "command_count_comparability": {
+            "included": list(TURA_GROUPS),
+            "excluded": ["codex-cli"],
+            "reason": "A Codex shell call may wrap multiple shell commands; its unit is not comparable with normalized Tura command records.",
+        },
         "scaling": scaling,
         "pricing_usd_per_1m_tokens": PRICE,
     }
