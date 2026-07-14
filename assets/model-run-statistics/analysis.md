@@ -18,11 +18,11 @@
 
 The supplied formula is interpreted as `T(n) = nB + c*n*(n+1)/2`. Both candidate models have two parameters and are compared with leave-one-task-out RMSLE. The quadratic-context form is retained when its RMSLE is within 5% of the power-law model; otherwise `T(n) = a*n^p` is selected.
 
-| Agent group | Quadratic CV RMSLE | Power CV RMSLE | Selected | Power-law estimate |
-|---|---:|---:|---|---|
-| Tura Balanced | 0.185 | 0.179 | quadratic-context | T(n) = 19055 n^1.498 |
-| Tura Direct | 0.229 | 0.235 | quadratic-context | T(n) = 19884 n^1.444 |
-| Codex CLI | 0.175 | 0.185 | quadratic-context | T(n) = 60413 n^1.152 |
+| Agent group   | Quadratic CV RMSLE | Power CV RMSLE | Selected          | Power-law estimate   |
+| ------------- | -----------------: | -------------: | ----------------- | -------------------- |
+| Tura Balanced |              0.185 |          0.179 | quadratic-context | T(n) = 19055 n^1.498 |
+| Tura Direct   |              0.229 |          0.235 | quadratic-context | T(n) = 19884 n^1.444 |
+| Codex CLI     |              0.175 |          0.185 | quadratic-context | T(n) = 60413 n^1.152 |
 
 **Conclusion:** Quadratic-context form retained for: Tura Balanced, Tura Direct, Codex CLI. Power-law alternative preferred for: none.
 

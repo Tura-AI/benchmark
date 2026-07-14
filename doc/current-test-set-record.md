@@ -114,21 +114,21 @@ The benchmark keeps three evidence layers.
 
 ### 3.1 Codex CLI modification disclosure
 
-The Codex sessions were collected with a locally modified Codex CLI build so
-that each model round exposed its command records and detailed metadata. Result
-metadata therefore reports the Codex CLI build as `(local modified)`, not as the
-corresponding official release version. The public `results/` tree retains the
+The official Codex CLI version was modified specifically to obtain each model
+round's command records and detailed metadata. Result metadata therefore reports
+the Codex CLI build as `(local modified)`, not as the corresponding official
+release version. The public `results/` tree retains the
 normalized commands, token usage, timing, source identifiers, and reconstruction
-metadata, but omits input, output, and message payloads from Codex normalized
+metadata, but omits the `input` and `output` fields from Codex normalized
 per-round contracts and their embedded copies. Complete run-level input and
 output archives remain retained.
 
-Because this instrumentation modifies the official execution path, these data
-may differ from data produced by the corresponding official Codex CLI version.
-This report does not claim that the modification has zero effect. Independent
-reproductions are welcome, particularly crossed official-versus-modified runs
-that can show whether the version change causes a material, repeatable result
-difference.
+Because the experiment modified the official Codex CLI version, these data may
+differ from data produced by the corresponding official version. This report
+does not claim that the modification has zero effect. Independent reproductions
+are welcome, particularly crossed official-versus-modified experiments that can
+demonstrate whether the version difference causes an obvious and repeatable
+change in outcomes or resource use.
 
 The collection and normalization boundaries are implemented in
 [`deep_swe/run_matrix.mjs`](../deep_swe/run_matrix.mjs),
@@ -214,60 +214,6 @@ more checks than Codex while using 86.6% fewer tokens. Codex scored highest on
 the TanStack rebuild; Balanced scored highest or tied highest on all four CLI
 ports. These are results for the named High-versus-Medium configurations, not
 an isolated measurement of runtime architecture or reasoning effort.
-
-### 6.1 Submitted code lines and harness success
-
-Submitted source size is measured from each canonical run's final production
-source, not from the reference repository or the byte size of a Git patch. For
-the four Python CLI ports, the count includes submitted production Python files
-and excludes the harness, tests, `.tura`, `rust-reference`, and files whose names
-identify test, verification, or differential helpers. For the TanStack task,
-the count uses the evaluator's archived `source_lines` metric over `src`, `app`,
-and `routes`, plus the supported package and application configuration files.
-
-For run $i$, the plotted outcome is
-
-$$
-S_i = \frac{\mathrm{passed}_i}{\mathrm{checks}_i}.
-$$
-
-<p align="center">
-  <img src="../assets/rewrite-code-statistics/09-rewrite-submitted-lines-vs-success.png" alt="Submitted source lines and harness success for five rewrite tasks" width="800">
-</p>
-
-The figure covers 24 of the 30 canonical runs. Six Codex CLI runs—two each for
-Nushell, `xsv`, and `zip-password-finder`—retain their file-change paths and
-harness outcomes but not the bodies of their final untracked source files. The
-published recovery notes explicitly mark those workspaces as incomplete. They
-are excluded from source-line analysis rather than assigned zero lines.
-
-The four tasks with non-constant observed success have positive sample rank
-associations; the ZIP-finder observations all passed 100%, so its correlation is
-undefined. These are descriptive samples of only four to six runs per task, and
-source size is entangled with agent and implementation strategy. The figure does
-not isolate a causal effect of writing more code on harness success.
-
-### 6.2 Submitted code lines and harness item count
-
-Harness item count is fixed by the task contract, so drawing the same count once
-per agent and replicate would add duplicate points without adding information.
-The task-level comparison instead plots the median submitted source lines and
-the observed range across all runs whose submitted source is recoverable:
-
-$$
-\widetilde{L}_t = \operatorname{median}\{L_i : i \in t,\ L_i\ \mathrm{observed}\}.
-$$
-
-<p align="center">
-  <img src="../assets/rewrite-code-statistics/10-rewrite-submitted-lines-vs-harness-items.png" alt="Median submitted source lines and stable harness item count for five rewrite tasks" width="800">
-</p>
-
-Across the five tasks, the sample Spearman rank association is 0.30. With only
-five task points, this is descriptive rather than inferential and should not be
-read as a productivity curve. Harness counts reflect how each behavior contract
-was decomposed into stable assertions; they are not a code-volume target. A
-compact task can have many behavioral checks, and a larger implementation can be
-evaluated by fewer, broader checks.
 
 ## 7. Anomalies and severe long tails were retained
 
