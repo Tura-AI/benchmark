@@ -17,6 +17,7 @@ const MODEL_NORMALIZED = "gpt-5.6-sol";
 const EFFORTS = ["high", "medium"];
 const REPLICATES = 4;
 const AGENT = "mini-swe-agent";
+const PROVIDER = "openai";
 const AGENT_VERSION = null;
 const VERSION_SENTINEL = "(not published in DeepSWE trials.json)";
 const TASK_ORDER = [
@@ -188,7 +189,7 @@ function agentMetadata(effort) {
     schema: "tura.benchmark.agent-metadata.v1",
     id: agentIdFor(effort),
     name: `mini-swe-agent GPT-5.6 SOL ${effort[0].toUpperCase()}${effort.slice(1)}`,
-    provider: AGENT,
+    provider: PROVIDER,
     mode: "mini-swe-agent",
     model: MODEL_NORMALIZED,
     effort,
@@ -395,7 +396,7 @@ function webRun(trial, runId, reportId, agent, task, prompt, release) {
     run: {
       status: statusFor(trial),
       agent: AGENT,
-      provider: AGENT,
+      provider: PROVIDER,
       runtimeModel: MODEL_NORMALIZED,
       mode: "mini-swe-agent",
       startedAt: trial.started_at,

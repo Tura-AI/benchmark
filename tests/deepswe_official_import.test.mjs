@@ -69,6 +69,20 @@ test("committed first-three import is complete and internally consistent", async
     for (const run of manifest.runs) {
       assert.equal(trialNames.has(run.trialName), false);
       trialNames.add(run.trialName);
+
+      const agentMetadata = JSON.parse(
+        await readFile(
+          path.join(
+            root,
+            run.path,
+            "metadata",
+            "contracts",
+            "agent-metadata.json",
+          ),
+          "utf8",
+        ),
+      );
+      assert.equal(agentMetadata.provider, "openai");
     }
   }
   assert.equal(trialNames.size, 24);
