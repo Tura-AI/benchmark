@@ -748,7 +748,10 @@ async function runAgentJob(job) {
     writeJson(agentSummaryPath(job), summary);
     job.exit_code = result.status;
     job.round_count = result.rounds.length;
-    job.tool_call_count = result.round_contract_validation.tool_call_count;
+    job.tool_call_count = Math.max(
+      result.round_contract_validation.tool_call_count,
+      countCompletedCodexCommands(path.join(agentDir, "stdout.jsonl")),
+    );
     assignUsage(job, result.usage_info?.usage);
     job.patch_bytes = summary.patch.patch_bytes;
     job.scheme_ok = scheme.round_contract_ok;
@@ -1444,6 +1447,14 @@ function parseJsonl(file) {
     .filter(Boolean)
     .map((line) => parseJson(line, null))
     .filter(Boolean);
+}
+
+function countCompletedCodexCommands(file) {
+  return parseJsonl(file).filter(
+    (event) =>
+      event?.type === "item.completed" &&
+      event?.item?.type === "command_execution",
+  ).length;
 }
 
 function emptyUsage() {

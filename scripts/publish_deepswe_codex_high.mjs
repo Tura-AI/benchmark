@@ -7,10 +7,7 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import {
-  buildAgentRoundContracts,
-  costEstimateForUsage,
-} from "../lib/business_paths.mjs";
+import { costEstimateForUsage } from "../lib/business_paths.mjs";
 import { projectPython } from "../lib/python_runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -202,8 +199,10 @@ function publishReplicate({
   const runs = [];
   for (const job of jobs) {
     const taskId = job.task.task_id;
+    const task = selection.tasks.find((item) => item.task_id === taskId);
+    assert(task, `selection is missing task: ${taskId}`);
     const taskRoot = path.join(reportRoot, taskId);
-    copyTaskContracts(taskId, taskRoot);
+    writeTaskContracts(task, taskRoot);
     const runId = `${taskId}-${PUBLIC_AGENT_PATH}-run-${String(replicate).padStart(2, "0")}`;
     const runRoot = path.join(taskRoot, PUBLIC_AGENT_PATH, runId);
     const sourceRun = path.join(
@@ -212,13 +211,13 @@ function publishReplicate({
       taskId,
       `codex-cli-r${replicate}`,
     );
-    publishRun({
+    const published = publishRun({
       reportId,
       runId,
       runRoot,
       sourceRun,
       sourceBatch: manifest.run_id,
-      task: selection.tasks.find((item) => item.task_id === taskId),
+      task,
       job,
     });
     runs.push({
@@ -229,8 +228,8 @@ function publishReplicate({
       effort: EFFORT,
       replicate,
       status: Number(job.harness_score) === 1 ? "pass" : "fail",
-      rounds: Number(job.round_count),
-      commands: Number(job.tool_call_count),
+      rounds: published.rounds,
+      commands: published.commands,
       path: slash(
         path.join(
           "results",
@@ -263,21 +262,102 @@ function publishReplicate({
   return { id: reportId, replicate, runCount: runs.length };
 }
 
-function copyTaskContracts(taskId, taskRoot) {
+function writeTaskContracts(task, taskRoot) {
   if (fs.existsSync(path.join(taskRoot, "task.json"))) return;
-  const canonical = path.join(
-    root,
-    "results",
-    "debug",
-    "report-deepswe-v1.1-gpt56-sol-local-r01",
-    taskId,
+  const taskId = task.task_id;
+  const corpusTaskRoot = path.join(root, "raw", "_cache", "deep-swe", taskId);
+  const promptPath = path.join(corpusTaskRoot, "instruction.md");
+  const tomlPath = path.join(corpusTaskRoot, "task.toml");
+  assert(fs.existsSync(promptPath), `missing task prompt: ${promptPath}`);
+  assert(fs.existsSync(tomlPath), `missing task declaration: ${tomlPath}`);
+  const prompt = fs.readFileSync(promptPath, "utf8");
+  const toml = fs.readFileSync(tomlPath, "utf8");
+  const description =
+    readTomlString(toml, "display_description") ||
+    prompt.split(/\r?\n/).find((line) => line.trim()) ||
+    task.display_title ||
+    taskId;
+  const location = (file, symbol = null) => ({
+    repository: "https://github.com/datacurve-ai/deep-swe",
+    commit: "v1.1",
+    path: `tasks/${taskId}/${file}`,
+    symbol,
+    localPath: null,
+  });
+  const harness = {
+    schema: "tura.benchmark.task-harness.v1",
+    id: `${taskId}-deepswe-v1.1-harness`,
+    codeLocation: location("tests/test.sh"),
+    scoreItemCount: 1,
+    scoreItems: [
+      {
+        id: "deepswe-verifier",
+        name: "DeepSWE verifier",
+        description:
+          "Binary official DeepSWE reward: all fail-to-pass tests must pass and all pass-to-pass regression tests must remain passing.",
+        category: "DeepSWE verifier",
+        harnessCodeLocation: location("tests/grader.py", "main"),
+        sourceLocation: location("tests/test.patch"),
+      },
+    ],
+  };
+  const taskContract = {
+    schema: "tura.benchmark.task.v1",
+    id: taskId,
+    category: "debug",
+    title: task.display_title || taskId,
+    description,
+    evaluation: { mode: "harness" },
+    source: {
+      language: task.language,
+      repository: task.repository_url,
+      commit: task.base_commit_hash,
+      tag: "deep-swe-v1.1",
+      codePath: ".",
+    },
+    target: {
+      language: task.language,
+      deliverable: "A repository patch satisfying the DeepSWE v1.1 verifier.",
+    },
+    taskDeclaration: {
+      repository: "https://github.com/datacurve-ai/deep-swe",
+      path: `tasks/${taskId}/task.toml`,
+      localPath: null,
+    },
+    promptLocation: "task-first-round-prompt.txt",
+    harness,
+    contracts: {
+      run: "tura.benchmark.web-run.v1",
+      taskReport: "tura.benchmark.task-report.v1",
+      harnessReport: "tura.benchmark.harness-report.v2",
+    },
+    official: {
+      benchmark: "datacurve-ai/deep-swe",
+      benchmarkVersion: "v1.1",
+      taskPage: `https://deepswe.datacurve.ai/data/v1.1/tasks/${taskId}`,
+      taskArtifact: `https://deepswe.datacurve.ai/artifacts/v1.1/tasks/${taskId}.json`,
+      difficultyBand: task.difficulty_band,
+      officialPassRate: task.official_pass_rate,
+      officialScoredTrials: task.official_scored_trials,
+      category: readTomlString(toml, "category"),
+      dockerImage: task.docker_image,
+    },
+  };
+  fs.mkdirSync(taskRoot, { recursive: true });
+  writeJson(path.join(taskRoot, "task.json"), taskContract);
+  writeJson(path.join(taskRoot, "harness.json"), harness);
+  fs.writeFileSync(
+    path.join(taskRoot, "task-first-round-prompt.txt"),
+    prompt,
+    "utf8",
   );
-  for (const name of [
-    "task.json",
-    "harness.json",
-    "task-first-round-prompt.txt",
-  ])
-    fs.copyFileSync(path.join(canonical, name), path.join(taskRoot, name));
+}
+
+function readTomlString(toml, key) {
+  const match = String(toml).match(
+    new RegExp(`^${key}\\s*=\\s*(["'])(.*?)\\1\\s*$`, "m"),
+  );
+  return match?.[2] || null;
 }
 
 function publishRun({
@@ -357,13 +437,7 @@ function publishRun({
     workspaceRecovery,
   );
 
-  const rounds = buildAgentRoundContracts(rawSummary, {
-    agent_id: PUBLIC_AGENT_ID,
-    task_id: task.task_id,
-    model: MODEL,
-    reasoning: EFFORT,
-    service_tier: "default",
-  }).map((round, index) => ({
+  const rounds = rawSummary.rounds.map((round, index) => ({
     ...round,
     roundIndex: index + 1,
     metadata: {
@@ -380,10 +454,7 @@ function publishRun({
     Number(job.round_count),
     `${runId} LLM turn count`,
   );
-  const commands = rounds.reduce(
-    (total, round) => total + (round.toolCalls?.length || 0),
-    0,
-  );
+  const commands = countCodexCommands(path.join(sourceRun, "stdout.jsonl"));
   const usage = normalizeUsage(rawSummary.usage);
   const pricing = costEstimateForUsage(usage, {
     model: MODEL,
@@ -534,6 +605,7 @@ function publishRun({
       roundFile: "round-{NNNN}.json",
     },
   });
+  return { rounds: rounds.length, commands };
 }
 
 function buildHarnessReport({
@@ -754,6 +826,19 @@ function rewardBreakdown(reward = {}, prefix) {
   const total = Number(reward[`${prefix}_total`] || 0);
   const passed = Number(reward[`${prefix}_passed`] || 0);
   return { passed, failed: Math.max(0, total - passed), total };
+}
+
+function countCodexCommands(file) {
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter(
+      (event) =>
+        event?.type === "item.completed" &&
+        event?.item?.type === "command_execution",
+    ).length;
 }
 
 function validateStaging(stagingRoot) {
