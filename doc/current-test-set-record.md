@@ -393,7 +393,162 @@ much token, round, and cost reduction can be retained without an unacceptable
 verified-outcome loss. The current near-comparison is descriptive because no
 formal non-inferiority margin was predeclared.
 
-## 12. Limitations
+## 12. Five cross-run descriptive relationships
+
+The following five figures answer a different question from the untrimmed
+publication totals in Sections 5–7. They examine cross-run relationships after
+an explicit sensitivity filter: the two isolated Balanced observations above
+90 rounds (113 and 242 rounds) and the one zero-token, usage-unavailable run
+that did not execute are excluded. The source remains 270 debug and rewrite
+runs; the explanatory sample contains 267 runs across the same 25 tasks. The
+three exclusions are listed in
+[`excluded-runs.csv`](../assets/model-run-statistics/excluded-runs.csv), and the
+267 included observations are published in
+[`run-level-data.csv`](../assets/model-run-statistics/run-level-data.csv).
+
+This filtering does not replace the conservative headline aggregates. It keeps
+the long tails visible in the public result while preventing three exceptional
+records from setting the scale and functional shape of this separate
+relationship analysis. All fitted curves below are descriptive associations,
+not randomized treatment effects.
+
+### 12.1 Round count is process length, not an efficiency score
+
+Codex averaged 46.9 rounds and Direct averaged 14.6, yet their weighted harness
+success rates were nearly the same: 73.0% and 72.5%. Balanced averaged 27.1
+rounds and reached 79.0%. A round count alone therefore does not order systems
+by efficiency. It measures process length; an efficiency comparison also needs
+an outcome and at least one resource measure.
+
+![Round count is not an efficiency score](../assets/model-run-statistics/claim-charts/04-round-count-is-not-efficiency.png)
+
+No arbitrary scalar efficiency score is imposed here. A system may use fewer
+rounds because it batches work effectively, because it stops early, or because
+it fails before completing the necessary work. The observed coordinates are
+reported instead of collapsing those cases into one number.
+
+### 12.2 Balanced is on the observed cost–success frontier
+
+For agent group `g`, the plotted coordinates are
+
+`C_g = sum(run cost) / N_g`
+
+and
+
+`S_g = sum(passed checks) / sum(total checks)`.
+
+Balanced averaged $3.19 per run at 79.0% weighted success. Direct averaged
+$1.56 at 72.5%, while Codex averaged $4.19 at 73.0%. Under the observed Pareto
+rule, configuration `A` dominates `B` when `C_A <= C_B` and `S_A >= S_B`, with
+at least one strict inequality. Balanced therefore dominates Codex in this
+sample. Direct and Balanced form the two meaningful frontier endpoints: Direct
+is cheaper, while Balanced buys a higher observed success rate.
+
+![Observed cost-success frontier](../assets/model-run-statistics/claim-charts/05-cost-success-frontier.png)
+
+Calling Balanced the strongest “compromise” is a decision interpretation, not
+a universal optimum. A user who values minimum spend above the observed success
+gap may rationally choose Direct. No monetary value per successful check was
+predeclared.
+
+### 12.3 Tura has a larger output share than Codex
+
+Total tokens are not a unique dollar-cost measure because token classes have
+different prices. Every run is repriced with the same recorded standard-tier
+identity:
+
+`cost_usd = (5.0 U + 0.5 K + 30.0 O) / 1,000,000`,
+
+where `U` is uncached input, `K` is cached input, and `O` is output. Reasoning
+tokens are already included in output tokens and are not charged twice.
+
+![Token volume and cost composition](../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png)
+
+Output is a small share of token count for all three groups, but the Tura shares
+are materially higher than Codex's:
+
+| Agent group   | Output share of tokens | Output share of cost | Token-share multiple vs Codex | Cost-share multiple vs Codex |
+| ------------- | ---------------------: | -------------------: | ----------------------------: | ---------------------------: |
+| Tura Balanced |                  1.23% |                32.9% |                          3.3x |                         2.3x |
+| Tura Direct   |                  1.97% |                39.6% |                          5.2x |                         2.7x |
+| Codex CLI     |                  0.38% |                14.5% |                          1.0x |                         1.0x |
+
+The interpretation is comparative: Tura emits a larger output fraction than
+Codex, and the 30-to-1 output-versus-cached-input price ratio magnifies that
+difference in the bill. Cached input still dominates token volume in every
+group. Total tokens remain useful for measuring context and system load, but
+cost analysis must retain the uncached, cached, and output components.
+
+### 12.4 Success follows a fitted saturation pattern
+
+The success curves use a weighted binomial model,
+
+`logit(P(success | n)) = alpha + beta log(1 + n)`,
+
+or equivalently
+
+`P(success | n) = sigmoid(alpha + beta log(1 + n))`,
+
+where `n` is the run's round count and each run is weighted by its harness check
+count. This shape rises quickly and then flattens by construction. The observed
+fit shows the expected declining marginal association:
+
+| Agent group   | Fitted gain, rounds 10→20 | Fitted gain, rounds 20→30 |
+| ------------- | ------------------------: | ------------------------: |
+| Tura Balanced |                  +12.6 pp |                   +5.9 pp |
+| Tura Direct   |                  +16.3 pp |                   +5.3 pp |
+| Codex CLI     |                  +15.5 pp |                   +8.2 pp |
+
+![Success saturation by agent group](../assets/model-run-statistics/claim-charts/07-success-saturation.png)
+
+The defensible conclusion is diminishing fitted association, not a universal
+critical round. Task difficulty, stopping behavior, timeouts, and agent policy
+all affect both round count and outcome. A causal threshold requires a
+controlled experiment that randomly varies round budgets for the same tasks and
+configurations.
+
+### 12.5 Token volume and billed cost have different elasticities
+
+For a common descriptive scale, both quantities are summarized over the
+observed range with
+
+`y(n) = a n^p`.
+
+The exponent `p` is the fitted elasticity: a 1% increase in rounds corresponds
+to an estimated `p`% increase in `y` within the sampled range.
+
+| Agent group   | Total-token exponent `p` | Cost exponent `p` |
+| ------------- | -----------------------: | ----------------: |
+| Tura Balanced |                    1.498 |             0.981 |
+| Tura Direct   |                    1.444 |             0.856 |
+| Codex CLI     |                    1.152 |             0.910 |
+
+![Token and cost scaling](../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png)
+
+Across the observed range, total token volume is therefore superlinear but
+subquadratic, while billed cost is approximately linear or mildly sublinear.
+The mechanism is consistent with the pricing identity and the data: cached
+input represents 94.2% of Balanced input, 90.7% of Direct input, and 96.2% of
+Codex input, and its share is higher among the longer-run half of every group.
+Additional context tokens are increasingly likely to be discounted cache hits.
+
+The power law is used here as a compact elasticity summary, not as a universal
+long-run law. The competing two-parameter context-growth model,
+
+`T(n) = nB + c n(n + 1) / 2`,
+
+has similar leave-one-task-out error and is retained by the predeclared 5%
+tolerance rule for all three groups. The data support “observed superlinear,
+subquadratic growth”; they do not distinguish a permanent power law from a
+quadratic process whose linear term remains material in the sampled range.
+
+The figures, SVG sources, fitted summaries, and exact pricing assumptions are
+published under
+[`assets/model-run-statistics`](../assets/model-run-statistics/), with the five
+claim-specific outputs under
+[`claim-charts`](../assets/model-run-statistics/claim-charts/).
+
+## 13. Limitations
 
 - The DeepSWE subset is deterministic and stratified, not a random sample of
   all software work.
@@ -409,6 +564,10 @@ formal non-inferiority margin was predeclared.
 - Compact-context and feature-level effects have not been ablated.
 - Token totals measure observed provider usage, not a universal dollar cost;
   cache pricing and provider policy can change.
+- The cross-run fits in Section 12 use an explicitly filtered 267-run
+  sensitivity sample. They pool heterogeneous tasks and configurations, so
+  fitted slopes and success curves are associations rather than causal response
+  functions.
 - The design sample has only two tasks and two replicates, no blinded reviewers,
   and no validated scalar quality rubric.
 - A direct URL is not by itself proof of content relevance, and a successful
@@ -418,7 +577,7 @@ formal non-inferiority margin was predeclared.
 - A verifier can be imperfect. Passing the current harness proves conformance
   to that harness, not maintainability, security, or upstream acceptance.
 
-## 13. Next experiments
+## 14. Next experiments
 
 1. Run the crossed Tura/Codex x Medium/High effort matrix with identical task,
    timeout, service-tier, and concurrency policies.
@@ -438,7 +597,7 @@ formal non-inferiority margin was predeclared.
 8. Retain browser captures for every design agent so visual claims can be
    reviewed symmetrically after publication.
 
-## 14. Repository and article citations
+## 15. Repository and article citations
 
 | Source                                                                                                                                         | Role in this report                                                                   |
 | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -450,6 +609,8 @@ formal non-inferiority margin was predeclared.
 | [DeepSWE replicate 2](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r02/manifest.json)      | Canonical 60-session manifest for replicate 2                                         |
 | [DeepSWE replicate 3](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r03/manifest.json)      | Canonical 60-session manifest for replicate 3                                         |
 | [Rewrite canonical manifest](https://github.com/Tura-AI/benchmark/blob/main/results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json) | Canonical 30-session rewrite scores, token totals, and computed costs                 |
+| [Filtered run-level relationship data](../assets/model-run-statistics/run-level-data.csv)                                                      | 267-run explanatory sample used for Section 12                                        |
+| [Claim-chart fitted summary](../assets/model-run-statistics/claim-charts/claim-chart-summary.json)                                             | Recomputed coordinates, composition shares, saturation gains, and scaling exponents   |
 
 The agent repository and public article state the hypothesis and summarize the
 result. The benchmark repository and manifests are the evidence sources used
@@ -473,3 +634,11 @@ verification evidence.
 The evidence is not sufficient to assign those gains to one feature or to call
 the effort settings controlled. Those are limitations to test next, not reasons
 to dilute the results that are already directly reproducible.
+
+The filtered cross-run sensitivity analysis adds five descriptive observations:
+round count alone is not an efficiency score; Balanced lies on the observed
+cost-success frontier; Tura allocates a larger token and dollar share to output
+than Codex; fitted success gains diminish with additional rounds; and discounted
+cache reuse separates superlinear token growth from near-linear billed cost.
+These observations sharpen the system-level result without turning correlation
+into a feature-level causal claim.
