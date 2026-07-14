@@ -420,7 +420,7 @@ rounds and reached 79.0%. A round count alone therefore does not order systems
 by efficiency. It measures process length; an efficiency comparison also needs
 an outcome and at least one resource measure.
 
-![Round count is not an efficiency score](../assets/model-run-statistics/claim-charts/04-round-count-is-not-efficiency.png)
+<img src="../assets/model-run-statistics/claim-charts/04-round-count-is-not-efficiency.png" alt="Round count is not an efficiency score" width="800">
 
 No arbitrary scalar efficiency score is imposed here. A system may use fewer
 rounds because it batches work effectively, because it stops early, or because
@@ -444,7 +444,7 @@ at least one strict inequality. Balanced therefore dominates Codex in this
 sample. Direct and Balanced form the two meaningful frontier endpoints: Direct
 is cheaper, while Balanced buys a higher observed success rate.
 
-![Observed cost-success frontier](../assets/model-run-statistics/claim-charts/05-cost-success-frontier.png)
+<img src="../assets/model-run-statistics/claim-charts/05-cost-success-frontier.png" alt="Observed cost-success frontier" width="800">
 
 Calling Balanced the strongest “compromise” is a decision interpretation, not
 a universal optimum. A user who values minimum spend above the observed success
@@ -462,7 +462,7 @@ identity:
 where `U` is uncached input, `K` is cached input, and `O` is output. Reasoning
 tokens are already included in output tokens and are not charged twice.
 
-![Token volume and cost composition](../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png)
+<img src="../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png" alt="Token volume and cost composition" width="800">
 
 Output is a small share of token count for all three groups, but the Tura shares
 are materially higher than Codex's:
@@ -499,7 +499,7 @@ fit shows the expected declining marginal association:
 | Tura Direct   |                  +16.3 pp |                   +5.3 pp |
 | Codex CLI     |                  +15.5 pp |                   +8.2 pp |
 
-![Success saturation by agent group](../assets/model-run-statistics/claim-charts/07-success-saturation.png)
+<img src="../assets/model-run-statistics/claim-charts/07-success-saturation.png" alt="Success saturation by agent group" width="800">
 
 The defensible conclusion is diminishing fitted association, not a universal
 critical round. Task difficulty, stopping behavior, timeouts, and agent policy
@@ -523,7 +523,7 @@ to an estimated `p`% increase in `y` within the sampled range.
 | Tura Direct   |                    1.444 |             0.856 |
 | Codex CLI     |                    1.152 |             0.910 |
 
-![Token and cost scaling](../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png)
+<img src="../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png" alt="Token and cost scaling" width="800">
 
 Across the observed range, total token volume is therefore superlinear but
 subquadratic, while billed cost is approximately linear or mildly sublinear.
