@@ -96,11 +96,28 @@ This command checks local executables and the Docker daemon only. It does not
 verify provider credentials, pull images, launch agents, or consume provider
 quota.
 
+### Rebuild the official mini-swe-agent sample
+
+The repository publishes a summary-only normalization of the first three tasks
+in the Tura DeepSWE inventory for official GPT-5.6 SOL Medium and High
+`mini-swe-agent` trials. Rebuild the eight reports and 24 runs from the current
+official trial index with:
+
+```sh
+npm run import:deep-swe:official:first3
+```
+
+The import records the source SHA-256 and keeps every official trial row beside
+its normalized contracts. See the
+[official mini-swe-agent import record](doc/official-deepswe-mini-swe-agent-import.md)
+for selection, replicate, and missing-artifact rules.
+
 ## Documentation
 
 - [Architecture and repository contracts](doc/architecture.md)
 - [Benchmark methodology](doc/benchmark-methodology.md)
 - [Current test-set evidence record](doc/current-test-set-record.md)
+- [Official DeepSWE mini-swe-agent import](doc/official-deepswe-mini-swe-agent-import.md)
 - [Debug workspace recovery](doc/debug-workspace-recovery.md)
 
 Published, reproducible artifacts live under `results/`. Local logs, caches,

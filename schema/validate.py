@@ -106,6 +106,8 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
         "DeepSWE harness contracts": ("task-harness.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-*/*/harness.json"),
         "DeepSWE batch manifests": ("deepswe-official-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-high-r*/manifest.json"),
         "DeepSWE medium batch manifests": ("deepswe-official-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-medium-r*/manifest.json"),
+        "DeepSWE official subset manifests": ("deepswe-official-subset.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-mini-swe-agent-*-r*/manifest.json"),
+        "DeepSWE official subset audits": ("deepswe-official-subset-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-mini-swe-agent-*-audit.json"),
         "DeepSWE local batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-local-r*/manifest.json"),
         "DeepSWE import audits": ("deepswe-import-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-import-audit.json"),
         "DeepSWE local audits": ("deepswe-local-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-local-audit.json"),
