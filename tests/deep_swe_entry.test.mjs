@@ -101,6 +101,10 @@ test("DeepSWE runner uses an exact 5-task x 3-replicate batch barrier", () => {
     "utf8",
   );
   assert.match(runner, /taskBatchSize \* variants\.length/);
+  assert.match(
+    runner,
+    /import \{ spawn, spawnSync \} from "node:child_process"/,
+  );
   assert.match(runner, /await runAgentBatches\(\)/);
   assert.match(runner, /await runQueue\(pending, concurrency, runAgentJob\)/);
   assert.match(
