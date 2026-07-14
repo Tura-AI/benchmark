@@ -197,6 +197,60 @@ the TanStack rebuild; Balanced scored highest or tied highest on all four CLI
 ports. These are results for the named High-versus-Medium configurations, not
 an isolated measurement of runtime architecture or reasoning effort.
 
+### 6.1 Submitted code lines and harness success
+
+Submitted source size is measured from each canonical run's final production
+source, not from the reference repository or the byte size of a Git patch. For
+the four Python CLI ports, the count includes submitted production Python files
+and excludes the harness, tests, `.tura`, `rust-reference`, and files whose names
+identify test, verification, or differential helpers. For the TanStack task,
+the count uses the evaluator's archived `source_lines` metric over `src`, `app`,
+and `routes`, plus the supported package and application configuration files.
+
+For run $i$, the plotted outcome is
+
+$$
+S_i = \frac{\mathrm{passed}_i}{\mathrm{checks}_i}.
+$$
+
+<p align="center">
+  <img src="../assets/rewrite-code-statistics/09-rewrite-submitted-lines-vs-success.png" alt="Submitted source lines and harness success for five rewrite tasks" width="800">
+</p>
+
+The figure covers 24 of the 30 canonical runs. Six Codex CLI runs—two each for
+Nushell, `xsv`, and `zip-password-finder`—retain their file-change paths and
+harness outcomes but not the bodies of their final untracked source files. The
+published recovery notes explicitly mark those workspaces as incomplete. They
+are excluded from source-line analysis rather than assigned zero lines.
+
+The four tasks with non-constant observed success have positive sample rank
+associations; the ZIP-finder observations all passed 100%, so its correlation is
+undefined. These are descriptive samples of only four to six runs per task, and
+source size is entangled with agent and implementation strategy. The figure does
+not isolate a causal effect of writing more code on harness success.
+
+### 6.2 Submitted code lines and harness item count
+
+Harness item count is fixed by the task contract, so drawing the same count once
+per agent and replicate would add duplicate points without adding information.
+The task-level comparison instead plots the median submitted source lines and
+the observed range across all runs whose submitted source is recoverable:
+
+$$
+\widetilde{L}_t = \operatorname{median}\{L_i : i \in t,\ L_i\ \mathrm{observed}\}.
+$$
+
+<p align="center">
+  <img src="../assets/rewrite-code-statistics/10-rewrite-submitted-lines-vs-harness-items.png" alt="Median submitted source lines and stable harness item count for five rewrite tasks" width="800">
+</p>
+
+Across the five tasks, the sample Spearman rank association is 0.30. With only
+five task points, this is descriptive rather than inferential and should not be
+read as a productivity curve. Harness counts reflect how each behavior contract
+was decomposed into stable assertions; they are not a code-volume target. A
+compact task can have many behavioral checks, and a larger implementation can be
+evaluated by fewer, broader checks.
+
 ## 7. Anomalies and severe long tails were retained
 
 The totals include behavior that makes Tura look worse. This is deliberate.
@@ -432,7 +486,9 @@ probability curve: fitted gains decline as $n$ increases.
 | Tura Direct   |          1.644 |      9.25–17.75 |                     69.3%→85.9% |        +16.6 pp |
 | Codex CLI     |          0.989 |     29.25–60.75 |                     72.9%→84.5% |        +11.6 pp |
 
-<img src="../assets/model-run-statistics/claim-charts/04-round-count-vs-success.png" alt="Run-level round count and success association with fitted curves" width="800">
+<p align="center">
+  <img src="../assets/model-run-statistics/claim-charts/04-round-count-vs-success.png" alt="Run-level round count and success association with fitted curves" width="800">
+</p>
 
 This does not make round count an efficiency score. Codex averaged 46.9 rounds
 and Direct averaged 14.6, yet their aggregate weighted success rates were nearly
@@ -477,7 +533,9 @@ $$
 | Tura Direct   |          2.322 | \$1.09–\$1.94 |                     67.7%→82.2% |        +14.5 pp |
 | Codex CLI     |          1.289 | \$2.68–\$4.82 |                     69.8%→80.7% |        +10.8 pp |
 
-<img src="../assets/model-run-statistics/claim-charts/05-cost-vs-success.png" alt="Run-level API cost and success association with fitted curves" width="800">
+<p align="center">
+  <img src="../assets/model-run-statistics/claim-charts/05-cost-vs-success.png" alt="Run-level API cost and success association with fitted curves" width="800">
+</p>
 
 Calling Balanced the strongest “compromise” is a decision interpretation, not
 a universal optimum. A user who values minimum spend above the observed success
@@ -497,7 +555,9 @@ $$
 where $U$ is uncached input, $K$ is cached input, and $O$ is output. Reasoning
 tokens are already included in output tokens and are not charged twice.
 
-<img src="../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png" alt="Token volume and cost composition" width="800">
+<p align="center">
+  <img src="../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png" alt="Token volume and cost composition" width="800">
+</p>
 
 Output is a small share of token count for all three groups, but the Tura shares
 are materially higher than Codex's:
@@ -534,7 +594,9 @@ its passed and total harness-check counts.
 | Tura Balanced |          1.133 |         113–177.5 |                     78.0%→85.5% |         +7.5 pp |
 | Tura Direct   |          1.032 |       39.25–84.75 |                     72.3%→85.1% |        +12.8 pp |
 
-<img src="../assets/model-run-statistics/claim-charts/07-command-count-vs-success.png" alt="Tura-only run-level command count and success association with fitted curves" width="800">
+<p align="center">
+  <img src="../assets/model-run-statistics/claim-charts/07-command-count-vs-success.png" alt="Tura-only run-level command count and success association with fitted curves" width="800">
+</p>
 
 Codex is deliberately excluded from this command-count inference. A single
 Codex shell/tool call can contain multiple shell commands, while Tura's
@@ -566,7 +628,9 @@ to an estimated $p$% increase in $y$ within the sampled range.
 | Tura Direct   |                    1.444 |             0.856 |
 | Codex CLI     |                    1.152 |             0.910 |
 
-<img src="../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png" alt="Token and cost scaling" width="800">
+<p align="center">
+  <img src="../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png" alt="Token and cost scaling" width="800">
+</p>
 
 Across the observed range, total token volume is therefore superlinear but
 subquadratic, while billed cost is approximately linear or mildly sublinear.
