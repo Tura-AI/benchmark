@@ -39,6 +39,7 @@ MUTED = "#474747"
 GRID = "#dedbd2"
 ACCENT = "#40e0d0"
 PRICE_PER_MILLION = {"uncached_input": 5.0, "cached_input": 0.5, "output": 30.0}
+BALANCED_MAX_ROUNDS = 90
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,28 @@ class RunRecord:
     reported_total_tokens: int | None
     reported_cost_usd: float | None
     source_path: str
+
+
+def exclusion_reason(record: RunRecord) -> str | None:
+    if not record.usage_available and record.total_tokens == 0:
+        return "usage-unavailable-zero-token-not-executed"
+    if record.agent_group == "tura-balanced" and record.rounds > BALANCED_MAX_ROUNDS:
+        return "balanced-sparse-tail-over-90-rounds"
+    return None
+
+
+def select_analysis_records(
+    records: Sequence[RunRecord],
+) -> tuple[list[RunRecord], list[tuple[RunRecord, str]]]:
+    included: list[RunRecord] = []
+    excluded: list[tuple[RunRecord, str]] = []
+    for record in records:
+        reason = exclusion_reason(record)
+        if reason:
+            excluded.append((record, reason))
+        else:
+            included.append(record)
+    return included, excluded
 
 
 def parse_args() -> argparse.Namespace:
@@ -458,6 +481,44 @@ def audit_runs(records: Sequence[RunRecord]) -> dict:
     }
 
 
+def summarize_analysis_sample(
+    records: Sequence[RunRecord], excluded: Sequence[tuple[RunRecord, str]]
+) -> dict:
+    return {
+        "run_count": len(records),
+        "task_count": len({record.task for record in records}),
+        "passed": sum(record.passed for record in records),
+        "checks": sum(record.checks for record in records),
+        "total_tokens": sum(record.total_tokens for record in records),
+        "excluded_run_count": len(excluded),
+        "excluded_runs": [
+            {
+                "run_id": record.run_id,
+                "agent_group": record.agent_group,
+                "rounds": record.rounds,
+                "total_tokens": record.total_tokens,
+                "reason": reason,
+            }
+            for record, reason in excluded
+        ],
+        "coverage": {
+            group: {
+                "runs": sum(record.agent_group == group for record in records),
+                "tasks": len(
+                    {record.task for record in records if record.agent_group == group}
+                ),
+                "min_rounds": min(
+                    record.rounds for record in records if record.agent_group == group
+                ),
+                "max_rounds": max(
+                    record.rounds for record in records if record.agent_group == group
+                ),
+            }
+            for group in AGENT_ORDER
+        },
+    }
+
+
 def theory_predict(params: Sequence[float], rounds: np.ndarray) -> np.ndarray:
     base, growth = params
     return base * rounds + growth * rounds * (rounds + 1.0) / 2.0
@@ -707,7 +768,7 @@ def plot_tokens(
     records: Sequence[RunRecord], diagnostics: dict[str, dict], output_dir: Path
 ) -> None:
     figure, axis = start_figure(
-        "269 usage-complete sessions · 25 tasks",
+        f"{len(records)} filtered sessions · {len({record.task for record in records})} tasks",
         "Round count vs. total token use",
         "Each point is one run; each agent group pools every task and model configuration.",
     )
@@ -745,7 +806,7 @@ def plot_tokens(
     figure.text(
         0.11,
         0.055,
-        "FIT · Lines use leave-one-task-out selection · 1 run with unavailable usage is excluded · points jittered < 0.6 round.",
+        "FIT · Lines use leave-one-task-out selection · 3 documented anomalies excluded · points jittered < 0.6 round.",
         color=MUTED,
         fontsize=9,
     )
@@ -756,7 +817,7 @@ def plot_success(
     records: Sequence[RunRecord], diagnostics: dict[str, dict], output_dir: Path
 ) -> None:
     figure, axis = start_figure(
-        "Harness outcome · weighted by checks",
+        f"{len(records)} filtered sessions · harness outcome weighted by checks",
         "Round count vs. success rate",
         "Points show run-level pass ratios; lines estimate association, not causal benefit from longer runs.",
     )
@@ -797,7 +858,7 @@ def plot_success(
 
 def plot_cost(records: Sequence[RunRecord], diagnostics: dict[str, dict], output_dir: Path) -> None:
     figure, axis = start_figure(
-        "Standard-tier API estimate",
+        f"{len(records)} filtered sessions · standard-tier API estimate",
         "Token cost vs. round count",
         "Every run is repriced consistently from uncached input, cached input, and output usage.",
     )
@@ -831,7 +892,7 @@ def plot_cost(records: Sequence[RunRecord], diagnostics: dict[str, dict], output
     figure.text(
         0.11,
         0.055,
-        "PRICE · $5.00 / 1M uncached input · $0.50 / 1M cached input · $30.00 / 1M output · N=269 · Power-law trend.",
+        f"PRICE · $5.00 / 1M uncached input · $0.50 / 1M cached input · $30.00 / 1M output · N={len(records)} · Power-law trend.",
         color=MUTED,
         fontsize=9,
     )
@@ -848,15 +909,29 @@ def write_csv(records: Sequence[RunRecord], output_dir: Path) -> None:
             writer.writerow(asdict(record))
 
 
+def write_excluded_csv(
+    excluded: Sequence[tuple[RunRecord, str]], output_dir: Path
+) -> None:
+    path = output_dir / "excluded-runs.csv"
+    fieldnames = ["exclusion_reason", *asdict(excluded[0][0]).keys()]
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record, reason in excluded:
+            writer.writerow({"exclusion_reason": reason, **asdict(record)})
+
+
 def write_report(
     audit: dict,
+    analysis_sample: dict,
     token_models: dict[str, dict],
     success_models: dict[str, dict],
     cost_models: dict[str, dict],
     output_dir: Path,
 ) -> None:
     diagnostics = {
-        "audit": audit,
+        "source_audit": audit,
+        "analysis_sample": analysis_sample,
         "pricing_usd_per_1m_tokens": PRICE_PER_MILLION,
         "token_models": token_models,
         "success_models": success_models,
@@ -895,11 +970,13 @@ def write_report(
         "## Scope and grain",
         "",
         "- Source: run contracts under `results/debug` and `results/rewrite`.",
-        f"- Grain: one row per run; {audit['run_count']} runs across {audit['task_count']} tasks.",
+        f"- Source grain: {audit['run_count']} runs across {audit['task_count']} tasks.",
+        f"- Analysis grain after explicit exclusions: {analysis_sample['run_count']} runs across {analysis_sample['task_count']} tasks.",
+        "- Exclusions: 2 Tura Balanced sparse-tail runs above 90 rounds (113 and 242), plus 1 zero-token usage-unavailable run that did not execute.",
         "- Grouping: all tasks, model versions, and effort configurations are pooled into one series per agent group.",
         "- Rounds: reconstructed from each run's contiguous `agent-rounds.jsonl` indexes.",
         "- Usage: read from the run-level aggregate contract and, where the historical schema populated usage, independently checked against summed provider-round usage.",
-        f"- Usage-complete runs: {audit['usage_available_runs']}; usage-unavailable runs: {audit['usage_unavailable_runs']} (retained in success analysis, excluded from token/cost fits).",
+        f"- Source usage-complete runs: {audit['usage_available_runs']}; usage-unavailable runs: {audit['usage_unavailable_runs']}.",
         f"- Aggregate-only historical usage: {audit['aggregate_only_usage_runs']} runs; their round contracts contain null usage fields.",
         "- Success: `sum(passed) / sum(checks)` for weighted summaries; points retain run-level ratios.",
         "- Cost: `(uncached input*5 + cached input*0.5 + output*30) / 1,000,000` USD.",
@@ -934,22 +1011,39 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     records = load_runs(args.results.resolve())
     audit = audit_runs(records)
-    token_models = fit_token_models(records)
-    success_models = fit_success_models(records)
-    cost_models = fit_cost_models(records)
+    analysis_records, excluded = select_analysis_records(records)
+    analysis_sample = summarize_analysis_sample(analysis_records, excluded)
+    if len(analysis_records) != 267 or len(excluded) != 3:
+        raise ValueError(
+            f"Expected 267 included and 3 excluded runs, found "
+            f"{len(analysis_records)} and {len(excluded)}"
+        )
+    token_models = fit_token_models(analysis_records)
+    success_models = fit_success_models(analysis_records)
+    cost_models = fit_cost_models(analysis_records)
     font_path = extract_archivo(args.reference_svg, output_dir)
     configure_style(font_path, output_dir)
-    write_csv(records, output_dir)
-    write_report(audit, token_models, success_models, cost_models, output_dir)
-    plot_tokens(records, token_models, output_dir)
-    plot_success(records, success_models, output_dir)
-    plot_cost(records, cost_models, output_dir)
+    write_csv(analysis_records, output_dir)
+    write_excluded_csv(excluded, output_dir)
+    write_report(
+        audit,
+        analysis_sample,
+        token_models,
+        success_models,
+        cost_models,
+        output_dir,
+    )
+    plot_tokens(analysis_records, token_models, output_dir)
+    plot_success(analysis_records, success_models, output_dir)
+    plot_cost(analysis_records, cost_models, output_dir)
     print(
         json.dumps(
             {
                 "output": str(output_dir),
-                "runs": audit["run_count"],
-                "tasks": audit["task_count"],
+                "source_runs": audit["run_count"],
+                "analysis_runs": analysis_sample["run_count"],
+                "excluded_runs": analysis_sample["excluded_run_count"],
+                "tasks": analysis_sample["task_count"],
                 "selected_token_models": {
                     group: token_models[group]["selected_model"] for group in AGENT_ORDER
                 },

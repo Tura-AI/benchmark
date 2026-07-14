@@ -3,11 +3,13 @@
 ## Scope and grain
 
 - Source: run contracts under `results/debug` and `results/rewrite`.
-- Grain: one row per run; 270 runs across 25 tasks.
+- Source grain: 270 runs across 25 tasks.
+- Analysis grain after explicit exclusions: 267 runs across 25 tasks.
+- Exclusions: 2 Tura Balanced sparse-tail runs above 90 rounds (113 and 242), plus 1 zero-token usage-unavailable run that did not execute.
 - Grouping: all tasks, model versions, and effort configurations are pooled into one series per agent group.
 - Rounds: reconstructed from each run's contiguous `agent-rounds.jsonl` indexes.
 - Usage: read from the run-level aggregate contract and, where the historical schema populated usage, independently checked against summed provider-round usage.
-- Usage-complete runs: 269; usage-unavailable runs: 1 (retained in success analysis, excluded from token/cost fits).
+- Source usage-complete runs: 269; usage-unavailable runs: 1.
 - Aggregate-only historical usage: 20 runs; their round contracts contain null usage fields.
 - Success: `sum(passed) / sum(checks)` for weighted summaries; points retain run-level ratios.
 - Cost: `(uncached input*5 + cached input*0.5 + output*30) / 1,000,000` USD.
@@ -18,11 +20,11 @@ The supplied formula is interpreted as `T(n) = nB + c*n*(n+1)/2`. Both candidate
 
 | Agent group | Quadratic CV RMSLE | Power CV RMSLE | Selected | Power-law estimate |
 |---|---:|---:|---|---|
-| Tura Balanced | 0.235 | 0.194 | power-law | T(n) = 25999 n^1.399 |
+| Tura Balanced | 0.185 | 0.179 | quadratic-context | T(n) = 19055 n^1.498 |
 | Tura Direct | 0.229 | 0.235 | quadratic-context | T(n) = 19884 n^1.444 |
 | Codex CLI | 0.175 | 0.185 | quadratic-context | T(n) = 60413 n^1.152 |
 
-**Conclusion:** Quadratic-context form retained for: Tura Direct, Codex CLI. Power-law alternative preferred for: Tura Balanced.
+**Conclusion:** Quadratic-context form retained for: Tura Balanced, Tura Direct, Codex CLI. Power-law alternative preferred for: none.
 
 The result is an empirical cross-task relationship, not a claim that extra rounds cause success or token growth identically for every task. Task difficulty and model configuration remain visible as run-level scatter.
 
