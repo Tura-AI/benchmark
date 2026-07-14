@@ -1308,6 +1308,162 @@ test("codex rollout token_count records become per-llm-round contracts", () => {
   });
 });
 
+test("current Codex custom tool rollouts retain messages, commands, and outputs", () => {
+  const runRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "tura-benchmark-codex-custom-rollout-"),
+  );
+  const rolloutPath = path.join(runRoot, "rollout.jsonl");
+  const tokenCount = (timestamp, totalTokens) => ({
+    timestamp,
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        last_token_usage: {
+          input_tokens: totalTokens - 2,
+          output_tokens: 2,
+          total_tokens: totalTokens,
+        },
+        total_token_usage: { total_tokens: totalTokens },
+      },
+    },
+  });
+  const records = [
+    {
+      timestamp: "2026-07-14T17:00:00.000Z",
+      type: "event_msg",
+      payload: {
+        type: "agent_message",
+        message: "I will inspect the workspace.",
+        phase: "commentary",
+      },
+    },
+    {
+      timestamp: "2026-07-14T17:00:00.100Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "msg-1",
+        role: "assistant",
+        content: [
+          { type: "output_text", text: "I will inspect the workspace." },
+        ],
+      },
+    },
+    {
+      timestamp: "2026-07-14T17:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        id: "ctc-1",
+        call_id: "call-exec-1",
+        name: "exec",
+        status: "completed",
+        input:
+          'const r = await tools.shell_command({command:"rg foo"}); text(r);',
+      },
+    },
+    {
+      timestamp: "2026-07-14T17:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call_output",
+        call_id: "call-exec-1",
+        output: [
+          { type: "input_text", text: "Script completed" },
+          { type: "input_text", text: "Exit code: 0\nOutput:\nfoo.js" },
+        ],
+      },
+    },
+    tokenCount("2026-07-14T17:00:03.000Z", 12),
+    {
+      timestamp: "2026-07-14T17:00:04.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        call_id: "call-wait-1",
+        name: "wait",
+        arguments: JSON.stringify({ cell_id: "1" }),
+      },
+    },
+    {
+      timestamp: "2026-07-14T17:00:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-wait-1",
+        output: "Script completed\nExit code: 0\nOutput:\ndone",
+      },
+    },
+    tokenCount("2026-07-14T17:00:06.000Z", 14),
+  ];
+  fs.writeFileSync(
+    rolloutPath,
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+    "utf8",
+  );
+
+  const summary = normalizeBusinessSummary(
+    {
+      ok: true,
+      model: "gpt-5.6-sol",
+      reasoning: "high",
+      results: [
+        {
+          agent: "codex-cli",
+          task: "task",
+          context_archive: { codex_rollout_paths: [rolloutPath] },
+        },
+      ],
+    },
+    {
+      test_name: "codex-custom-rollout-contract",
+      run_id: "run-codex-custom-rollout",
+      user_workspace: runRoot,
+      target_root: runRoot,
+      run_root: runRoot,
+      summary_path: path.join(runRoot, "summary.json"),
+    },
+  );
+  const taskReport = JSON.parse(
+    fs.readFileSync(summary.benchmark_contracts.task_report_path, "utf8"),
+  );
+  const webRun = JSON.parse(
+    fs.readFileSync(summary.benchmark_contracts.web_run_path, "utf8"),
+  );
+
+  assert.equal(taskReport.rounds.length, 2);
+  assert.deepEqual(
+    taskReport.rounds[0].messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => message.text),
+    ["I will inspect the workspace."],
+  );
+  assert.deepEqual(
+    webRun.rounds.map((round) => [
+      round.commands[0]?.id,
+      round.commands[0]?.type,
+      round.commands[0]?.status,
+      round.commands[0]?.stdout,
+    ]),
+    [
+      [
+        "call-exec-1",
+        "exec",
+        "completed",
+        "Script completed\nExit code: 0\nOutput:\nfoo.js",
+      ],
+      [
+        "call-wait-1",
+        "wait",
+        "completed",
+        "Script completed\nExit code: 0\nOutput:\ndone",
+      ],
+    ],
+  );
+  assert.match(webRun.rounds[0].commands[0].commandLine, /shell_command/);
+});
+
 test("pi and opencode stdout tool events become unified web commands", () => {
   const runRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "tura-benchmark-tools-"),

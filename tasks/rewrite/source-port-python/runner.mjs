@@ -3521,6 +3521,81 @@ function assertAllLlmTurnsPublished(summary, results) {
     expected,
     `published ${taskReport.rounds.length} rounds for ${expected} observed LLM turns`,
   );
+  assertCodexRolloutContentPublished(taskReport, results);
+}
+
+function assertCodexRolloutContentPublished(taskReport, results) {
+  const expectedMessages = new Set();
+  const expectedToolCallIds = new Set();
+  for (const result of results) {
+    if (result?.agent !== "codex-cli") continue;
+    for (const rolloutPath of result?.context_archive?.codex_rollout_paths ||
+      []) {
+      if (!rolloutPath || !fs.existsSync(rolloutPath)) continue;
+      for (const record of parseJsonl(fs.readFileSync(rolloutPath, "utf8"))) {
+        const payload = record?.payload;
+        if (record?.type === "event_msg" && payload?.type === "agent_message") {
+          const text = String(payload.message || "").trim();
+          if (text) expectedMessages.add(text);
+        }
+        if (
+          record?.type === "response_item" &&
+          payload?.type === "message" &&
+          payload?.role === "assistant"
+        ) {
+          const text = rolloutMessageText(payload.content).trim();
+          if (text) expectedMessages.add(text);
+        }
+        if (
+          record?.type === "response_item" &&
+          ["function_call", "custom_tool_call"].includes(payload?.type)
+        ) {
+          const id = String(payload.call_id || payload.id || "").trim();
+          if (id) expectedToolCallIds.add(id);
+        }
+      }
+    }
+  }
+  if (expectedMessages.size === 0 && expectedToolCallIds.size === 0) return;
+
+  const publishedMessages = new Set();
+  const publishedToolCallIds = new Set();
+  for (const round of taskReport.rounds || []) {
+    for (const message of round?.messages || []) {
+      if (message?.role !== "assistant") continue;
+      const text = String(message.text || "").trim();
+      if (text) publishedMessages.add(text);
+    }
+    for (const toolCall of round?.toolCalls || []) {
+      for (const id of [toolCall?.id, toolCall?.parentToolCallId]) {
+        const text = String(id || "").trim();
+        if (text) publishedToolCallIds.add(text);
+      }
+    }
+  }
+  for (const message of expectedMessages)
+    assert(
+      publishedMessages.has(message),
+      `Codex assistant message was present in rollout but absent from published rounds: ${message.slice(0, 120)}`,
+    );
+  for (const callId of expectedToolCallIds)
+    assert(
+      publishedToolCallIds.has(callId),
+      `Codex tool call was present in rollout but absent from published rounds: ${callId}`,
+    );
+}
+
+function rolloutMessageText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((item) =>
+      typeof item === "string"
+        ? item
+        : String(item?.text || item?.content || item?.output_text || ""),
+    )
+    .filter(Boolean)
+    .join("\n");
 }
 
 function resultPassed(result) {
