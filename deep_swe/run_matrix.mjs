@@ -207,6 +207,7 @@ if (oldManifest?.jobs) {
     }
     if (repairCodexDockerRoutingFalseNegative(job)) continue;
     if (repairContractValidTimeout(job)) continue;
+    if (repairRecoverableCodexCapacityExit(job)) continue;
     const summaryPath = agentSummaryPath(job);
     const patchPath = path.join(agentDirectory(job), "model.patch");
     if (
@@ -1056,6 +1057,80 @@ function repairContractValidTimeout(job) {
   job.repaired_validation =
     "contract-valid timeout retained for official harness grading";
   return true;
+}
+
+function repairRecoverableCodexCapacityExit(job) {
+  if (job.agent !== "codex-cli" || job.state !== "failed") return false;
+  const agentDir = agentDirectory(job);
+  const summaryPath = agentSummaryPath(job);
+  const schemePath = path.join(agentDir, "scheme-validation.json");
+  const stdoutPath = path.join(agentDir, "stdout.jsonl");
+  if (
+    ![summaryPath, schemePath, stdoutPath].every((item) => fs.existsSync(item))
+  )
+    return false;
+  const summary = readJson(summaryPath, null);
+  const scheme = readJson(schemePath, null);
+  const patchPath = summary?.patch?.patch_path;
+  if (
+    Number(summary?.exit_code) !== 1 ||
+    summary?.timed_out ||
+    !scheme?.ok ||
+    !summary?.round_contract_validation?.ok ||
+    !patchPath ||
+    !fs.existsSync(patchPath) ||
+    fs.statSync(patchPath).size === 0
+  )
+    return false;
+  const stdoutRecords = parseJsonl(stdoutPath);
+  const failedTurn = stdoutRecords.find(
+    (event) =>
+      event?.type === "turn.failed" &&
+      /selected model is at capacity/i.test(
+        String(event?.error?.message || ""),
+      ),
+  );
+  const capacityError = stdoutRecords.find(
+    (event) =>
+      event?.type === "error" &&
+      /selected model is at capacity/i.test(String(event?.message || "")),
+  );
+  if (!failedTurn || !capacityError) return false;
+  const rolloutRecords = listJsonlFiles(
+    path.join(agentDir, "codex-home", "sessions"),
+  ).flatMap(parseJsonl);
+  const taskComplete = rolloutRecords.some(
+    (event) =>
+      event?.type === "event_msg" && event?.payload?.type === "task_complete",
+  );
+  const agentMessage = rolloutRecords.some(
+    (event) =>
+      (event?.type === "event_msg" &&
+        event?.payload?.type === "agent_message") ||
+      (event?.type === "response_item" &&
+        event?.payload?.type === "message" &&
+        event?.payload?.role === "assistant"),
+  );
+  if (!taskComplete || !agentMessage) return false;
+  job.state = "completed";
+  job.phase = "completed";
+  job.scheme_ok = true;
+  job.docker_routing_ok = true;
+  job.observed_exit_code = Number(summary.exit_code);
+  job.repaired_validation =
+    "accepted contract-valid Codex task_complete whose terminal final-message request hit model capacity";
+  return true;
+}
+
+function listJsonlFiles(directory) {
+  if (!fs.existsSync(directory)) return [];
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const item = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...listJsonlFiles(item));
+    else if (entry.isFile() && entry.name.endsWith(".jsonl")) files.push(item);
+  }
+  return files.sort();
 }
 
 function buildPrompt(job, container) {

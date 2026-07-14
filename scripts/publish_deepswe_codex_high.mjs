@@ -7,7 +7,10 @@ import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { costEstimateForUsage } from "../lib/business_paths.mjs";
+import {
+  buildAgentRoundContracts,
+  costEstimateForUsage,
+} from "../lib/business_paths.mjs";
 import { projectPython } from "../lib/python_runtime.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -437,24 +440,20 @@ function publishRun({
     workspaceRecovery,
   );
 
-  const rounds = rawSummary.rounds.map((round, index) => ({
-    ...round,
-    roundIndex: index + 1,
-    metadata: {
-      ...round.metadata,
-      agentId: PUBLIC_AGENT_ID,
-      taskId: task.task_id,
-      model: MODEL,
-      reasoning: EFFORT,
-      serviceTier: "default",
-    },
-  }));
+  const rounds = rebuildRoundContracts({
+    sourceRun,
+    rawSummary,
+    taskId: task.task_id,
+  });
   assert.equal(
     rounds.length,
     Number(job.round_count),
     `${runId} LLM turn count`,
   );
-  const commands = countCodexCommands(path.join(sourceRun, "stdout.jsonl"));
+  const commands = rounds.reduce(
+    (total, round) => total + round.commands.length,
+    0,
+  );
   const usage = normalizeUsage(rawSummary.usage);
   const pricing = costEstimateForUsage(usage, {
     model: MODEL,
@@ -606,6 +605,161 @@ function publishRun({
     },
   });
   return { rounds: rounds.length, commands };
+}
+
+function rebuildRoundContracts({ sourceRun, rawSummary, taskId }) {
+  const rolloutRoot = path.join(
+    sourceRun,
+    "context-and-calls",
+    "codex-rollouts",
+  );
+  const rolloutPaths = fs
+    .readdirSync(rolloutRoot)
+    .filter((name) => name.endsWith(".jsonl"))
+    .sort()
+    .map((name) => path.join(rolloutRoot, name));
+  assert(rolloutPaths.length > 0, `${taskId} has no Codex rollout`);
+  const rebuilt = buildAgentRoundContracts(
+    {
+      agent: "codex-cli",
+      agent_id: PUBLIC_AGENT_ID,
+      stdout_path: path.join(sourceRun, "stdout.jsonl"),
+      context_archive: { codex_rollout_paths: rolloutPaths },
+    },
+    {
+      model: MODEL,
+      reasoning: EFFORT,
+      service_tier: "default",
+      priority_enabled: false,
+      prompt: fs.readFileSync(path.join(sourceRun, "prompt.md"), "utf8"),
+    },
+  );
+  assert.equal(
+    rebuilt.length,
+    rawSummary.rounds.length,
+    `${taskId} rebuilt LLM turn count`,
+  );
+  return rebuilt.map((round, index) => {
+    const messages = Array.isArray(round.messages) ? round.messages : [];
+    const toolCalls = Array.isArray(round.toolCalls) ? round.toolCalls : [];
+    const commands = toolCalls.map(commandFromToolCall);
+    const normalized = {
+      ...round,
+      roundIndex: index + 1,
+      input: {
+        ...(round.input || {}),
+        fullContext: String(round.input?.fullContext || ""),
+        messages: Array.isArray(round.input?.messages)
+          ? round.input.messages
+          : [],
+      },
+      output: {
+        ...(round.output || {}),
+        fullOutput: String(round.output?.fullOutput || ""),
+        assistantMessage: String(round.output?.assistantMessage || ""),
+        messages: Array.isArray(round.output?.messages)
+          ? round.output.messages
+          : [],
+      },
+      messages,
+      commands,
+      toolCalls,
+      usage: round.usage || {
+        inputTokens: null,
+        cacheInputTokens: null,
+        outputTokens: null,
+        reasoningTokens: null,
+        totalTokens: null,
+      },
+      sources: round.sources || {},
+      metadata: {
+        ...(round.metadata || {}),
+        agentId: PUBLIC_AGENT_ID,
+        taskId,
+        model: MODEL,
+        reasoning: EFFORT,
+        serviceTier: "default",
+      },
+    };
+    assertRoundCompleteness(normalized, taskId);
+    return normalized;
+  });
+}
+
+function commandFromToolCall(tool, index) {
+  const args =
+    tool?.arguments && typeof tool.arguments === "object" ? tool.arguments : {};
+  const exitCode = Number.isInteger(args.exit_code) ? args.exit_code : null;
+  const status =
+    typeof args.status === "string" && args.status
+      ? args.status
+      : exitCode === 0
+        ? "completed"
+        : exitCode === null
+          ? "unknown"
+          : "failed";
+  return {
+    id: String(tool?.id || `command-${index + 1}`),
+    toolName: String(tool?.name || tool?.kind || "tool"),
+    type: String(tool?.name || tool?.kind || "tool"),
+    isCommandRun: false,
+    step: index + 1,
+    commandRunStep: null,
+    commandIndex: index,
+    providerToolCallId: tool?.id || null,
+    status,
+    commandLine: String(tool?.commandLine || args.input || ""),
+    preview: String(tool?.commandLine || args.input || "").split(/\r?\n/)[0],
+    exitCode,
+    durationMs: Number.isFinite(tool?.durationMs) ? tool.durationMs : null,
+    durationSeconds: Number.isFinite(tool?.durationMs)
+      ? tool.durationMs / 1000
+      : null,
+    receipt: String(
+      args.receipt || args.aggregated_output || args.stdout || "",
+    ),
+    stdout: String(args.stdout || args.aggregated_output || ""),
+    stderr: String(args.stderr || ""),
+  };
+}
+
+function assertRoundCompleteness(round, taskId) {
+  const label = `${taskId} round ${round.roundIndex}`;
+  assert.equal(
+    round.schema,
+    "tura.benchmark.agent-round.v1",
+    `${label} schema`,
+  );
+  assert(round.roundId, `${label} roundId`);
+  assert(Array.isArray(round.input.messages), `${label} input.messages`);
+  assert(Array.isArray(round.output.messages), `${label} output.messages`);
+  assert(Array.isArray(round.messages), `${label} messages`);
+  assert(Array.isArray(round.commands), `${label} commands`);
+  assert(Array.isArray(round.toolCalls), `${label} toolCalls`);
+  assert.equal(
+    round.commands.length,
+    round.toolCalls.length,
+    `${label} command cardinality`,
+  );
+  assert(round.usage && typeof round.usage === "object", `${label} usage`);
+  assert(
+    round.sources && typeof round.sources === "object",
+    `${label} sources`,
+  );
+  assert(
+    round.metadata && typeof round.metadata === "object",
+    `${label} metadata`,
+  );
+  for (const command of round.commands) {
+    assert(command.id, `${label} command.id`);
+    assert.equal(
+      typeof command.commandLine,
+      "string",
+      `${label} command.commandLine`,
+    );
+    assert.equal(typeof command.stdout, "string", `${label} command.stdout`);
+    assert.equal(typeof command.stderr, "string", `${label} command.stderr`);
+  }
 }
 
 function buildHarnessReport({
@@ -826,19 +980,6 @@ function rewardBreakdown(reward = {}, prefix) {
   const total = Number(reward[`${prefix}_total`] || 0);
   const passed = Number(reward[`${prefix}_passed`] || 0);
   return { passed, failed: Math.max(0, total - passed), total };
-}
-
-function countCodexCommands(file) {
-  return fs
-    .readFileSync(file, "utf8")
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line))
-    .filter(
-      (event) =>
-        event?.type === "item.completed" &&
-        event?.item?.type === "command_execution",
-    ).length;
 }
 
 function validateStaging(stagingRoot) {
