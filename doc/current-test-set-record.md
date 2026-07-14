@@ -117,11 +117,11 @@ The benchmark keeps three evidence layers.
 The official Codex CLI version was modified specifically to obtain each model
 round's command records and detailed metadata. Result metadata therefore reports
 the Codex CLI build as `(local modified)`, not as the corresponding official
-release version. The public `results/` tree retains the
-normalized commands, token usage, timing, source identifiers, and reconstruction
-metadata, but omits the `input` and `output` fields from Codex normalized
-per-round contracts and their embedded copies. Complete run-level input and
-output archives remain retained.
+release version. The public `results/` tree retains each round's complete
+`input` and `output`, normalized commands, timing, source identifiers, and
+reconstruction metadata. It omits only the round-level `inputTokens` and
+`outputTokens` fields from Codex normalized per-round contracts and their
+embedded copies; run-level usage summaries remain retained.
 
 Because the experiment modified the official Codex CLI version, these data may
 differ from data produced by the corresponding official version. This report
