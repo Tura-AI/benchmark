@@ -36,6 +36,14 @@ def load_analysis_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict:
         raise ValueError("Analysis report paths must be unique")
     if len({item["runId"] for item in exclusions}) != len(exclusions):
         raise ValueError("Analysis exclusion run IDs must be unique")
+    code_metric = config.get("codeMetric") or {}
+    if not code_metric.get("sourceExtensions"):
+        raise ValueError("Analysis code metric must declare source extensions")
+    if not code_metric.get("excludedFileNamePattern"):
+        raise ValueError("Analysis code metric must declare an excluded filename pattern")
+    artifacts = config.get("artifacts") or {}
+    if not artifacts.get("claimCharts") or not artifacts.get("harnessCodeCharts"):
+        raise ValueError("Analysis configuration must declare both chart sets")
     return config
 
 

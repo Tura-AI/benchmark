@@ -172,9 +172,11 @@ test("the configured statistical artifact set is complete", () => {
     .sort();
   assert.deepEqual(actualClaimCharts, expectedClaimCharts);
 
-  const documentedCharts = [...`${evidenceRecord}\n${methodology}`.matchAll(
-    /assets\/(?:model-run-statistics\/claim-charts|harness-code-statistics)\/([^"\\)]+)\.png/g,
-  )]
+  const documentedCharts = [
+    ...`${evidenceRecord}\n${methodology}`.matchAll(
+      /assets\/(?:model-run-statistics\/claim-charts|harness-code-statistics)\/([^"\\)]+)\.png/g,
+    ),
+  ]
     .map((match) => match[1])
     .sort();
   assert.deepEqual(
@@ -204,4 +206,26 @@ test("analysis scripts consume configuration instead of embedding the cohort", (
   }
 });
 
-test("package scr
+test("package scripts expose the ordered shared analysis pipeline", () => {
+  const packageJson = readJson("package.json");
+  assert.equal(
+    packageJson.scripts["analysis:reports"],
+    "npm run analysis:model-runs && npm run analysis:claim-charts && npm run analysis:harness-code",
+  );
+  for (const name of [
+    "analysis:model-runs",
+    "analysis:claim-charts",
+    "analysis:harness-code",
+  ]) {
+    assert.match(packageJson.scripts[name], /scripts\/python\.mjs/);
+  }
+});
+
+test("the evidence record uses continuous prose without observation labels", () => {
+  const normalizedProse = evidenceRecord.replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    normalizedProse,
+    /in plain language|full report|main observation|detailed observations/i,
+  );
+  assert.doesNotMatch(evidenceRecord, /^\*\*[^*]+\.\*\*/gm);
+});

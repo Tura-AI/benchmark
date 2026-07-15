@@ -574,8 +574,8 @@ def plot_token_cost_composition(
         token_rows.append(token_share)
         cost_rows.append(cost_share)
 
-    # Four compact rows keep every configuration visible without increasing the
-    # overall report figure height.
+    # Four slim rows keep the composition light without increasing the overall
+    # report figure height.
     y_positions = np.arange(len(AGENT_ORDER))[::-1] * 0.82
     for axis, metric_rows, panel_title in zip(
         axes,
@@ -589,7 +589,7 @@ def plot_token_cost_composition(
                     y,
                     share,
                     left=left,
-                    height=0.44,
+                    height=0.30,
                     color=COMPONENT_COLORS[component],
                     edgecolor=BACKGROUND,
                     linewidth=0.7,
