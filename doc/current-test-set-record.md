@@ -341,7 +341,7 @@ near linear. Total cost still increases with rounds in every configuration. A
 stronger specification would estimate within-task curves and repeat the fits
 under alternative cache-price schedules.
 
-### 4.6 Submitted production-code volume and harness success
+## 5 Submitted production-code volume and harness success
 
 Submitted production-code volume has a positive within-task association with
 run-level harness success: after centering `log(1 + additions)` on each task's
@@ -362,7 +362,7 @@ writing more code.
 | Rewrite, task fixed effects | 28 / 4 | +4.9 pp (-2.4 to +12.1) | 1.33 (0.87 to 2.02) | 0.122 |
 | Pooled, task and configuration fixed effects | 206 / 19 | +9.2 pp (+2.2 to +16.3) | 1.78 (1.14 to 2.78) | 0.014 |
 
-## 5. Identification limits
+## 6. Identification limits
 
 The benchmark can compare the four complete
 configurations, but it cannot tell which individual feature caused a difference.
