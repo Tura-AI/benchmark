@@ -8,7 +8,6 @@ import csv
 import hashlib
 import json
 import math
-import textwrap
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -43,6 +42,7 @@ BACKGROUND = "#f4f1ea"
 INK = "#0a0a0a"
 MUTED = "#474747"
 GRID = "#dedbd2"
+SVG_METADATA = {"Date": None}
 COMPONENT_COLORS = {
     "uncached_input": "#d56538",
     "cached_input": "#008f87",
@@ -203,6 +203,7 @@ def configure_style(regular: Path, bold: Path) -> str:
             "mathtext.fontset": "dejavusans",
             "mathtext.default": "regular",
             "svg.fonttype": "path",
+            "svg.hashsalt": "tura-benchmark-analysis-v1",
         }
     )
     return family
@@ -273,24 +274,28 @@ def add_figure_notes(figure: plt.Figure, method_note: str, left: float = 0.08) -
     figure.text(
         left,
         0.080,
-        textwrap.fill(method_note, width=126),
+        method_note,
         color=MUTED,
         fontsize=8.4,
-        linespacing=1.25,
+        wrap=False,
     )
     figure.text(
         left,
         0.030,
-        textwrap.fill(ANALYSIS_SAMPLE_NOTE, width=132),
+        ANALYSIS_SAMPLE_NOTE,
         color=MUTED,
         fontsize=8.1,
-        linespacing=1.20,
+        wrap=False,
     )
 
 
 def save(figure: plt.Figure, output_dir: Path, stem: str) -> None:
     figure.savefig(output_dir / f"{stem}.png", dpi=200, pad_inches=0.08)
-    figure.savefig(output_dir / f"{stem}.svg", pad_inches=0.08)
+    figure.savefig(
+        output_dir / f"{stem}.svg",
+        pad_inches=0.08,
+        metadata=SVG_METADATA,
+    )
     plt.close(figure)
 
 
@@ -576,7 +581,7 @@ def plot_token_cost_composition(
 
     # Four slim rows keep the composition light without increasing the overall
     # report figure height.
-    y_positions = np.arange(len(AGENT_ORDER))[::-1] * 0.82
+    y_positions = np.arange(len(AGENT_ORDER))[::-1] * 0.62 + 0.30
     for axis, metric_rows, panel_title in zip(
         axes,
         (token_rows, cost_rows),
@@ -608,7 +613,7 @@ def plot_token_cost_composition(
                 left += share
             axis.text(
                 99.0,
-                y + 0.29,
+                y + 0.22,
                 f"output {shares[2]:.2f}%",
                 ha="right",
                 va="bottom",
@@ -617,7 +622,7 @@ def plot_token_cost_composition(
             )
         axis.set_title(panel_title, loc="left", fontsize=11.5, weight="bold", pad=10)
         axis.set_xlim(0, 100)
-        axis.set_ylim(-0.38, y_positions[0] + 0.48)
+        axis.set_ylim(-0.38, y_positions[0] + 0.78)
         axis.set_xlabel("Share of configuration total")
         axis.xaxis.set_major_formatter(mpl.ticker.PercentFormatter(100, decimals=0))
         axis.grid(axis="x")

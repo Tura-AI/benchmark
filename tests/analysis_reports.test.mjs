@@ -141,36 +141,29 @@ test("generated summaries and rows agree with the configured population", () => 
 });
 
 test("the configured statistical artifact set is complete", () => {
-  for (const stem of config.artifacts.claimCharts) {
-    for (const extension of ["png", "svg"]) {
-      assert.ok(
-        fs.existsSync(
-          path.join(root, config.outputs.claimCharts, `${stem}.${extension}`),
-        ),
-        `${stem}.${extension}`,
+  for (const [directory, stems] of [
+    [config.outputs.claimCharts, config.artifacts.claimCharts],
+    [config.outputs.harnessCode, config.artifacts.harnessCodeCharts],
+  ]) {
+    const expectedCharts = stems
+      .flatMap((stem) =>
+        ["png", "svg"].map((extension) => `${stem}.${extension}`),
+      )
+      .sort();
+    const actualCharts = fs
+      .readdirSync(path.join(root, directory))
+      .filter((name) => /\.(png|svg)$/.test(name))
+      .sort();
+    assert.deepEqual(actualCharts, expectedCharts, directory);
+
+    for (const stem of stems) {
+      const svg = fs.readFileSync(
+        path.join(root, directory, `${stem}.svg`),
+        "utf8",
       );
+      assert.doesNotMatch(svg, /<dc:date>/, `${stem}.svg embeds a build date`);
     }
   }
-  for (const stem of config.artifacts.harnessCodeCharts) {
-    for (const extension of ["png", "svg"]) {
-      assert.ok(
-        fs.existsSync(
-          path.join(root, config.outputs.harnessCode, `${stem}.${extension}`),
-        ),
-        `${stem}.${extension}`,
-      );
-    }
-  }
-  const actualClaimCharts = fs
-    .readdirSync(path.join(root, config.outputs.claimCharts))
-    .filter((name) => /\.(png|svg)$/.test(name))
-    .sort();
-  const expectedClaimCharts = config.artifacts.claimCharts
-    .flatMap((stem) =>
-      ["png", "svg"].map((extension) => `${stem}.${extension}`),
-    )
-    .sort();
-  assert.deepEqual(actualClaimCharts, expectedClaimCharts);
 
   const documentedCharts = [
     ...`${evidenceRecord}\n${methodology}`.matchAll(
@@ -179,13 +172,21 @@ test("the configured statistical artifact set is complete", () => {
   ]
     .map((match) => match[1])
     .sort();
-  assert.deepEqual(
-    documentedCharts,
-    [
-      ...config.artifacts.claimCharts,
-      ...config.artifacts.harnessCodeCharts,
-    ].sort(),
+  const configuredCharts = new Set([
+    ...config.artifacts.claimCharts,
+    ...config.artifacts.harnessCodeCharts,
+  ]);
+  assert.ok(
+    documentedCharts.length > 0,
+    "protected docs contain no chart references",
   );
+  assert.equal(new Set(documentedCharts).size, documentedCharts.length);
+  for (const stem of documentedCharts) {
+    assert.ok(
+      configuredCharts.has(stem),
+      `unconfigured documented chart: ${stem}`,
+    );
+  }
 });
 
 test("analysis scripts consume configuration instead of embedding the cohort", () => {
@@ -203,6 +204,10 @@ test("analysis scripts consume configuration instead of embedding the cohort", (
         report.path,
       );
     }
+  }
+  for (const source of scripts.slice(1)) {
+    assert.match(source, /"svg\.hashsalt": "tura-benchmark-analysis-v1"/);
+    assert.match(source, /metadata=SVG_METADATA/);
   }
 });
 

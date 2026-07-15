@@ -48,6 +48,7 @@ BACKGROUND = "#f4f1ea"
 INK = "#0a0a0a"
 MUTED = "#474747"
 GRID = "#d8d4ca"
+SVG_METADATA = {"Date": None}
 
 
 def scope_note(config: dict) -> str:
@@ -484,13 +485,19 @@ def configure_style(font_path: Path, bold_path: Path) -> None:
             "mathtext.fontset": "dejavusans",
             "mathtext.default": "regular",
             "svg.fonttype": "path",
+            "svg.hashsalt": "tura-benchmark-analysis-v1",
         }
     )
 
 
 def save(figure: plt.Figure, output: Path, stem: str) -> None:
     figure.savefig(output / f"{stem}.png", dpi=200, bbox_inches="tight", pad_inches=0.12)
-    figure.savefig(output / f"{stem}.svg", bbox_inches="tight", pad_inches=0.12)
+    figure.savefig(
+        output / f"{stem}.svg",
+        bbox_inches="tight",
+        pad_inches=0.12,
+        metadata=SVG_METADATA,
+    )
     plt.close(figure)
 
 
@@ -578,6 +585,7 @@ def plot_relationship(rows: list[dict], models: dict[str, dict], output: Path) -
         r"MODEL · Equal-weight fractional logit: logit(E[$y_i$]) = task FE + $\beta z_i$; CI uses task-clustered CR1 covariance and $t_{G-1}$ critical values.",
         color=MUTED,
         fontsize=8.5,
+        wrap=False,
     )
     figure.text(
         0.08,
@@ -587,6 +595,7 @@ def plot_relationship(rows: list[dict], models: dict[str, dict], output: Path) -
         "Constant-outcome tasks do not estimate beta.",
         color=MUTED,
         fontsize=8.3,
+        wrap=False,
     )
     save(figure, output, "09-code-additions-vs-harness-success")
 
@@ -662,6 +671,7 @@ def plot_effects(models: list[dict], output: Path) -> None:
         r"ESTIMAND · Common within-task slope $\beta$. Absolute contrast averages fitted probabilities at $z_i=-0.5$ and $+0.5$ equally across retained task intercepts.",
         color=MUTED,
         fontsize=8.5,
+        wrap=False,
     )
     figure.text(
         0.08,
@@ -669,6 +679,7 @@ def plot_effects(models: list[dict], output: Path) -> None:
         "INFERENCE · CR1 task-clustered covariance with t critical values; rewrite-only uncertainty uses four identifying task clusters.",
         color=MUTED,
         fontsize=8.3,
+        wrap=False,
     )
     figure.text(
         0.08,
@@ -676,6 +687,7 @@ def plot_effects(models: list[dict], output: Path) -> None:
         SCOPE_NOTE + " Excluded runs remain in published aggregates.",
         color=MUTED,
         fontsize=8.3,
+        wrap=False,
     )
     save(figure, output, "10-code-size-model-estimates")
 

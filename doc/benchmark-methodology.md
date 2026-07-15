@@ -227,97 +227,29 @@ The 10-run Codex High source is
 Per-run prompts, normalized rounds, aggregate usage, retained workspaces, and
 harness reports remain under those report directories.
 
-## 6. Submitted production-code volume analysis across harness tasks
 
-The secondary research question applies to all 25 harness-scored tasks: within
-the same task, is a larger submitted production-code volume associated with a
-higher expected run-level harness success ratio? The exposure is submitted
-production-code additions, defined separately at the stable artifact boundary
-for each task class:
+## 6. Design subset
 
-- **DeepSWE:** added lines reported by `git apply --numstat` for the final patch,
-  restricted to production `.go`, `.py`, `.pyi`, `.js`, `.jsx`, `.ts`, `.tsx`,
-  `.mjs`, `.cjs`, and `.rs` files;
-- **rewrite:** physical lines in retained submitted production source, treated
-  as additions from an empty target; the TanStack task uses the archived
-  evaluator `source_lines` field.
-
-Exclude tests, specs, fixtures, harnesses, benchmarks, examples, reference
-source, and test/verify helpers. Missing source remains missing rather than
-zero. In the declared 278-run relationship population, code volume is observed
-for all 238 DeepSWE runs and 34 of 40 rewrite runs, for 272 observations.
-
-For run `i` in task `t`, define
-
-`z_i = [log(1 + additions_i) - median_t(log(1 + additions))] / s_within`,
-
-where `s_within = 0.33631` is the pooled standard deviation after within-task
-median centering. This transformation permits zero additions and prevents raw
-patch line counts from being interpreted on the same scale as a greenfield
-rewrite.
-
-Let `y_i = passed_i / checks_i`. Fit an equal-run-weight fractional-logit model:
-
-`logit(E[y_i]) = α_t + β z_i`,
-
-where `α_t` is a task fixed effect. Each run contributes one quasi-likelihood
-observation regardless of its harness item count; rewrite tasks therefore do
-not dominate DeepSWE merely because their harnesses contain more assertions.
-Tasks with no observed outcome variation remain in descriptive displays but do
-not identify `β`.
-
-Report four predeclared specifications: pooled task fixed effects, DeepSWE-only
-task fixed effects, rewrite-only task fixed effects, and pooled task plus
-configuration fixed effects. Report `exp(β)` and the standardized fitted
-probability difference between `z = -0.5` and `z = +0.5`, averaging retained
-task intercepts equally. Construct two-sided 95% intervals from a CR1 sandwich
-covariance clustered by task and a `t_(G-1)` critical value, where `G` is the
-number of identifying task clusters. The rewrite-only specification has four
-identifying clusters and must be interpreted as low precision.
-
-<p align="center">
-  <img src="../assets/harness-code-statistics/09-code-additions-vs-harness-success.png" alt="DeepSWE and rewrite harness success against within-task standardized production-code additions" width="800">
-</p>
-
-_Method figure 1. The 278-run relationship population excludes two Tura
-Balanced observations above 90 rounds (113 and 242), both retained in published
-aggregates; 272 runs have observed code volume. The panels show run-level
-outcomes and subset-specific task-fixed-effect fractional-logit fits. Six
-unavailable rewrite source bodies remain missing._
-
-<p align="center">
-  <img src="../assets/harness-code-statistics/10-code-size-model-estimates.png" alt="Task-clustered code-volume association estimates under pooled, subset, and configuration-adjusted specifications" width="800">
-</p>
-
-_Method figure 2. The same 278-run population and two-run exclusion apply; 272
-runs have observed code volume. Odds-ratio and standardized
-probability-difference estimates use 95% CR1 task-clustered intervals. The
-complete run-level data, task table, coefficients, covariance matrices,
-exclusions, and missing-source IDs are published in
-[`assets/harness-code-statistics`](../assets/harness-code-statistics/)._
-
-## 7. Design subset
-
-### 7.1 Why design tasks are outside the harness
+### 6.1 Why design tasks are outside the harness
 
 The design tasks have stable prompts, run metadata, and required output paths, but no `harness.json`. They are excluded from automated score aggregation because their central outcomes—visual hierarchy, information design, editorial quality, interaction clarity, and responsible use of sources—cannot currently be reduced to the same deterministic pass/fail contract used by the engineering tasks.
 
 Simple existence checks such as “`index.html` was created” are useful integrity checks but are not evidence of design quality. Until a separate rubric is validated, these tasks should be reported as **completed artifact / invalid artifact / not run**, followed by blinded human review or clearly labeled qualitative analysis. They must not silently receive a zero or a perfect score in the 25-task harness result.
 
-### 7.2 Complete design task inventory
+### 6.2 Complete design task inventory
 
 | Task                              | Required deliverable                                                  | Core requirements                                                                                                                                                                                                                                                                                                      | Evaluation boundary                                                                                                                                                                |
 | --------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `east-asian-squid-recipes-slides` | A navigable English HTML presentation at `./index.html`               | Fifteen illustrated slides covering ten distinct squid cooking methods from East Asian countries or regions; each method needs cultural attribution, ingredient quantities, preparation and cooking steps, timing, a recipe-source link, and a working YouTube cooking-video link; all assets remain in the workspace. | Review completeness, factual sourcing, editorial structure, image relevance, readability, navigation, and link validity. No automated harness score.                               |
 | `paris-summer-temperature-3d`     | A responsive English interactive 3D HTML experience at `./index.html` | Show the evolution of Paris summer temperature from 1986 through 2026 with a clear time axis, spatial depth, animation, and controls for yearly values, trends, and notable heat events; keep assets local and distinguish observed historical values from provisional or projected 2026 values.                       | Review data provenance, historical/provisional labeling, legibility, interaction stability, 3D communication value, responsiveness, and accessibility. No automated harness score. |
 
-## 8. Data organization and normalization
+## 7. Data organization and normalization
 
-### 8.1 Immutable task identity
+### 7.1 Immutable task identity
 
 Every task is keyed by a stable task ID. Repository tasks additionally retain the repository URL and base commit. Rewrite tasks retain their source tag/commit and target runtime. Results from different task revisions must not be merged under one ID without a revision field or migration record.
 
-### 8.2 Run identity and repeats
+### 7.2 Run identity and repeats
 
 A run record should include at least:
 
@@ -338,7 +270,7 @@ or provider failure that invalidates the attempt. A normal task timeout, agent
 non-zero exit, agent-reported error, or valid verifier failure is experimental
 behavior and must remain in the dataset without retry.
 
-### 8.3 Raw, normalized, and published layers
+### 7.3 Raw, normalized, and published layers
 
 - **Raw layer:** untouched provider events, stdout/stderr, workspace state, and verifier output.
 - **Normalized layer:** schema-validated rounds, tool calls, usage, task reports, and harness reports.
@@ -346,7 +278,7 @@ behavior and must remain in the dataset without retry.
 
 Normalization may rename or structure fields, but it must not invent commands, tool results, token counts, assertions, or scores. Cumulative usage updates must be deduplicated before summation; otherwise repeated provider snapshots inflate cost and token totals.
 
-#### 8.3.1 Codex CLI instrumentation and publication boundary
+#### 7.3.1 Codex CLI instrumentation and publication boundary
 
 Codex Medium used a locally instrumented Codex build to retain round commands,
 timing, and provenance. Its normalized round contracts omit per-round input and
@@ -356,7 +288,7 @@ configurations separate in every table and fit. The build boundary is a
 confounder; do not attribute a High-versus-Medium difference solely to
 reasoning effort.
 
-### 8.4 Missing and malformed data
+### 7.4 Missing and malformed data
 
 Use explicit states rather than coercing all anomalies to zero:
 
@@ -374,7 +306,7 @@ Use explicit states rather than coercing all anomalies to zero:
 | Design artifact missing or entry path wrong                                        | Mark invalid artifact; do not manufacture a design score              |
 | External link unavailable during design review                                     | Record link-check time and failure separately from artifact rendering |
 
-### 8.5 Analysis populations and declared exclusion
+### 7.5 Analysis populations and declared exclusion
 
 Configuration-level result tables use all 280 published harness-scored runs.
 Cross-run relationship figures use a 278-run population after excluding exactly
@@ -392,9 +324,9 @@ submitted-code analysis additionally states its 272-run observed-code
 population, 206-run pooled identifying population, task-cluster counts, and six
 missing-source records.
 
-## 9. Reporting protocol
+## 8. Reporting protocol
 
-### 9.1 Primary metrics
+### 8.1 Primary metrics
 
 Report the three subsets separately:
 
@@ -406,7 +338,7 @@ For every strategy comparison, report these outcome metrics beside observed tota
 
 For comparisons between agents, use the same task revision, model where the agent comparison requires it, effort setting, timeout policy, network policy, and replicate count. Publish the run matrix before interpreting differences.
 
-### 9.2 Statistical reporting contract
+### 8.2 Statistical reporting contract
 
 For every regression analysis, state the analysis population, response,
 predictor transformation, weighting or trial denominator, adjustment variables,
@@ -438,11 +370,11 @@ Configuration differences are system-level contrasts. A component-level causal
 claim requires a crossed design. Codex High versus Medium is jointly confounded
 by build and reasoning effort.
 
-### 9.3 Optional overall summaries
+### 8.3 Optional overall summaries
 
 If an overall engineering score is required, use a task-level macro average over the **25 harness-scored tasks** so that each task contributes equally after its own harness has produced a task score. Label the formula and keep the subset scores adjacent. Do not include the two design tasks unless a separate, predeclared scoring protocol exists.
 
-### 9.4 Uncertainty
+### 8.4 Uncertainty
 
 Always show counts with percentages. Regression figures report 95% intervals
 and identify their covariance estimator, clustering unit, and reference
@@ -454,75 +386,75 @@ population generalization beyond the curated subset. The official DeepSWE site
 likewise reports uncertainty and cautions against overinterpreting small
 qualitative frequencies.[^deepswe-home] [^deepswe-methodology]
 
-## 10. Anomalies and edge cases
+## 9. Anomalies and edge cases
 
-### 10.1 Difficulty is empirical and model-pool dependent
+### 9.1 Difficulty is empirical and model-pool dependent
 
 The official pass rate depends on the models, agent harness, effort settings, and trial mix present in the v1.1 official records. A task labeled hard may be easy for a later model, and a low rate can partly reflect verifier or environment friction. Difficulty labels should be regenerated or versioned when the official trial pool changes.
 
-### 10.2 Sparse language pools distort target rates
+### 9.2 Sparse language pools distort target rates
 
 Go and Python offered 34 eligible tasks each and TypeScript 35, but Rust and JavaScript offered only five each in the captured selection. Four strata over five candidates cannot closely match four fixed completion-rate targets. Equal language representation is preserved at the cost of a less uniform difficulty profile.
 
-### 10.3 Rank-band boundary effects
+### 9.3 Rank-band boundary effects
 
 Selecting the first item in each rank band is deterministic but sensitive to small rate changes near a band boundary. It also tends to select the easier edge of every band. A future revision could predeclare nearest-target matching with uniqueness constraints, but changing the algorithm would define a new subset version and should not retroactively alter existing results.
 
-### 10.4 Unequal verifier granularity
+### 9.4 Unequal verifier granularity
 
 One harness item can represent a narrow argument check or a broad browser flow. Assertion counts are therefore not units of semantic difficulty. This is why task-level macro aggregation is preferred over pooling all assertions.
 
-### 10.5 Environment and platform sensitivity
+### 9.5 Environment and platform sensitivity
 
 CLI output can vary with operating system, locale, filesystem ordering, path separators, terminal capabilities, timestamps, permissions, and archive libraries. Fixtures should disable irrelevant color/icon output, pin locale and dependency versions, normalize only declared nondeterministic fields, and preserve exit code, stdout, and stderr semantics.
 
-### 10.6 Network and source drift
+### 9.6 Network and source drift
 
 Repositories, package registries, videos, recipe pages, and climate-data endpoints can change or disappear. Source commits and local task assets must be pinned where licensing permits. External-link checks should record their date; link rot is not automatically an agent failure if the artifact used a valid source at run time.
 
-### 10.7 Verifier incompleteness
+### 9.7 Verifier incompleteness
 
 Program-based verifiers approximate a specification; they are not the specification itself. They can miss valid alternative behaviors or permit incomplete implementations. DeepSWE's authors explicitly motivate behavioral verification and also identify verifier design as an area for continued improvement.[^deepswe-methodology] Harness changes require versioning and re-evaluation of comparability.
 
-### 10.8 Design-review subjectivity
+### 9.8 Design-review subjectivity
 
 Human design ratings can vary with reviewer background, display, browser, cultural familiarity, and aesthetic preference. Any future design comparison should use multiple blinded reviewers, a predeclared rubric, calibrated examples, and inter-rater agreement. Automated visual checks may detect clipping or missing assets, but should not be presented as a complete measure of quality.
 
-## 11. Limitations and threats to validity
+## 10. Limitations and threats to validity
 
-### 11.1 Construct validity
+### 10.1 Construct validity
 
 The benchmark measures performance under specific prompts, tools, timeouts, environments, and verifiers. It does not fully measure maintainability, security, product judgment, long-term operation, collaboration, or whether a patch would be accepted by upstream maintainers.
 
-### 11.2 External validity
+### 10.2 External validity
 
 DeepSWE covers five languages but excludes major ecosystems such as Java and C++. Its official corpus is concentrated in TypeScript, Go, and Python, and is drawn from established open-source repositories; DeepSWE's authors note these same coverage limits.[^deepswe-methodology] Equal-language sampling further differs from real-world language prevalence.
 
 The rewrite subset is small and intentionally heterogeneous. All four CLI ports begin with Rust sources and target Python, so the result should not be generalized to arbitrary language pairs. The HTML task tests one framework and one product shape.
 
-### 11.3 Selection bias
+### 10.3 Selection bias
 
 The DeepSWE subset is stratified, not random. It overrepresents Rust and JavaScript relative to their available task pools and chooses deterministic band-edge examples. The rebuild and design tasks were purposefully selected for breadth and evaluability. Reported performance is conditional on this curation.
 
-### 11.4 Contamination
+### 10.4 Contamination
 
 DeepSWE reduces direct benchmark leakage by using original tasks rather than fixes copied from existing public commits.[^deepswe-methodology] This lowers but does not eliminate contamination: models may have seen the underlying repositories, libraries, task descriptions after publication, or similar implementations. Research on code-generation benchmarks finds that both surface and semantic overlap with training corpora can materially inflate measured performance.[^contamination-paper]
 
 The four rebuild sources are public and may be present in model training data. They should be interpreted as behavioral reconstruction tasks, not contamination-free tests of novel algorithm discovery.
 
-### 11.5 Temporal validity
+### 10.5 Temporal validity
 
 Model APIs, agent implementations, package registries, benchmark artifacts, and source repositories evolve. Every publication should state the benchmark revision, selection timestamp, model identifier, agent version, configuration, and execution period. Results from different revisions are not directly comparable without a compatibility audit.
 
-### 11.6 Statistical power and dependence
+### 10.6 Statistical power and dependence
 
 Twenty DeepSWE tasks and five rewrite tasks provide limited power. Outcomes within a repository, language, or agent runtime may be correlated, so treating every harness assertion as an independent sample understates uncertainty. Replicates reduce stochastic noise but do not create new independent tasks.
 
-### 11.7 Cost and timeout effects
+### 10.7 Cost and timeout effects
 
 Long-horizon performance is sensitive to token budget, reasoning effort, tool-call limits, wall-clock timeout, network access, and service tier. More resources may improve completion rate while increasing cost. Capability and efficiency should therefore be reported together, not collapsed without an explicit utility function.
 
-### 11.8 Compact context and missing ablations
+### 10.8 Compact context and missing ablations
 
 The current matrix does not isolate compact-context behavior, command batching,
 operation-manual text, or reasoning effort. Cross-task-group differences in
