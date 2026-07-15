@@ -26,6 +26,9 @@ const EXPECTED_RUNS = 60;
 const TASK_BATCH_SIZE = 5;
 const WORKER_CONCURRENCY = 15;
 const CODEX_CLI_VERSION = "0.144.1";
+const CANONICAL_TASK_IDS = readJson(
+  path.join(root, "deep_swe", "canonical_tasks.json"),
+).tasks.map((task) => task.task_id);
 
 if (path.resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
   const args = parseArgs(process.argv.slice(2));
@@ -104,9 +107,10 @@ export function publishDeepSweCodexHigh(options) {
   const selection = readJson(path.resolve(manifest.selection_path));
   assert.equal(selection?.schema, "tura.benchmark.deep-swe-selection.v1");
   assert.equal(selection.tasks?.length, EXPECTED_TASKS);
-  assert.equal(
-    new Set(selection.tasks.map((task) => task.task_id)).size,
-    EXPECTED_TASKS,
+  assert.deepEqual(
+    selection.tasks.map((task) => task.task_id),
+    CANONICAL_TASK_IDS,
+    "Codex High publication must use the pinned DeepSWE task set",
   );
   auditCodexSourceArtifacts(source, manifest);
   if (options.checkSourceOnly)

@@ -208,7 +208,8 @@ test("DeepSWE retries only explicit Docker or environment failures", () => {
   assert.match(runner, /rate\.\?limit/);
   assert.match(runner, /service unavailable/);
   assert.match(runner, /classification: "docker-environment"/);
-  assert.match(runner, /docker\\s\+exec\[\^\\r\\n\]\*failed with null/);
+  assert.match(runner, /\(\?:exec\|cp\)/);
+  assert.match(runner, /failed with null\|timed out/);
   assert.match(runner, /classification: "host-environment"/);
   assert.match(
     runner,
@@ -247,16 +248,17 @@ test("DeepSWE captures completed agent artifacts from the host bind mount", () =
   assert.match(runner, /expectedLlmRounds[\s\S]*allLlmTurnsRecovered/);
 });
 
-test("DeepSWE runs five verifier images concurrently and generates their Dockerfiles", () => {
+test("DeepSWE runs five official verifier images concurrently", () => {
   const runner = fs.readFileSync(
     path.join(root, "deep_swe", "run_matrix.mjs"),
     "utf8",
   );
   assert.match(runner, /chunk\(batches, HARNESS_IMAGE_CONCURRENCY\)/);
   assert.match(runner, /await Promise\.all\([\s\S]*runnable\.map/);
-  assert.match(runner, /"FROM \$\{BASE_IMAGE\}"/);
-  assert.match(runner, /"COPY test\.sh \/tests\/test\.sh"/);
-  assert.match(runner, /`BASE_IMAGE=\$\{task\.docker_image\}`/);
+  assert.match(runner, /const verifierDockerfile = path\.join/);
+  assert.match(runner, /hashDirectory\(testsDirectory\)/);
+  assert.match(runner, /\["build", "-t", tag, testsDirectory\]/);
+  assert.match(runner, /path\.join\(artifactsDir, "model\.patch"\)/);
   assert.match(
     runner,
     /fs\.mkdirSync\(verifierOutputDir, \{ recursive: true \}\)/,

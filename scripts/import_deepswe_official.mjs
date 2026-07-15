@@ -20,28 +20,14 @@ const AGENT = "mini-swe-agent";
 const PROVIDER = "openai";
 const AGENT_VERSION = null;
 const VERSION_SENTINEL = "(not published in DeepSWE trials.json)";
-const TASK_ORDER = [
-  "actionlint-action-pinning-lint",
-  "abs-stepped-slices",
-  "yaegi-go-embed-directives",
-  "dasel-html-document-format",
-  "narwhals-rolling-window-suite",
-  "numba-stencil-boundary-modes",
-  "bandit-incremental-cache-control",
-  "langchain-request-coalescing",
-  "happy-dom-abort-pending-body-reads",
-  "dynamodb-toolbox-conditional-attribute-requirements",
-  "awilix-async-container-initialization",
-  "quill-shared-toolbar-focus",
-  "wasmi-trap-coredumps",
-  "fd-deterministic-multi-key-sorting",
-  "boa-hierarchical-evaluation-cancellation",
-  "pest-character-class-coalescing",
-  "yjs-map-conflict-detection",
-  "testem-per-launcher-reports",
-  "csstree-shorthand-expansion-compression",
-  "katex-multicolumn-array-spans",
-];
+const canonicalTaskSet = JSON.parse(
+  await readFile(path.join(ROOT, "deep_swe", "canonical_tasks.json"), "utf8"),
+);
+if (
+  canonicalTaskSet?.schema !== "tura.benchmark.deep-swe-canonical-task-set.v1"
+)
+  throw new Error("invalid pinned DeepSWE task set");
+const TASK_ORDER = canonicalTaskSet.tasks.map((task) => task.task_id);
 
 function parseArgs(argv) {
   const args = {

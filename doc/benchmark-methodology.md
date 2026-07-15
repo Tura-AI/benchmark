@@ -99,7 +99,7 @@ This equal allocation prevents the larger language pools from dominating the sui
 
 The intended difficulty profile is four levels per language, anchored where possible around **80%, 60%, 40%, and 20% official completion rates**. Higher historical completion implies an easier task; lower completion implies a harder task.
 
-The exact reproducible implementation uses rank bands because some language pools are too small or do not contain tasks near every target rate:
+The original inventory was produced with rank bands because some language pools are too small or do not contain tasks near every target rate:
 
 1. rank all eligible tasks within each language by descending official pass rate;
 2. divide that language-specific ranking into four approximately equal bands;
@@ -107,7 +107,7 @@ The exact reproducible implementation uses rank bands because some language pool
 4. select the highest-pass-rate task in each band;
 5. break equal-rate ties deterministically by task ID.
 
-This produces four tasks per language and five tasks per difficulty band. The 20/40/60/80 values are therefore **difficulty anchors, not guaranteed bins**. The checked-in selection algorithm is quantile-like rank stratification; it does not minimize absolute distance to 20%, 40%, 60%, and 80%. This distinction matters most for Rust and JavaScript, which had only five eligible tasks each in the selection artifact.
+This produced four tasks per language and five tasks per difficulty band. The 20/40/60/80 values are therefore **difficulty anchors, not guaranteed bins**. The selected 20 task IDs are now pinned in [`deep_swe/canonical_tasks.json`](../deep_swe/canonical_tasks.json). Current official trial data may refresh the recorded rates and ranks, but it must never change task membership. This prevents later updates to the online `trials.json` artifact from silently changing the comparison cohort.
 
 The selected rates demonstrate the resulting approximation:
 

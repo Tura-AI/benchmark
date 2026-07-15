@@ -102,6 +102,7 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
         validate_json(path, "changed-workspace.schema.json", errors)
 
     deepswe_patterns = {
+        "DeepSWE canonical task set": ("deepswe-canonical-task-set.schema.json", "deep_swe/canonical_tasks.json"),
         "DeepSWE task contracts": ("task.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-*/*/task.json"),
         "DeepSWE harness contracts": ("task-harness.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-*/*/harness.json"),
         "DeepSWE batch manifests": ("deepswe-official-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-high-r*/manifest.json"),

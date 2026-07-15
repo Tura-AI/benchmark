@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 export const HARNESS_CONCURRENCY = 7;
 export const HARNESS_IMAGE_CONCURRENCY = 5;
 export const VERIFIER_COMMAND =
-  "if [ -s /logs/input/model.patch ]; then git apply --binary --whitespace=nowarn /logs/input/model.patch; fi && sed -i 's/\\r$//' /tests/test.sh /tests/test.patch && exec /bin/bash /tests/test.sh";
+  "sed -i 's/\\r$//' /tests/test.sh /tests/test.patch && exec /bin/bash /tests/test.sh";
 
 export function buildHarnessBatches(
   tasks,

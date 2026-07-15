@@ -83,12 +83,8 @@ test("DeepSWE harness rejects infrastructure failures as completed scores", () =
   );
 });
 
-test("DeepSWE verifier command normalizes Windows line endings before execution", () => {
-  assert.match(VERIFIER_COMMAND, /if \[ -s \/logs\/input\/model\.patch \]/);
-  assert.match(
-    VERIFIER_COMMAND,
-    /git apply --binary --whitespace=nowarn \/logs\/input\/model\.patch/,
-  );
+test("DeepSWE verifier delegates patch application to the official grader", () => {
+  assert.doesNotMatch(VERIFIER_COMMAND, /git apply/);
   assert.match(
     VERIFIER_COMMAND,
     /sed -i.*\/tests\/test\.sh \/tests\/test\.patch/,

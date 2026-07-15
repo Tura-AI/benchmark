@@ -57,6 +57,7 @@ const selectionPath = path.resolve(
   process.env.DEEP_SWE_SELECTION || path.join(runRoot, "selection.json"),
 );
 const selection = readJson(selectionPath);
+const canonicalTaskSet = readJson(path.join(scriptDir, "canonical_tasks.json"));
 const runId = path.basename(runRoot);
 const manifestPath = path.join(runRoot, "manifest.json");
 const progressPath = path.join(runRoot, "PROGRESS.md");
@@ -75,6 +76,10 @@ const monitorMs = positiveInteger(
 );
 const diskSafetyFloorGb = Number(
   process.env.DEEP_SWE_DISK_SAFETY_FLOOR_GB || 5,
+);
+const workspaceCopyTimeoutMs = positiveInteger(
+  process.env.DEEP_SWE_WORKSPACE_COPY_TIMEOUT_MS || 60 * 60_000,
+  "DeepSWE workspace copy timeout",
 );
 const keepWorkspaces = truthy(process.env.DEEP_SWE_KEEP_WORKSPACES);
 const sharedTuraTaskContainers = truthy(
@@ -110,6 +115,24 @@ assert(
 assert(
   Array.isArray(selection.tasks) && selection.tasks.length > 0,
   `selection must contain at least one task: ${selectionPath}`,
+);
+assert.equal(
+  canonicalTaskSet?.schema,
+  "tura.benchmark.deep-swe-canonical-task-set.v1",
+  "invalid pinned DeepSWE task set",
+);
+const selectedTaskIds = selection.tasks.map((task) => task.task_id);
+const canonicalTaskIds = canonicalTaskSet.tasks.map((task) => task.task_id);
+const selectedTaskIdSet = new Set(selectedTaskIds);
+assert.equal(
+  selectedTaskIdSet.size,
+  selectedTaskIds.length,
+  `selection contains duplicate tasks: ${selectionPath}`,
+);
+assert.deepEqual(
+  selectedTaskIds,
+  canonicalTaskIds.filter((taskId) => selectedTaskIdSet.has(taskId)),
+  `selection must be an ordered subset of the pinned 20 DeepSWE tasks: ${selectionPath}`,
 );
 if (expectedTaskCount > 0)
   assert.equal(
@@ -724,7 +747,11 @@ async function runAgentBatches() {
 }
 
 async function runHarnessBatches(harnessJobs = jobs, allowPartial = false) {
-  const batches = buildHarnessBatches(selection.tasks, harnessJobs, {
+  const harnessTaskIds = new Set(harnessJobs.map((job) => job.task.task_id));
+  const harnessTasks = allowPartial
+    ? selection.tasks.filter((task) => harnessTaskIds.has(task.task_id))
+    : selection.tasks;
+  const batches = buildHarnessBatches(harnessTasks, harnessJobs, {
     allowPartial,
     expectedOutputsPerTask: variants.length,
   });
@@ -878,7 +905,7 @@ async function runSharedTuraTaskContainer(taskJobs) {
     for (const item of prepared) {
       item.job.phase = "copying-workspace";
       await runOk("docker", ["cp", `${seedContainer}:/app/.`, item.workspace], {
-        timeoutMs: 20 * 60_000,
+        timeoutMs: workspaceCopyTimeoutMs,
       });
       await runOk("git", [
         "-C",
@@ -1129,7 +1156,7 @@ async function runAgentJob(job) {
     job.phase = "copying-workspace";
     writeManifest();
     await runOk("docker", ["cp", `${seedContainer}:/app/.`, workspace], {
-      timeoutMs: 20 * 60_000,
+      timeoutMs: workspaceCopyTimeoutMs,
     });
     await removeContainer(seedContainer);
     seedContainer = null;
@@ -1444,6 +1471,7 @@ async function runHarnessJob(job) {
     const modelPatchPath = path.join(agentDir, "model.patch");
     const harnessInputPatchPath = path.join(inputDir, "model.patch");
     fs.copyFileSync(modelPatchPath, harnessInputPatchPath);
+    fs.copyFileSync(modelPatchPath, path.join(artifactsDir, "model.patch"));
     const modelPatchSha256 = hashBuffer(fs.readFileSync(modelPatchPath));
     const container = containerName(job, "verify");
     await removeContainer(container);
@@ -1806,7 +1834,7 @@ function classifyAgentFailure(job) {
     return { retryable: true, classification: "model-service-environment" };
   }
   if (
-    /docker\s+exec[^\r\n]*failed with null|(?:docker|container).*(?:daemon|not running|cannot connect|connection|no such container|unexpectedly stopped|is not running)|(?:daemon|container).*(?:docker|connection|unavailable)|error during connect|docker_engine/i.test(
+    /docker\s+(?:exec|cp)[^\r\n]*(?:failed with null|timed out)|(?:docker|container).*(?:daemon|not running|cannot connect|connection|no such container|unexpectedly stopped|is not running)|(?:daemon|container).*(?:docker|connection|unavailable)|error during connect|docker_engine/i.test(
       evidence,
     )
   ) {
@@ -1963,6 +1991,7 @@ async function ensureVerifierImage(task) {
         const testsDirectory = path.join(tasksRoot, task.task_id, "tests");
         const testScript = path.join(testsDirectory, "test.sh");
         const testPatch = path.join(testsDirectory, "test.patch");
+        const verifierDockerfile = path.join(testsDirectory, "Dockerfile");
         assert(
           fs.existsSync(testScript),
           `missing verifier script: ${testScript}`,
@@ -1971,23 +2000,12 @@ async function ensureVerifierImage(task) {
           fs.existsSync(testPatch),
           `missing verifier patch: ${testPatch}`,
         );
-        const dockerfile = [
-          "ARG BASE_IMAGE",
-          "FROM ${BASE_IMAGE}",
-          "COPY test.sh /tests/test.sh",
-          "COPY test.patch /tests/test.patch",
-          "RUN chmod +x /tests/test.sh",
-          "WORKDIR /app",
-          "",
-        ].join("\n");
+        assert(
+          fs.existsSync(verifierDockerfile),
+          `missing verifier Dockerfile: ${verifierDockerfile}`,
+        );
         const fingerprint = hashText(
-          [
-            task.task_id,
-            task.docker_image,
-            dockerfile,
-            fs.readFileSync(testScript),
-            fs.readFileSync(testPatch),
-          ].join("\0"),
+          [task.task_id, hashDirectory(testsDirectory)].join("\0"),
         ).slice(0, 12);
         const tag = `tura-deepswe-verifier:${fingerprint}`;
         const inspected = await runProcess(
@@ -1996,35 +2014,10 @@ async function ensureVerifierImage(task) {
           { timeoutMs: 30_000 },
         );
         if (inspected.status !== 0) {
-          const buildDirectory = path.join(
-            runRoot,
-            "_verifier-build",
-            safeSegment(task.task_id),
-            fingerprint,
-          );
-          fs.mkdirSync(buildDirectory, { recursive: true });
-          fs.copyFileSync(testScript, path.join(buildDirectory, "test.sh"));
-          fs.copyFileSync(testPatch, path.join(buildDirectory, "test.patch"));
-          fs.writeFileSync(
-            path.join(buildDirectory, "Dockerfile"),
-            dockerfile,
-            "utf8",
-          );
-          await runOk(
-            "docker",
-            [
-              "build",
-              "--build-arg",
-              `BASE_IMAGE=${task.docker_image}`,
-              "-t",
-              tag,
-              buildDirectory,
-            ],
-            {
-              timeoutMs: 30 * 60_000,
-              maxBuffer: 256 * 1024 * 1024,
-            },
-          );
+          await runOk("docker", ["build", "-t", tag, testsDirectory], {
+            timeoutMs: 30 * 60_000,
+            maxBuffer: 256 * 1024 * 1024,
+          });
         }
         return tag;
       })(),
@@ -2518,6 +2511,24 @@ function hashText(value) {
 
 function hashBuffer(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function hashDirectory(root) {
+  const parts = [];
+  const visit = (directory, relativeDirectory = "") => {
+    const entries = fs
+      .readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const relativePath = path.join(relativeDirectory, entry.name);
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(absolutePath, relativePath);
+      else if (entry.isFile())
+        parts.push(relativePath, hashBuffer(fs.readFileSync(absolutePath)));
+    }
+  };
+  visit(root);
+  return hashText(parts.join("\0"));
 }
 
 function delay(milliseconds) {
