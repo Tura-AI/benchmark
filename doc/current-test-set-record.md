@@ -341,6 +341,27 @@ near linear. Total cost still increases with rounds in every configuration. A
 stronger specification would estimate within-task curves and repeat the fits
 under alternative cache-price schedules.
 
+### 4.6 Submitted production-code volume and harness success
+
+Submitted production-code volume has a positive within-task association with
+run-level harness success: after centering `log(1 + additions)` on each task's
+median and scaling by the pooled within-task standard deviation, a one-standard-
+deviation increase corresponds to an estimated +8.1 percentage-point success
+difference in the pooled task-fixed-effects model and +9.2 points after also
+adjusting for configuration. The DeepSWE-only result is similar, while the much
+smaller rewrite-only estimate is imprecise. These models use 206 observed-code
+runs across the 19 tasks with outcome variation, give every run equal weight,
+cluster uncertainty by task, leave six missing source bodies missing rather than
+coding them as zero, and describe association rather than a causal return to
+writing more code.
+
+| Model | Runs / tasks | Success difference per within-task SD (95% CI) | Odds ratio (95% CI) | Task-clustered p-value |
+| --- | ---: | ---: | ---: | ---: |
+| Pooled, task fixed effects | 206 / 19 | +8.1 pp (+2.1 to +14.2) | 1.62 (1.12 to 2.34) | 0.013 |
+| DeepSWE, task fixed effects | 178 / 15 | +8.4 pp (+1.7 to +15.0) | 1.65 (1.09 to 2.49) | 0.021 |
+| Rewrite, task fixed effects | 28 / 4 | +4.9 pp (-2.4 to +12.1) | 1.33 (0.87 to 2.02) | 0.122 |
+| Pooled, task and configuration fixed effects | 206 / 19 | +9.2 pp (+2.2 to +16.3) | 1.78 (1.14 to 2.78) | 0.014 |
+
 ## 5. Identification limits
 
 The benchmark can compare the four complete
