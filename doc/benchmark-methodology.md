@@ -463,7 +463,7 @@ they do not estimate an individual mechanism's causal effect. A controlled
 ablation must hold the build, task set, model, effort, timeout, service tier,
 network policy, and retry policy constant.
 
-## 12. Reproduction checklist
+## 11. Reproduction checklist
 
 Before publishing or comparing a run:
 
@@ -482,7 +482,7 @@ Before publishing or comparing a run:
 - keep design tasks outside harness aggregation;
 - document every exclusion, rerun, harness revision, and manual judgment.
 
-## 13. References
+## 12. References
 
 [^deepswe-home]: Datacurve AI, “DeepSWE,” official benchmark website and v1.1 leaderboard, <https://deepswe.datacurve.ai/> (accessed 2026-07-12).
 
