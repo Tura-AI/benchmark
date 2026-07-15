@@ -2,78 +2,104 @@
 
 I am tired of people believing every "save 90% of tokens" claim attached to a coding-agent plugin.
 
-If you know how a coding agent works, the trick is obvious: take one small part of the task, report a huge reduction on that part, then quietly encourage readers to imagine the same reduction on the whole bill.
+The trick is embarrassingly simple: compress one small part of a task, print a heroic percentage, then let readers imagine the whole bill fell by the same amount. If a plugin removes 90% of one `grep` result, it did not make the coding task 90% cheaper. It made one `grep` result shorter.
 
-If a plugin removes 90% of `grep` output, it did not make the coding task 90% cheaper. If an agent writes 80% fewer lines, it did not use 80% fewer tokens. Believing otherwise is not optimism. It is losing a fight with the denominator.
+Confusing those statements is not optimism. It is losing a fight with the denominator.
 
-## Here is the actual bill
+## We ran the plugins on a repository rewrite
 
-Our benchmark contains **140 Codex CLI Medium and High runs**: **10,365 agent rounds, 901,608,531 tokens, and $680.34 in modeled API cost**. No Tura runs are included. The complete calculation is in the repo's [`summary.json`](../assets/plugin-token-savings/summary.json), with per-run code counts in [`ponytail-code-runs.csv`](../assets/plugin-token-savings/ponytail-code-runs.csv) and command counts in [`rtk-operation-summary.csv`](../assets/plugin-token-savings/rtk-operation-summary.csv).
+This was not a toy prompt asking for one function. The task was to **rewrite the Rust eza repository as a behavior-compatible Python implementation**. The agent had to inspect the reference project, reproduce the CLI in another language, and face **52 harness assertions**.
 
-| What the agent consumed | Share of all tokens | Share of cost |
-| ----------------------- | ------------------: | ------------: |
-| Cached input            |          **96.46%** |    **63.91%** |
-| New uncached input      |               3.16% |        20.94% |
-| Model output            |               0.38% |    **15.14%** |
+Every published run used **GPT-5.6-sol, High reasoning, and Codex CLI 0.144.1**. The comparison contains exactly two runs per arm:
 
-This is how coding agents work: every round carries the accumulated prompt, history, tool calls, and tool results forward. Most of that repeated context becomes cached input. Under the benchmark pricing, uncached input costs **$5/M**, cached input **$0.50/M**, and output **$30/M**. Cached input is one tenth the price of new input. See the repo's [pricing methodology](benchmark-methodology.md) and OpenAI's [pricing](https://developers.openai.com/api/docs/pricing) and [prompt-caching documentation](https://developers.openai.com/api/docs/guides/prompt-caching).
+- Ponytail r2/r3, both with **full hook + skill** activation;
+- RTK r2/r3, both with isolated RTK activation; and
+- two previously published no-plugin runs with the same task, model, reasoning level, and CLI version.
 
-So when someone proudly says, "We shortened the agent prompt by 90%," ask what that prompt cost in the complete task. Otherwise they are celebrating a discount on the cheapest repeated part of the bill.
+| Arm | n | Harness score | Total tokens | Modeled cost | Rounds | Duration |
+| --- | -: | ------------: | -----------: | -----------: | -----: | -------: |
+| No plugin | 2 | 78.85% | 6.660M | $5.281946 | 62.5 | 895s |
+| Ponytail, full hook + skill | 2 | 80.77% | **-7.56%** | **-8.87%** | -9.60% | +13.51% |
+| RTK | 2 | 76.92% | **+13.20%** | **+7.18%** | **+44.00%** | **+40.69%** |
 
-Ponytail's Codex rules contain about **569 tokens**. Assume they appear in every round and can be cut by 90% with absolutely no quality loss. Across all 140 runs, the saving is about **$2.98**, or **0.44% of total cost**.
+The complete public package is in the [matched plugin-run data directory](https://github.com/Tura-AI/benchmark/tree/main/blog_data/token-saving-plugin-eza). It contains sanitized per-run data, the computed summary, methodology, and a **293-round activation audit**. All six Codex processes exited 0 and produced complete usage and evaluator data. A run can still miss harness assertions; that is the score, not a crashed experiment.
 
-That is roughly two cents per coding task. Stunning. Try not to spend it all at once.
+Ponytail looks 8.87% cheaper. RTK looks 7.18% more expensive. If this were a plugin landing page, this is where somebody would choose the flattering row, enlarge the percentage, and quietly send the error bars on vacation.
 
-## The LOC argument is even sillier
+## The "saving" is smaller than ordinary run variance
 
-[Ponytail](https://github.com/DietrichGebert/ponytail) reports **54% less LOC, 22% fewer session tokens, and 20% lower cost** in its own Haiku 4.5 benchmark. Those are three different measurements. The latter two may be useful if independently reproduced. The first does not mathematically cause them.
+The same agent, model, task, and configuration did not produce remotely stable bills across two repetitions:
 
-Our recoverable final production code contains **512,412 tokens**. That is only **0.0568% of all tokens used by the 140 Codex runs**. The per-run evidence and missing-body handling are in [`ponytail-code-runs.csv`](../assets/plugin-token-savings/ponytail-code-runs.csv); the repository's broader relationship between submitted code and harness success is documented in [`current-test-set-record.md`](current-test-set-record.md#5-submitted-production-code-volume-and-harness-success).
+| Arm | Cost in the two runs | Cost range / mean | Token range / mean | Round range / mean |
+| --- | -------------------: | ----------------: | -----------------: | -----------------: |
+| No plugin | $4.139647 - $6.424245 | **43.25%** | 53.02% | 40.00% |
+| Ponytail | $3.569452 - $6.057281 | **51.69%** | 57.36% | 47.79% |
+| RTK | $4.789893 - $6.532388 | **30.78%** | 39.75% | 26.67% |
 
-Now make the assumption as favorable as possible: Ponytail removes **80% of all final functional code**, perfectly, with no missing behavior and no extra reasoning. Even pricing every removed code token at the expensive output rate, the equivalent saving is only **$12.30**, or **1.81% of total task cost**.
+Here, "range / mean" is the gap between the two runs divided by their mean. It is not a confidence interval; with n=2, pretending to have one would be statistical cosplay.
 
-So yes, "80% less code" can coexist with "less than 2% cheaper." This is not paradoxical. It is arithmetic.
+But the scale still matters. Ponytail's apparent **8.87%** cost saving sits inside a **51.69%** within-arm cost swing. RTK's apparent **7.18%** cost increase sits inside a **30.78%** swing. Even the no-plugin pair moves **43.25%** without any plugin to praise or blame.
 
-Less code can improve maintenance. It can reduce pointless abstractions. Those are legitimate engineering benefits. But selling fewer LOC as a major token-cost breakthrough is like removing the receipt from a grocery bag and claiming the groceries now weigh less.
+These data therefore do **not** identify a plugin effect. They show that natural trajectory variance is a much more plausible explanation for these small mean differences until a larger repeated experiment separates signal from noise. Declaring victory from two runs while ignoring a within-group swing four to six times larger is not benchmarking. It is numerology with a README.
 
-## RTK saves 90% of a thing that barely reaches the bill
+What the experiment does establish is simpler: a local compression claim does not reliably predict the complete-task bill. Ponytail's mean moved modestly down; RTK's moved up. Neither result resembles the giant percentage printed on the local optimization.
 
-[RTK](https://github.com/rtk-ai/rtk) compresses terminal output and advertises **60%-90% savings** for supported commands. Unlike the LOC argument, this at least targets context that can be large and repetitive.
+## Here is the actual coding-agent bill
 
-We mapped its published per-command rates to **1,082 uniquely classifiable shell calls** in the Codex runs. Their returns contain **1,458,927 tokens**, only **0.1618% of all task tokens**. Apply RTK's own rates and the directly attributable saving is **$5.74, or 0.84% of total cost**. Give every eligible command a perfect 90% reduction and it becomes **$6.57, or 0.96%**. The command-by-command evidence is in [`rtk-operation-summary.csv`](../assets/plugin-token-savings/rtk-operation-summary.csv).
+The broader repository dataset contains **140 Codex CLI Medium and High runs**: **10,365 agent rounds, 901,608,531 tokens, and $680.34 in modeled API cost**. No Tura runs are included.
 
-To push the number as high as possible, we also calculated an absurdly generous upper bound: every compressible command output remains in context until the task ends and is reread on every later round. That produces **4.96%** using RTK's actual rates, or **5.72%** under a universal lossless 90% reduction.
+| What Codex consumed | Share of all tokens | Share of cost |
+| ------------------- | ------------------: | ------------: |
+| Cached input | **96.46%** | **63.91%** |
+| New uncached input | 3.16% | **20.94%** |
+| Model output | 0.38% | **15.14%** |
 
-In other words, the observable saving is below 1%. It reaches roughly 5% only after giving the plugin a fantasy scenario in which every eligible output survives forever and compression never removes anything useful.
+The complete calculation is in the [plugin token-savings analysis directory](https://github.com/Tura-AI/benchmark/tree/main/assets/plugin-token-savings). Under the repository pricing model, uncached input costs $5/M, cached input $0.50/M, and output $30/M. Cached input is one tenth the price of new input.
 
-The big "90%" was real. The implied saving was not. Again: denominator.
+The four published plugin runs had the same shape: cached input was **96.74%** of Ponytail tokens and **97.27%** of RTK tokens. Apparently the denominator did not install the plugin.
 
-## Saving four cents can easily cost five dollars
+A coding agent repeatedly carries prompt, history, commands, and command results into later rounds. Shortening one fragment can produce an impressive local percentage while barely touching the expensive complete trajectory.
 
-The average Codex run in this dataset costs **$4.86**. RTK's directly attributable scenario saves about **$0.041 per run**. A cost increase of only **0.84%** erases the saving. At the observed average cost per round, roughly **0.6 additional rounds per task** are enough.
+## Prompt and LOC savings are especially good comedy
 
-That matters because missing information causes more searches, repeated commands, extra tests, and sometimes failure. This benchmark's [round analysis](current-test-set-record.md#42-round-count-and-fitted-success-probability) also shows that extra rounds are not automatically waste: for Codex Medium, moving from the first to third round-count quartile corresponded to a fitted **+8.7 percentage-point** success difference. Sometimes those rounds are diagnosis and verification doing their job.
+Ponytail's Codex rules contain about **569 tokens**. Give the claim every advantage: put those rules in every one of the 10,365 rounds and shorten them by 90% with zero quality loss. The modeled saving across all 140 runs is about **$2.98**, or **0.44%** of total cost.
 
-The research says the same thing more politely:
+That is roughly two cents per task. Please alert the finance department.
 
-- [Bai et al. (2026)](https://arxiv.org/abs/2604.22750) find agentic coding tasks consume about **1,000x** more tokens than code chat or code reasoning, driven mainly by repeated input; identical task/model runs can vary by **30x**.
-- [Shin et al. (2026)](https://arxiv.org/abs/2601.14470) find code review consumes **59.4%** of tokens in their ChatDev study, while initial coding is a much smaller part of the workflow.
-- [Xiao et al. (2026)](https://arxiv.org/abs/2509.23586) show that careful trajectory reduction can cut input tokens **39.9%-59.7%** and total cost **21.1%-35.9%** without hurting performance. But their crude deletion baseline reduced pass rate by **7%** and increased steps by **14%**.
-- [SWE-agent](https://arxiv.org/abs/2405.15793) and [Agentless](https://arxiv.org/abs/2407.01489) show that interface and workflow design matter. [Lost in the Middle](https://arxiv.org/abs/2307.03172) shows why removing noise can help, but also why preserving the right information matters more than maximizing a compression percentage.
+The LOC argument is worse. Recoverable final production code in the 140 runs contains **512,412 tokens**, only **0.0568%** of all tokens consumed. Suppose Ponytail magically removes **80% of every functional code token**, never deletes behavior, and never causes another reasoning step. Even valuing every removed token at the expensive output rate, the saving is **1.81%** of total task cost.
 
-Notice what the successful research optimizes: the trajectory, workflow, and information quality. Not a tiny prompt fragment. Not LOC as a vanity metric. Not one terminal command shown without the complete-task denominator.
+Less code can be better engineering. But using LOC reduction as evidence of a huge inference-cost reduction is like shortening item names on a restaurant bill and announcing that dinner is cheaper.
 
-## Before believing the next 90% claim
+## RTK's 90% still belongs to a tiny slice
 
-Ask four questions:
+Across the 140 runs, we could uniquely classify **1,082 RTK-supported shell calls** containing **1,458,927 returned tokens**. That payload is just **0.1618%** of all task tokens. Apply a perfect 90% reduction to every eligible return and the directly attributable modeled saving is **0.96%** of total cost.
 
-1. What percentage of the **complete task** did the compressed material represent?
-2. Was it cached input, uncached input, reasoning, or expensive output?
-3. Did success rate, rounds, retries, or latency get worse?
-4. Was the result measured on paired tasks, or merely multiplied from a README claim?
+To manufacture a larger ceiling, we also assumed every compressible output remains in context until the task ends and gets reread on every later round. Under that deliberately generous fantasy, universal lossless 90% compression reaches **5.72%**.
 
-If those numbers are missing, the plugin is not showing savings. It is showing a magic trick for people who stop reading at the percent sign.
+So the marketing number can be 90% while the complete-task saving stays below 1%. It approaches 5% only after we grant permanent retention, perfect classification, perfect compression, and zero information loss. The rabbit is real; the hat is doing most of the work.
 
-Ponytail may still be useful as an anti-overengineering discipline. RTK may still be a good terminal-output formatter. Use them for those benefits if they survive an A/B test.
+## One outside paper is enough
 
-Just stop pretending that removing 90% of 0.16% is a revolution in agent economics.
+[Bai et al., *How Do AI Agents Spend Your Money?*](https://arxiv.org/abs/2604.22750) analyze trajectories from eight frontier models on SWE-bench Verified. They report that agentic coding consumes about **1,000x** more tokens than code reasoning or code chat, that **input rather than output drives total consumption**, and that runs on the same task can differ by up to **30x**. Higher token use also did not reliably mean higher accuracy.
+
+That is the only external paper needed here. Coding-agent cost is a trajectory problem with huge run-to-run variance. A local compression ratio is not a task-level economic result. It is a numerator looking for an unsuspecting denominator.
+
+## Do not mix our three evidence layers
+
+Our repository separates three questions:
+
+| Evidence | Scope | What it can support |
+| -------- | ----- | ------------------- |
+| **Matched plugin runs** | 4 plugin runs + 2 same-configuration no-plugin runs on one Rust-to-Python repository rewrite | A small end-to-end observation. Mean differences are smaller than within-arm variation and cannot establish causality. |
+| **Broad cost distribution** | 140 Codex Medium/High runs across the published benchmark | Where tokens and modeled cost sit in coding-agent trajectories. |
+| **Claim-rate scenarios** | Ponytail prompt/LOC and RTK command payloads mapped onto those 140 runs | Upper bounds and arithmetic counterexamples, not A/B outcomes. |
+
+The [matched-run directory](https://github.com/Tura-AI/benchmark/tree/main/blog_data/token-saving-plugin-eza) and [broader analysis directory](https://github.com/Tura-AI/benchmark/tree/main/assets/plugin-token-savings) remain separate because mixing measured A/B outcomes with claim-rate scenarios would repeat the exact denominator trick being mocked.
+
+Ponytail may be useful as an anti-overengineering discipline. RTK may be useful as a terminal-output formatter. Test those benefits honestly. Just stop waving "90%" around as if percentages are transferable between denominators.
+
+## What real task-level saving looks like
+
+Tura Direct does not celebrate shrinking one tool response. It changes the **complete agent policy** to reduce trajectory tokens and rounds. Across the same five repository-rewrite tasks, it recorded **8.37M tokens, 123 rounds, and $17.81** at a **74.8% harness micro-rate**. Codex Medium recorded **48.98M tokens, 425 rounds, and $43.66** at **74.4%**. That is **82.9% fewer tokens, 71.1% fewer rounds, and 59.2% lower modeled cost across the whole task set**, not 90% of one conveniently chosen crumb. These are observed complete-configuration results, not proof that one isolated Tura component caused the difference; the public runs are in the [rewrite results directory](https://github.com/Tura-AI/benchmark/tree/main/results/rewrite).
+
+That is the denominator that matters. The calculator is free.

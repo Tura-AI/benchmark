@@ -14,6 +14,10 @@ const claims = readJson(
 );
 const code = readJson("assets/harness-code-statistics/summary.json");
 const pluginSavings = readJson("assets/plugin-token-savings/summary.json");
+const pluginAbRuns = readJson("blog_data/token-saving-plugin-eza/runs.json");
+const pluginAbSummary = readJson(
+  "blog_data/token-saving-plugin-eza/summary.json",
+);
 const pluginBlog = fs.readFileSync(
   path.join(root, "doc/blog-token-saving-plugins.md"),
   "utf8",
@@ -242,19 +246,20 @@ test("package scripts expose the ordered shared analysis pipeline", () => {
   const packageJson = readJson("package.json");
   assert.equal(
     packageJson.scripts["analysis:reports"],
-    "npm run analysis:model-runs && npm run analysis:claim-charts && npm run analysis:harness-code && npm run analysis:plugin-savings",
+    "npm run analysis:model-runs && npm run analysis:claim-charts && npm run analysis:harness-code && npm run analysis:plugin-savings && npm run analysis:plugin-ab",
   );
   for (const name of [
     "analysis:model-runs",
     "analysis:claim-charts",
     "analysis:harness-code",
     "analysis:plugin-savings",
+    "analysis:plugin-ab",
   ]) {
     assert.match(packageJson.scripts[name], /scripts\/python\.mjs/);
   }
 });
 
-test("the plugin analysis is Codex-only and the English blog cites primary research", () => {
+test("the plugin analysis is Codex-only and the English blog cites one primary paper", () => {
   assert.deepEqual(pluginSavings.population.configurations, [
     "codex-cli-high",
     "codex-cli-medium",
@@ -264,18 +269,71 @@ test("the plugin analysis is Codex-only and the English blog cites primary resea
   assert.match(pluginBlog, /901,608,531/);
   assert.match(pluginBlog, /96\.46%/);
   assert.match(pluginBlog, /0\.0568%/);
-  for (const paper of [
-    "2604.22750",
-    "2601.14470",
-    "2509.23586",
-    "2407.01489",
-    "2405.15793",
-    "2307.03172",
-  ]) {
-    assert.match(pluginBlog, new RegExp(paper));
-  }
+  assert.match(pluginBlog, /2604\.22750/);
+  assert.equal(
+    [...pluginBlog.matchAll(/https:\/\/arxiv\.org\/abs\/([0-9.]+)/g)].length,
+    1,
+  );
   assert.doesNotMatch(pluginBlog, /[\u3400-\u9fff]/);
   assert.doesNotMatch(pluginReport, /[\u3400-\u9fff]/);
+});
+
+test("the public plugin A/B package is complete and matches the article", () => {
+  assert.equal(pluginAbRuns.runs.length, 6);
+  assert.equal(
+    pluginAbRuns.runs.filter((run) => run.arm !== "no-plugin").length,
+    4,
+  );
+  assert.ok(pluginAbRuns.runs.every((run) => run.codex_exit_code === 0));
+  assert.deepEqual(pluginAbRuns.runs.map((run) => run.run).sort(), [
+    "no-plugin-high-r1",
+    "no-plugin-high-r2",
+    "ponytail-r2",
+    "ponytail-r3",
+    "rtk-r2",
+    "rtk-r3",
+  ]);
+  assert.equal(pluginAbSummary.aggregates.ponytail.n, 2);
+  assert.equal(pluginAbSummary.aggregates.rtk.n, 2);
+  assert.equal(pluginAbSummary.aggregates["no-plugin"].n, 2);
+  assert.ok(
+    Math.abs(
+      pluginAbSummary.deltas_vs_no_plugin_high.ponytail.cost_percent +
+        8.87134211519769,
+    ) < 1e-9,
+  );
+  for (const arm of ["no-plugin", "ponytail", "rtk"]) {
+    assert.ok(
+      pluginAbSummary.within_arm_variation[arm].cost_usd.range_percent_of_mean >
+        Math.abs(
+          pluginAbSummary.deltas_vs_no_plugin_high.ponytail.cost_percent,
+        ),
+    );
+  }
+  for (const artifact of [
+    "README.md",
+    "runs.json",
+    "summary.json",
+    "methodology.json",
+    "round-activation-audit.jsonl",
+  ]) {
+    assert.ok(
+      fs.existsSync(
+        path.join(root, "blog_data/token-saving-plugin-eza", artifact),
+      ),
+      artifact,
+    );
+  }
+  assert.match(pluginBlog, /Matched plugin runs/);
+  assert.match(pluginBlog, /Broad cost distribution/);
+  assert.match(pluginBlog, /Claim-rate scenarios/);
+  assert.match(pluginBlog, /Rust.*Python/i);
+  assert.match(pluginBlog, /51\.69%/);
+  assert.match(pluginBlog, /30\.78%/);
+  assert.match(pluginBlog, /43\.25%/);
+  assert.match(pluginBlog, /293-round activation audit/);
+  assert.doesNotMatch(pluginBlog, /Ponytail, all runs/i);
+  assert.doesNotMatch(pluginBlog, /426-round activation audit/);
 });
 
 test("the evidence record uses continuous prose without observation labels", () => {

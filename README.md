@@ -110,11 +110,14 @@ quota.
 - [Architecture and repository contracts](doc/architecture.md)
 - [Benchmark methodology](doc/benchmark-methodology.md)
 - [Current test-set evidence record](doc/current-test-set-record.md)
+- [Token-saving plugins article](doc/blog-token-saving-plugins.md)
+- [Ponytail/RTK matched-run data](blog_data/token-saving-plugin-eza/README.md)
 - [Debug workspace recovery](doc/debug-workspace-recovery.md)
 
-Published, reproducible artifacts live under `results/`. Local logs, caches,
-downloaded repositories, workspaces, and provider state belong under the
-ignored `raw/` and `.tura/` directories.
+Published, reproducible benchmark artifacts live under `results/`; focused
+public datasets used by articles live under `blog_data/`. Local logs, caches,
+downloaded repositories, workspaces, credentials, and provider state belong
+under the ignored `raw/` and `.tura/` directories.
 
 Legacy DeepSWE debug runs can rebuild their published changed-file workspaces
 from raw patches with `npm run recover:debug-workspaces`.
@@ -123,8 +126,8 @@ Use `npm run check:debug-workspaces` as a publication gate.
 ### Regenerate the published statistical report assets
 
 Install the pinned analysis dependencies, then regenerate the configured
-relationship data, five cross-run figures, two submitted-code figures, and the
-Ponytail/RTK token-savings analysis:
+relationship data, five cross-run figures, two submitted-code figures, the
+140-run token-savings scenarios, and the matched Ponytail/RTK eza report:
 
 ```sh
 python -m pip install -r scripts/model_run_statistics_requirements.txt
@@ -134,7 +137,8 @@ npm run analysis:reports
 The command reads the published run contracts and writes auditable CSV, JSON,
 Markdown, PNG, and SVG outputs under `assets/model-run-statistics` and
 `assets/harness-code-statistics`, plus the auditable plugin tables and report
-under `assets/plugin-token-savings`. It does not launch agents or consume
+under `assets/plugin-token-savings`, plus the matched-run report under
+`blog_data/token-saving-plugin-eza`. It does not launch agents or consume
 provider quota. `config/analysis.json` is the single source of truth for the
 report cohort, population checks, exclusions, pricing, code metric, output
 paths, and published artifact names.
