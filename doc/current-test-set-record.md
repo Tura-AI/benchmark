@@ -46,6 +46,11 @@ single isolated mechanisms. The exact configurations and source populations are:
 | Codex CLI Medium | Locally instrumented Codex build | GPT-5.6 SOL | Medium    |             70 |                70 |
 | Codex CLI High   | Official Codex CLI `0.144.1`     | GPT-5.6 SOL | High      |             70 |                70 |
 
+All published Tura DeepSWE runs used Tura's Bash surface (`tura exec bash
+--json`). Bash is part of the named DeepSWE configuration because disabling it
+can severely impair repository exploration, editing, and verification; a Tura
+DeepSWE run without Bash is not comparable with these results.
+
 DeepSWE observations come from six canonical reports under
 [`results/debug`](../results/debug/): three reports containing Tura Balanced,
 Tura Direct, and Codex Medium, and three reports containing Codex High. Rewrite

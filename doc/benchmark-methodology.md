@@ -165,6 +165,14 @@ Each selected task had between 159 and 164 eligible official trials in the captu
 
 Each run starts from the task's pinned base commit and isolated environment. The agent receives the task instruction and edits the workspace. The official task verifier then evaluates the resulting repository state. Pier provides the upstream workspace-and-trace execution model for Harbor tasks, while the local benchmark repository normalizes agent runs and verifier artifacts into its own contracts.[^pier-repository] A valid verifier report with reward `1` is a pass; a valid report with reward `0` is a task failure.
 
+For DeepSWE, every Tura configuration uses the Bash tool surface and launches as
+`tura exec bash --json`. This setting is mandatory rather than an optional CLI
+preference: disabling Bash can severely reduce Tura's effectiveness on
+repository-level investigation, editing, and verification. The runner forces
+the setting and rejects a Tura invocation that does not archive the expected
+argument prefix; such a run is configuration-invalid and cannot be pooled with
+the published Tura DeepSWE results.
+
 Infrastructure outcomes are not task failures. A non-zero verifier process exit, missing report, malformed reward, unavailable image, workspace-preparation failure, timeout outside the task contract, or artifact-write failure is labeled **invalid/infrastructure failure** and excluded from the pass-rate denominator until rerun or explicitly reported as missing. Treating infrastructure failures as zero would confound agent capability with benchmark availability.
 
 ## 5. Rewrite subset

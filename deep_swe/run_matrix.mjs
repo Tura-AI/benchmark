@@ -36,6 +36,7 @@ import {
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
+const DEEP_SWE_TURA_SHELL = "bash";
 const benchmarkConfig = readJson(
   path.resolve(
     process.env.TURA_BENCHMARK_CONFIG ||
@@ -199,7 +200,9 @@ if (variants.some((variant) => variant.agent === "codex-cli")) {
 delete process.env.COMMAND_RUN_AGENT_TURA_EMBEDDED;
 delete process.env.COMMAND_RUN_AGENT_TURA_SANDBOX;
 delete process.env.TURA_COMMAND_RUN_SANDBOX;
-process.env.COMMAND_RUN_AGENT_TURA_SHELL = "bash";
+// DeepSWE depends on Tura's Bash tool surface for repository exploration,
+// implementation, and verification. Do not permit callers to downgrade it.
+process.env.COMMAND_RUN_AGENT_TURA_SHELL = DEEP_SWE_TURA_SHELL;
 process.env.COMMAND_RUN_AGENT_TURA_EXE = turaExe;
 if (fs.existsSync(turaRouterExe)) process.env.TURA_ROUTER_BIN = turaRouterExe;
 if (codexExe) process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE = codexExe;
@@ -323,7 +326,7 @@ const manifest = {
   priority_enabled: false,
   tura_embedded: false,
   tura_sandbox: false,
-  tura_shell: "bash",
+  tura_shell: DEEP_SWE_TURA_SHELL,
   shared_tura_task_containers: sharedTuraTaskContainers,
   docker_concurrency: concurrency,
   agent_worker_capacity: sharedTuraTaskContainers
@@ -1593,9 +1596,10 @@ async function validateScheme(
 
   let dockerRoutingOk = true;
   if (genericAgentKind(job.agent) === "tura") {
-    if (args.slice(0, 3).join(" ") !== "exec bash --json")
+    const expectedPrefix = `exec ${DEEP_SWE_TURA_SHELL} --json`;
+    if (args.slice(0, 3).join(" ") !== expectedPrefix)
       errors.push(
-        `Tura args do not start with exec bash --json: ${args.slice(0, 3).join(" ")}`,
+        `Tura args do not start with ${expectedPrefix}: ${args.slice(0, 3).join(" ")}`,
       );
     if (invocation.env?.TURA_BASH_DOCKER_CONTAINER !== container)
       errors.push(

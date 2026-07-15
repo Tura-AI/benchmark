@@ -23,6 +23,7 @@ const env = {
   ...process.env,
   COMMAND_RUN_AGENT_AGENTS: "balanced,direct",
   COMMAND_RUN_AGENT_REASONING_EFFORT: reasoning,
+  COMMAND_RUN_AGENT_TURA_SHELL: "bash",
   COMMAND_RUN_AGENT_RUN_ID: runId,
   DEEP_SWE_RUN_SEGMENT: "tura-balanced-direct",
   DEEP_SWE_SHARED_TASK_CONTAINERS: "1",

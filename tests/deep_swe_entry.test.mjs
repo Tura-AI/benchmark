@@ -61,6 +61,28 @@ test("DeepSWE task runner plan does not download or launch the matrix", () => {
   assert.equal(plan.variants[0].agent, "direct");
 });
 
+test("public DeepSWE plans cannot override Tura Bash", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.join(root, "scripts", "benchmark.mjs"),
+      "plan",
+      "--task",
+      "deep-swe-v1.1",
+      "--agents",
+      "balanced",
+      "--replicates",
+      "1",
+      "--env",
+      "COMMAND_RUN_AGENT_TURA_SHELL=shell_command",
+    ],
+    { cwd: root, encoding: "utf8", windowsHide: true },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const plan = JSON.parse(result.stdout);
+  assert.equal(plan.jobs[0].env.COMMAND_RUN_AGENT_TURA_SHELL, "bash");
+});
+
 test("DeepSWE plan supports a shared balanced/direct task matrix", () => {
   const plan = buildDeepSwePlan({
     TURA_BENCHMARK_CONFIG: path.join(root, "config", "benchmark.json"),
@@ -182,8 +204,11 @@ test("DeepSWE Tura launch is guarded by the bash argument preflight", () => {
     path.join(root, "lib", "generic_agent_cli.mjs"),
     "utf8",
   );
-  assert.match(runner, /COMMAND_RUN_AGENT_TURA_SHELL = "bash"/);
-  assert.match(runner, /args\.slice\(0, 3\).*"exec bash --json"/s);
+  assert.match(runner, /COMMAND_RUN_AGENT_TURA_SHELL = DEEP_SWE_TURA_SHELL/);
+  assert.match(
+    runner,
+    /expectedPrefix = `exec \$\{DEEP_SWE_TURA_SHELL\} --json`/,
+  );
   assert.match(agentCli, /shellSurface === "bash".*\[shellSurface\]/s);
   assert.match(runner, /This is an unattended benchmark run/);
   assert.match(

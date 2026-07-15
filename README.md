@@ -88,6 +88,13 @@ CLI on `PATH`, and valid provider authentication. The first run checks out the
 pinned DeepSWE revision under `raw/_cache/deep-swe`; later runs reuse that
 checkout and Docker's image cache. Local run data is written under `raw/`.
 
+Every DeepSWE run that uses Tura must enable Tura's Bash surface. The repository
+enforces `tura exec bash --json` (recorded as `tura_shell: "bash"`) in the task
+declaration, public runner, and matrix preflight. Do not replace it with the
+default `shell_command` surface: doing so can severely reduce repository-task
+performance and makes the run incomparable with the published Tura DeepSWE
+configuration.
+
 Before a live run, check Docker and the exact agents in the intended matrix:
 
 ```sh

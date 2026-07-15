@@ -131,6 +131,14 @@ Embedded Tura mode is prohibited because its `command_run` calls are not
 router-owned; the runner rejects `COMMAND_RUN_AGENT_TURA_EMBEDDED=1` and never
 adds `--embedded`.
 
+DeepSWE has an additional Tura launch invariant: Tura must run through the Bash
+surface as `tura exec bash --json`. The task declaration and public runner set
+`COMMAND_RUN_AGENT_TURA_SHELL=bash`, the matrix runner reasserts it, the
+manifest records `tura_shell: "bash"`, and invocation preflight rejects any
+other prefix. This is part of the benchmark configuration because removing Bash
+can severely degrade DeepSWE performance; a non-Bash Tura run is not comparable
+with the published DeepSWE results.
+
 Codex CLI archives preserve untouched `stdout.jsonl` evidence and also write
 `codex-token-usage.normalized.jsonl` and `codex-token-usage-summary.json`.
 Normalized usage is deduplicated by cumulative `total_usage`; summaries, round

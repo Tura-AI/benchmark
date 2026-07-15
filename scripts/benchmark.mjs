@@ -160,6 +160,10 @@ function buildJob(task, agent, replicate) {
     env.TURA_BENCHMARK_MODEL = model;
     if (agent.modelEnv) env[agent.modelEnv] = model;
   }
+  // Bash is part of the DeepSWE Tura configuration, not a user-tunable
+  // convenience. Reassert it after --env parsing so plans and live runs agree.
+  if (task.id === "deep-swe-v1.1" && agent.kind === "tura")
+    env.COMMAND_RUN_AGENT_TURA_SHELL = "bash";
   if (task.kind === "design") env.COMMAND_RUN_DESIGN_TASK = task.id;
   return {
     task: task.id,
