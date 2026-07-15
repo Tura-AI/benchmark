@@ -123,7 +123,8 @@ Use `npm run check:debug-workspaces` as a publication gate.
 ### Regenerate the published statistical report assets
 
 Install the pinned analysis dependencies, then regenerate the configured
-relationship data, five cross-run figures, and two submitted-code figures:
+relationship data, five cross-run figures, two submitted-code figures, and the
+Ponytail/RTK token-savings analysis:
 
 ```sh
 python -m pip install -r scripts/model_run_statistics_requirements.txt
@@ -132,10 +133,11 @@ npm run analysis:reports
 
 The command reads the published run contracts and writes auditable CSV, JSON,
 Markdown, PNG, and SVG outputs under `assets/model-run-statistics` and
-`assets/harness-code-statistics`. It does not launch agents or consume provider
-quota. `config/analysis.json` is the single source of truth for the report
-cohort, population checks, exclusions, pricing, code metric, output paths, and
-published artifact names.
+`assets/harness-code-statistics`, plus the auditable plugin tables and report
+under `assets/plugin-token-savings`. It does not launch agents or consume
+provider quota. `config/analysis.json` is the single source of truth for the
+report cohort, population checks, exclusions, pricing, code metric, output
+paths, and published artifact names.
 
 ## License
 

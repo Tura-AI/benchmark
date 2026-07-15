@@ -101,6 +101,9 @@ const planningOverride = parsePlanningOverride(
 const codexGoalsEnabled = truthy(
   process.env.COMMAND_RUN_AGENT_CODEX_GOALS || "0",
 );
+const codexBypassHookTrust = truthy(
+  process.env.COMMAND_RUN_AGENT_CODEX_BYPASS_HOOK_TRUST || "0",
+);
 const turaGoalEnabled = truthy(process.env.COMMAND_RUN_AGENT_TURA_GOAL || "0");
 const turaExplicitSessionId = truthy(
   process.env.COMMAND_RUN_AGENT_TURA_SESSION_ID || "0",
@@ -2481,6 +2484,7 @@ async function runCodexLike(
     "-m",
     model,
     "--dangerously-bypass-approvals-and-sandbox",
+    ...(codexBypassHookTrust ? ["--dangerously-bypass-hook-trust"] : []),
     "-c",
     `model_reasoning_effort="${reasoning}"`,
     ...(codexGoalsEnabled ? ["-c", "goals=true"] : []),

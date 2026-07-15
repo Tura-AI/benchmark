@@ -13,6 +13,15 @@ const claims = readJson(
   "assets/model-run-statistics/claim-charts/claim-chart-summary.json",
 );
 const code = readJson("assets/harness-code-statistics/summary.json");
+const pluginSavings = readJson("assets/plugin-token-savings/summary.json");
+const pluginBlog = fs.readFileSync(
+  path.join(root, "doc/blog-token-saving-plugins.md"),
+  "utf8",
+);
+const pluginReport = fs.readFileSync(
+  path.join(root, "assets/plugin-token-savings/report.md"),
+  "utf8",
+);
 
 function countNamedFiles(directory, fileName) {
   let count = 0;
@@ -113,6 +122,23 @@ test("generated summaries and rows agree with the configured population", () => 
     code.pricing_usd_per_1m_tokens,
     config.pricingUsdPer1mTokens,
   );
+  assert.equal(
+    pluginSavings.population.published_harness_runs,
+    expected.runsPerConfiguration * config.pluginSavingsConfigurations.length,
+  );
+  assert.deepEqual(
+    pluginSavings.population.configurations,
+    [...config.pluginSavingsConfigurations].sort(),
+  );
+  assert.equal(
+    pluginSavings.ponytail.code_content_observation.covered_runs +
+      pluginSavings.ponytail.code_content_observation.missing_code_body_runs,
+    expected.runsPerConfiguration * config.pluginSavingsConfigurations.length,
+  );
+  assert.deepEqual(
+    pluginSavings.population.pricing_usd_per_million,
+    config.pricingUsdPer1mTokens,
+  );
   assert.deepEqual(
     code.code_metric.source_extensions,
     [...config.codeMetric.sourceExtensions].sort(),
@@ -194,6 +220,7 @@ test("analysis scripts consume configuration instead of embedding the cohort", (
     "scripts/model_run_statistics.py",
     "scripts/model_run_claim_charts.py",
     "scripts/harness_code_size_analysis.py",
+    "scripts/plugin_token_savings.py",
   ].map((relative) => fs.readFileSync(path.join(root, relative), "utf8"));
   for (const source of scripts) {
     assert.doesNotMatch(source, /C:\\Users\\/);
@@ -205,7 +232,7 @@ test("analysis scripts consume configuration instead of embedding the cohort", (
       );
     }
   }
-  for (const source of scripts.slice(1)) {
+  for (const source of scripts.slice(1, 3)) {
     assert.match(source, /"svg\.hashsalt": "tura-benchmark-analysis-v1"/);
     assert.match(source, /metadata=SVG_METADATA/);
   }
@@ -215,15 +242,40 @@ test("package scripts expose the ordered shared analysis pipeline", () => {
   const packageJson = readJson("package.json");
   assert.equal(
     packageJson.scripts["analysis:reports"],
-    "npm run analysis:model-runs && npm run analysis:claim-charts && npm run analysis:harness-code",
+    "npm run analysis:model-runs && npm run analysis:claim-charts && npm run analysis:harness-code && npm run analysis:plugin-savings",
   );
   for (const name of [
     "analysis:model-runs",
     "analysis:claim-charts",
     "analysis:harness-code",
+    "analysis:plugin-savings",
   ]) {
     assert.match(packageJson.scripts[name], /scripts\/python\.mjs/);
   }
+});
+
+test("the plugin analysis is Codex-only and the English blog cites primary research", () => {
+  assert.deepEqual(pluginSavings.population.configurations, [
+    "codex-cli-high",
+    "codex-cli-medium",
+  ]);
+  assert.equal(pluginSavings.population.published_harness_runs, 140);
+  assert.match(pluginBlog, /No Tura runs are included/i);
+  assert.match(pluginBlog, /901,608,531/);
+  assert.match(pluginBlog, /96\.46%/);
+  assert.match(pluginBlog, /0\.0568%/);
+  for (const paper of [
+    "2604.22750",
+    "2601.14470",
+    "2509.23586",
+    "2407.01489",
+    "2405.15793",
+    "2307.03172",
+  ]) {
+    assert.match(pluginBlog, new RegExp(paper));
+  }
+  assert.doesNotMatch(pluginBlog, /[\u3400-\u9fff]/);
+  assert.doesNotMatch(pluginReport, /[\u3400-\u9fff]/);
 });
 
 test("the evidence record uses continuous prose without observation labels", () => {
