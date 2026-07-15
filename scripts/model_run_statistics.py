@@ -4,42 +4,32 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import csv
-import hashlib
 import json
 import math
-import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-import matplotlib as mpl
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.font_manager import FontProperties, fontManager
 from scipy.optimize import least_squares, minimize
 from scipy.special import expit
 
+from analysis_config import configured_path, load_analysis_config, repository_path
 
-AGENT_ORDER = ("tura-balanced", "tura-direct", "codex-cli")
+
+ANALYSIS_CONFIG = load_analysis_config()
+AGENT_ORDER = tuple(ANALYSIS_CONFIG["configurations"])
 AGENT_LABELS = {
     "tura-balanced": "Tura Balanced",
     "tura-direct": "Tura Direct",
-    "codex-cli": "Codex CLI",
+    "codex-cli-medium": "Codex CLI Medium",
+    "codex-cli-high": "Codex CLI High",
 }
-COLORS = {
-    "tura-balanced": "#008f87",
-    "tura-direct": "#d56538",
-    "codex-cli": "#6b5fb5",
+PRICE_PER_MILLION = dict(ANALYSIS_CONFIG["pricingUsdPer1mTokens"])
+RELATIONSHIP_EXCLUSIONS = {
+    item["runId"]: item for item in ANALYSIS_CONFIG["relationshipExclusions"]
 }
-BACKGROUND = "#f4f1ea"
-INK = "#0a0a0a"
-MUTED = "#474747"
-GRID = "#dedbd2"
-ACCENT = "#40e0d0"
-PRICE_PER_MILLION = {"uncached_input": 5.0, "cached_input": 0.5, "output": 30.0}
-BALANCED_MAX_ROUNDS = 90
 
 
 @dataclass(frozen=True)
@@ -74,11 +64,8 @@ class RunRecord:
 
 
 def exclusion_reason(record: RunRecord) -> str | None:
-    if not record.usage_available and record.total_tokens == 0:
-        return "usage-unavailable-zero-token-not-executed"
-    if record.agent_group == "tura-balanced" and record.rounds > BALANCED_MAX_ROUNDS:
-        return "balanced-sparse-tail-over-90-rounds"
-    return None
+    exclusion = RELATIONSHIP_EXCLUSIONS.get(record.run_id)
+    return str(exclusion["reason"]) if exclusion else None
 
 
 def select_analysis_records(
@@ -97,16 +84,11 @@ def select_analysis_records(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results", type=Path, default=Path("results"))
-    parser.add_argument(
-        "--reference-svg",
-        type=Path,
-        default=Path(r"C:\Users\liuliu\Documents\tura\assets\data\benchmark-agent-comparison.svg"),
-    )
+    parser.add_argument("--config", type=Path, default=Path("config/analysis.json"))
+    parser.add_argument("--results", type=Path)
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("results/design/model-run-statistics"),
     )
     return parser.parse_args()
 
@@ -138,8 +120,10 @@ def normalize_agent_group(*values: str | None) -> str:
         return "tura-balanced"
     if "tura-direct" in text:
         return "tura-direct"
-    if "codex" in text:
-        return "codex-cli"
+    if "codex" in text and "medium" in text:
+        return "codex-cli-medium"
+    if "codex" in text and "high" in text:
+        return "codex-cli-high"
     raise ValueError(f"Cannot identify agent group from: {values}")
 
 
@@ -188,17 +172,13 @@ def load_round_usage(
                 metadata = item["metadata"]
             indexes.append(int(item.get("roundIndex", item.get("index", len(indexes) + 1))))
             usage = item.get("usage") or {}
-            if any(
-                usage.get(key) is not None
-                for key in (
-                    "inputTokens",
-                    "cacheInputTokens",
-                    "outputTokens",
-                    "reasoningTokens",
-                    "totalTokens",
-                )
-            ):
-                populated_usage_rounds += 1
+            has_token_components = (
+                usage.get("inputTokens") is not None
+                and usage.get("outputTokens") is not None
+            )
+            if not has_token_components:
+                continue
+            populated_usage_rounds += 1
             input_tokens = int(usage.get("inputTokens") or 0)
             cached_tokens = int(usage.get("cacheInputTokens") or 0)
             output_tokens = int(usage.get("outputTokens") or 0)
@@ -319,119 +299,153 @@ def calculate_cost(input_tokens: int, cached_input_tokens: int, output_tokens: i
     ) / 1_000_000
 
 
-def load_runs(results_root: Path) -> list[RunRecord]:
+def load_runs(results_root: Path, reports: Sequence[dict]) -> list[RunRecord]:
     records: list[RunRecord] = []
-    harness_paths = sorted(results_root.glob("**/metadata/contracts/harness-report.json"))
-    for harness_path in harness_paths:
-        harness = read_json(harness_path)
-        category = str(harness.get("category") or "")
-        if category not in {"debug", "rewrite"}:
-            continue
-        contract_dir = harness_path.parent
-        rounds_path = contract_dir / "agent-rounds.jsonl"
-        task_path = contract_dir / "task-report.json"
-        summary_path = contract_dir.parent / "summary.json"
-        if not rounds_path.exists() or not task_path.exists() or not summary_path.exists():
-            raise FileNotFoundError(f"Incomplete contract set beside {harness_path}")
-
-        task_report = read_json(task_path)
-        summary = read_json(summary_path)
-        (
-            rounds,
-            round_usage,
-            metadata,
-            excluded_usage_rounds,
-            populated_usage_rounds,
-            usage_rows,
-        ) = load_round_usage(rounds_path)
-        try:
-            usage, usage_source = find_aggregate_usage(task_report, summary)
-        except ValueError as exc:
-            raise ValueError(f"{exc}: {summary_path}") from exc
-        round_usage_checked = populated_usage_rounds > 0
-        aggregate_snapshot_usage_rounds = 0
-        if round_usage_checked and round_usage != usage:
-            for row in usage_rows:
-                candidate = {key: round_usage[key] - row[key] for key in round_usage}
-                if row == usage and candidate == usage:
-                    round_usage = candidate
-                    aggregate_snapshot_usage_rounds = 1
-                    break
-        if round_usage_checked and round_usage != usage:
-            round_usage_checked = False
-        usage_available = not (
-            usage["totalTokens"] == 0 and str(metadata.get("usageEventSource") or "").lower() == "unavailable"
-        )
-        run_id = str(harness.get("runId") or task_report.get("runId") or harness_path.parent.parent.parent.name)
-        agent_id = str(
-            harness.get("agentId")
-            or task_report.get("agent")
-            or metadata.get("agentId")
-            or metadata.get("sourceAgentId")
-            or ""
-        )
-        agent_group = normalize_agent_group(agent_id, run_id, str(harness_path))
-        model = normalize_model(
-            agent_id,
-            metadata.get("model"),
-            task_report.get("source", {}).get("model") if isinstance(task_report.get("source"), dict) else None,
-            summary.get("model"),
-            summary.get("tura_model"),
-            run_id,
-        )
-        effort = normalize_effort(agent_id, metadata.get("reasoning"), summary.get("reasoning"))
-        passed = int(nested(harness, ("score", "passed")) or 0)
-        checks = int(nested(harness, ("score", "total")) or 0)
-        if checks <= 0 or not 0 <= passed <= checks:
-            raise ValueError(f"Invalid harness score in {harness_path}")
-        reported_tokens, reported_cost = find_reported_metrics(task_report, summary)
-        cost = calculate_cost(
-            usage["inputTokens"], usage["cacheInputTokens"], usage["outputTokens"]
-        )
-        records.append(
-            RunRecord(
-                run_id=run_id,
-                category=category,
-                report=str(harness.get("report") or ""),
-                task=str(harness.get("taskId") or task_report.get("task") or metadata.get("taskId") or ""),
-                agent_group=agent_group,
-                agent_id=agent_id,
-                model=model,
-                effort=effort,
-                rounds=rounds,
-                input_tokens=usage["inputTokens"],
-                cached_input_tokens=usage["cacheInputTokens"],
-                output_tokens=usage["outputTokens"],
-                reasoning_tokens=usage["reasoningTokens"],
-                total_tokens=usage["totalTokens"],
-                passed=passed,
-                checks=checks,
-                success_rate=passed / checks,
-                cost_usd=cost,
-                usage_available=usage_available,
-                usage_source=usage_source,
-                round_usage_total_tokens=round_usage["totalTokens"],
-                round_usage_checked=round_usage_checked,
-                aggregate_snapshot_usage_rounds=aggregate_snapshot_usage_rounds,
-                excluded_duplicate_usage_rounds=excluded_usage_rounds,
-                reported_total_tokens=reported_tokens,
-                reported_cost_usd=reported_cost,
-                source_path=str(harness_path.resolve()),
+    for report in reports:
+        report_dir = results_root / report["path"]
+        harness_paths = sorted(report_dir.glob("**/metadata/contracts/harness-report.json"))
+        if len(harness_paths) != int(report["expectedRuns"]):
+            raise ValueError(
+                f"Expected {report['expectedRuns']} contracts in {report['path']}, "
+                f"found {len(harness_paths)}"
             )
-        )
+        for harness_path in harness_paths:
+            harness = read_json(harness_path)
+            category = str(harness.get("category") or "")
+            if category != report["category"]:
+                raise ValueError(
+                    f"Configured category {report['category']} disagrees with {category}: "
+                    f"{harness_path}"
+                )
+            contract_dir = harness_path.parent
+            rounds_path = contract_dir / "agent-rounds.jsonl"
+            task_path = contract_dir / "task-report.json"
+            summary_path = contract_dir.parent / "summary.json"
+            if not rounds_path.exists() or not task_path.exists() or not summary_path.exists():
+                raise FileNotFoundError(f"Incomplete contract set beside {harness_path}")
+
+            task_report = read_json(task_path)
+            summary = read_json(summary_path)
+            (
+                rounds,
+                round_usage,
+                metadata,
+                excluded_usage_rounds,
+                populated_usage_rounds,
+                usage_rows,
+            ) = load_round_usage(rounds_path)
+            try:
+                usage, usage_source = find_aggregate_usage(task_report, summary)
+            except ValueError as exc:
+                raise ValueError(f"{exc}: {summary_path}") from exc
+            round_usage_checked = populated_usage_rounds > 0
+            aggregate_snapshot_usage_rounds = 0
+            if round_usage_checked and round_usage != usage:
+                for row in usage_rows:
+                    candidate = {key: round_usage[key] - row[key] for key in round_usage}
+                    if row == usage and candidate == usage:
+                        round_usage = candidate
+                        aggregate_snapshot_usage_rounds = 1
+                        break
+            if round_usage_checked and round_usage != usage:
+                round_usage_checked = False
+            usage_available = not (
+                usage["totalTokens"] == 0
+                and str(metadata.get("usageEventSource") or "").lower() == "unavailable"
+            )
+            run_id = str(
+                harness.get("runId")
+                or task_report.get("runId")
+                or harness_path.parent.parent.parent.name
+            )
+            agent_id = str(
+                harness.get("agentId")
+                or task_report.get("agent")
+                or metadata.get("agentId")
+                or metadata.get("sourceAgentId")
+                or ""
+            )
+            agent_group = normalize_agent_group(agent_id, run_id, str(harness_path))
+            model = normalize_model(
+                agent_id,
+                metadata.get("model"),
+                task_report.get("source", {}).get("model")
+                if isinstance(task_report.get("source"), dict)
+                else None,
+                summary.get("model"),
+                summary.get("tura_model"),
+                run_id,
+            )
+            effort = normalize_effort(
+                agent_id, metadata.get("reasoning"), summary.get("reasoning")
+            )
+            passed = int(nested(harness, ("score", "passed")) or 0)
+            checks = int(nested(harness, ("score", "total")) or 0)
+            if checks <= 0 or not 0 <= passed <= checks:
+                raise ValueError(f"Invalid harness score in {harness_path}")
+            reported_tokens, reported_cost = find_reported_metrics(task_report, summary)
+            cost = calculate_cost(
+                usage["inputTokens"], usage["cacheInputTokens"], usage["outputTokens"]
+            )
+            exclusion = RELATIONSHIP_EXCLUSIONS.get(run_id)
+            if exclusion and rounds != int(exclusion["rounds"]):
+                raise ValueError(
+                    f"Configured exclusion rounds disagree for {run_id}: "
+                    f"{rounds} != {exclusion['rounds']}"
+                )
+            records.append(
+                RunRecord(
+                    run_id=run_id,
+                    category=category,
+                    report=report_dir.name,
+                    task=str(
+                        harness.get("taskId")
+                        or task_report.get("task")
+                        or metadata.get("taskId")
+                        or ""
+                    ),
+                    agent_group=agent_group,
+                    agent_id=agent_id,
+                    model=model,
+                    effort=effort,
+                    rounds=rounds,
+                    input_tokens=usage["inputTokens"],
+                    cached_input_tokens=usage["cacheInputTokens"],
+                    output_tokens=usage["outputTokens"],
+                    reasoning_tokens=usage["reasoningTokens"],
+                    total_tokens=usage["totalTokens"],
+                    passed=passed,
+                    checks=checks,
+                    success_rate=passed / checks,
+                    cost_usd=cost,
+                    usage_available=usage_available,
+                    usage_source=usage_source,
+                    round_usage_total_tokens=round_usage["totalTokens"],
+                    round_usage_checked=round_usage_checked,
+                    aggregate_snapshot_usage_rounds=aggregate_snapshot_usage_rounds,
+                    excluded_duplicate_usage_rounds=excluded_usage_rounds,
+                    reported_total_tokens=reported_tokens,
+                    reported_cost_usd=reported_cost,
+                    source_path=harness_path.relative_to(results_root).as_posix(),
+                )
+            )
     return records
 
 
-def audit_runs(records: Sequence[RunRecord]) -> dict:
-    if len(records) != 270:
-        raise ValueError(f"Expected 270 debug/rewrite runs, found {len(records)}")
-    if len({record.run_id for record in records}) != len(records):
-        raise ValueError("Duplicate run IDs found")
+def audit_runs(records: Sequence[RunRecord], population: dict) -> dict:
+    expected_runs = int(population["sourceRuns"])
+    if len(records) != expected_runs:
+        raise ValueError(f"Expected {expected_runs} configured runs, found {len(records)}")
+    if len({record.source_path for record in records}) != len(records):
+        raise ValueError("Duplicate run contract paths found")
     coverage: dict[str, dict] = {}
     for group in AGENT_ORDER:
         group_records = [record for record in records if record.agent_group == group]
-        if len(group_records) != 90:
-            raise ValueError(f"Expected 90 runs for {group}, found {len(group_records)}")
+        expected_group_runs = int(population["runsPerConfiguration"])
+        if len(group_records) != expected_group_runs:
+            raise ValueError(
+                f"Expected {expected_group_runs} runs for {group}, found {len(group_records)}"
+            )
         coverage[group] = {
             "runs": len(group_records),
             "tasks": len({record.task for record in group_records}),
@@ -456,7 +470,7 @@ def audit_runs(records: Sequence[RunRecord]) -> dict:
         raise ValueError(f"Round and reported token totals disagree by up to {max(token_diffs)}")
     if cost_diffs and max(cost_diffs) > 5e-6:
         raise ValueError(f"Recomputed and reported costs disagree by up to {max(cost_diffs):.8f}")
-    return {
+    audit = {
         "run_count": len(records),
         "task_count": len({record.task for record in records}),
         "token_contracts_checked": len(token_diffs),
@@ -479,6 +493,11 @@ def audit_runs(records: Sequence[RunRecord]) -> dict:
         ),
         "coverage": coverage,
     }
+    if audit["task_count"] != int(population["tasks"]):
+        raise ValueError(
+            f"Expected {population['tasks']} tasks, found {audit['task_count']}"
+        )
+    return audit
 
 
 def summarize_analysis_sample(
@@ -670,235 +689,6 @@ def fit_success_models(records: Sequence[RunRecord]) -> dict[str, dict]:
     return diagnostics
 
 
-def extract_archivo(reference_svg: Path, output_dir: Path) -> Path | None:
-    if not reference_svg.exists():
-        return None
-    source = reference_svg.read_text(encoding="utf-8")
-    match = re.search(r"font-family:Archivo;src:url\(data:font/ttf;base64,([A-Za-z0-9+/=]+)\)", source)
-    if not match:
-        return None
-    font_path = output_dir / "assets" / "Archivo-Regular.ttf"
-    font_path.parent.mkdir(parents=True, exist_ok=True)
-    font_path.write_bytes(base64.b64decode(match.group(1)))
-    return font_path
-
-
-def configure_style(font_path: Path | None, output_dir: Path) -> FontProperties:
-    if font_path:
-        fontManager.addfont(str(font_path))
-        family = FontProperties(fname=str(font_path)).get_name()
-    else:
-        family = "Arial"
-    bold_path = output_dir / "assets" / "Archivo-Bold.ttf"
-    official_regular_path = output_dir / "assets" / "Archivo-Regular-Official.ttf"
-    for local_font in (official_regular_path, bold_path):
-        if local_font.exists():
-            fontManager.addfont(str(local_font))
-    mpl.rcParams.update(
-        {
-            "font.family": family,
-            "font.size": 11,
-            "axes.facecolor": BACKGROUND,
-            "figure.facecolor": BACKGROUND,
-            "savefig.facecolor": BACKGROUND,
-            "text.color": INK,
-            "axes.labelcolor": MUTED,
-            "axes.edgecolor": GRID,
-            "xtick.color": MUTED,
-            "ytick.color": MUTED,
-            "axes.linewidth": 0.6,
-            "grid.color": GRID,
-            "grid.linewidth": 0.6,
-            "grid.alpha": 1.0,
-            "svg.fonttype": "path",
-        }
-    )
-    return FontProperties(family=family)
-
-
-def stable_offsets(records: Sequence[RunRecord], width: float) -> np.ndarray:
-    values = []
-    for record in records:
-        digest = hashlib.sha256(record.run_id.encode("utf-8")).digest()
-        values.append(((int.from_bytes(digest[:2], "big") / 65535.0) - 0.5) * width)
-    return np.array(values)
-
-
-def start_figure(kicker: str, title: str, subtitle: str) -> tuple[plt.Figure, plt.Axes]:
-    figure, axis = plt.subplots(figsize=(12.8, 8.0), dpi=160)
-    figure.subplots_adjust(left=0.11, right=0.95, bottom=0.13, top=0.72)
-    figure.text(0.11, 0.93, kicker.upper(), color=MUTED, fontsize=10, weight="bold")
-    figure.text(0.11, 0.855, title, color=INK, fontsize=28, weight="bold")
-    figure.text(0.11, 0.795, subtitle, color=MUTED, fontsize=12)
-    figure.add_artist(
-        mpl.lines.Line2D([0.11, 0.95], [0.755, 0.755], transform=figure.transFigure, color=GRID, linewidth=0.7)
-    )
-    axis.grid(axis="y")
-    axis.grid(axis="x", alpha=0.45)
-    axis.spines[["top", "right"]].set_visible(False)
-    axis.spines[["left", "bottom"]].set_color(GRID)
-    axis.tick_params(length=0, pad=8)
-    return figure, axis
-
-
-def add_agent_key(figure: plt.Figure) -> None:
-    starts = (0.11, 0.32, 0.51)
-    for left, group in zip(starts, AGENT_ORDER):
-        figure.add_artist(
-            mpl.lines.Line2D(
-                [left, left + 0.025],
-                [0.735, 0.735],
-                transform=figure.transFigure,
-                color=COLORS[group],
-                linewidth=2.4,
-            )
-        )
-        figure.text(left + 0.032, 0.728, AGENT_LABELS[group], color=INK, fontsize=10, weight="bold")
-
-
-def save_figure(figure: plt.Figure, output_dir: Path, stem: str) -> None:
-    png_path = output_dir / f"{stem}.png"
-    svg_path = output_dir / f"{stem}.svg"
-    figure.savefig(png_path, dpi=200)
-    figure.savefig(svg_path)
-    plt.close(figure)
-
-
-def plot_tokens(
-    records: Sequence[RunRecord], diagnostics: dict[str, dict], output_dir: Path
-) -> None:
-    figure, axis = start_figure(
-        f"{len(records)} filtered sessions · {len({record.task for record in records})} tasks",
-        "Round count vs. total token use",
-        "Each point is one run; each agent group pools every task and model configuration.",
-    )
-    add_agent_key(figure)
-    for group in AGENT_ORDER:
-        subset = [
-            record
-            for record in records
-            if record.agent_group == group and record.usage_available
-        ]
-        rounds = np.array([record.rounds for record in subset], dtype=float)
-        tokens_m = np.array([record.total_tokens for record in subset], dtype=float) / 1_000_000
-        axis.scatter(
-            rounds + stable_offsets(subset, 1.2),
-            tokens_m,
-            s=24,
-            color=COLORS[group],
-            alpha=0.33,
-            linewidth=0,
-            zorder=2,
-        )
-        x_line = np.linspace(1, max(rounds), 360)
-        group_fit = diagnostics[group]
-        if group_fit["selected_model"] == "quadratic-context":
-            item = group_fit["quadratic_context"]
-            y_line = theory_predict((item["B_tokens"], item["c_tokens_per_round"]), x_line)
-        else:
-            item = group_fit["power_law"]
-            y_line = power_predict((item["a_tokens"], item["p"]), x_line)
-        axis.plot(x_line, y_line / 1_000_000, color=COLORS[group], linewidth=2.5, zorder=3)
-    axis.set_xlim(left=0)
-    axis.set_ylim(bottom=0)
-    axis.set_xlabel("Agent rounds")
-    axis.set_ylabel("Total tokens (millions)")
-    figure.text(
-        0.11,
-        0.055,
-        "FIT · Lines use leave-one-task-out selection · 3 documented anomalies excluded · points jittered < 0.6 round.",
-        color=MUTED,
-        fontsize=9,
-    )
-    save_figure(figure, output_dir, "01-rounds-vs-total-tokens")
-
-
-def plot_success(
-    records: Sequence[RunRecord], diagnostics: dict[str, dict], output_dir: Path
-) -> None:
-    figure, axis = start_figure(
-        f"{len(records)} filtered sessions · harness outcome weighted by checks",
-        "Round count vs. success rate",
-        "Points show run-level pass ratios; lines estimate association, not causal benefit from longer runs.",
-    )
-    add_agent_key(figure)
-    for group in AGENT_ORDER:
-        subset = [record for record in records if record.agent_group == group]
-        rounds = np.array([record.rounds for record in subset], dtype=float)
-        rates = np.array([record.success_rate for record in subset], dtype=float) * 100
-        sizes = 18 + 5 * np.sqrt(np.array([record.checks for record in subset], dtype=float))
-        y_offsets = stable_offsets(subset, 2.2)
-        axis.scatter(
-            rounds + stable_offsets(subset, 1.2),
-            np.clip(rates + y_offsets, 0, 100),
-            s=sizes,
-            color=COLORS[group],
-            alpha=0.28,
-            linewidth=0,
-            zorder=2,
-        )
-        x_line = np.linspace(1, max(rounds), 360)
-        item = diagnostics[group]
-        y_line = expit(item["alpha"] + item["beta"] * np.log1p(x_line)) * 100
-        axis.plot(x_line, y_line, color=COLORS[group], linewidth=2.5, zorder=3)
-    axis.set_xlim(left=0)
-    axis.set_ylim(-2, 102)
-    axis.set_yticks(np.arange(0, 101, 20), labels=[f"{value}%" for value in range(0, 101, 20)])
-    axis.set_xlabel("Agent rounds")
-    axis.set_ylabel("Harness success rate")
-    figure.text(
-        0.11,
-        0.055,
-        "METHOD · Weighted binomial fit: logit(success) = alpha + beta*log(1 + rounds). Marker area reflects check count.",
-        color=MUTED,
-        fontsize=9,
-    )
-    save_figure(figure, output_dir, "02-rounds-vs-success-rate")
-
-
-def plot_cost(records: Sequence[RunRecord], diagnostics: dict[str, dict], output_dir: Path) -> None:
-    figure, axis = start_figure(
-        f"{len(records)} filtered sessions · standard-tier API estimate",
-        "Token cost vs. round count",
-        "Every run is repriced consistently from uncached input, cached input, and output usage.",
-    )
-    add_agent_key(figure)
-    for group in AGENT_ORDER:
-        subset = [
-            record
-            for record in records
-            if record.agent_group == group and record.usage_available
-        ]
-        rounds = np.array([record.rounds for record in subset], dtype=float)
-        costs = np.array([record.cost_usd for record in subset], dtype=float)
-        axis.scatter(
-            rounds + stable_offsets(subset, 1.2),
-            costs,
-            s=24,
-            color=COLORS[group],
-            alpha=0.33,
-            linewidth=0,
-            zorder=2,
-        )
-        x_line = np.linspace(1, max(rounds), 360)
-        item = diagnostics[group]
-        y_line = power_predict((item["a_usd"], item["p"]), x_line)
-        axis.plot(x_line, y_line, color=COLORS[group], linewidth=2.5, zorder=3)
-    axis.set_xlim(left=0)
-    axis.set_ylim(bottom=0)
-    axis.set_xlabel("Agent rounds")
-    axis.set_ylabel("Estimated API cost (USD)")
-    axis.yaxis.set_major_formatter(mpl.ticker.StrMethodFormatter("${x:,.0f}"))
-    figure.text(
-        0.11,
-        0.055,
-        f"PRICE · $5.00 / 1M uncached input · $0.50 / 1M cached input · $30.00 / 1M output · N={len(records)} · Power-law trend.",
-        color=MUTED,
-        fontsize=9,
-    )
-    save_figure(figure, output_dir, "03-rounds-vs-token-cost")
-
-
 def write_csv(records: Sequence[RunRecord], output_dir: Path) -> None:
     path = output_dir / "run-level-data.csv"
     fieldnames = list(asdict(records[0]).keys())
@@ -913,7 +703,7 @@ def write_excluded_csv(
     excluded: Sequence[tuple[RunRecord, str]], output_dir: Path
 ) -> None:
     path = output_dir / "excluded-runs.csv"
-    fieldnames = ["exclusion_reason", *asdict(excluded[0][0]).keys()]
+    fieldnames = ["exclusion_reason", *RunRecord.__dataclass_fields__.keys()]
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
@@ -929,6 +719,11 @@ def write_report(
     cost_models: dict[str, dict],
     output_dir: Path,
 ) -> None:
+    exclusion_details = ", ".join(
+        f"{item['runId']} ({item['rounds']} rounds)"
+        for item in ANALYSIS_CONFIG["relationshipExclusions"]
+    )
+    price = PRICE_PER_MILLION
     diagnostics = {
         "source_audit": audit,
         "analysis_sample": analysis_sample,
@@ -971,15 +766,15 @@ def write_report(
         "",
         "- Source: run contracts under `results/debug` and `results/rewrite`.",
         f"- Source grain: {audit['run_count']} runs across {audit['task_count']} tasks.",
-        f"- Analysis grain after explicit exclusions: {analysis_sample['run_count']} runs across {analysis_sample['task_count']} tasks.",
-        "- Exclusions: 2 Tura Balanced sparse-tail runs above 90 rounds (113 and 242), plus 1 zero-token usage-unavailable run that did not execute.",
-        "- Grouping: all tasks, model versions, and effort configurations are pooled into one series per agent group.",
+        f"- Analysis grain after the documented Tura Balanced long-tail exclusion: {analysis_sample['run_count']} runs across {analysis_sample['task_count']} tasks.",
+        f"- Exclusions: {len(ANALYSIS_CONFIG['relationshipExclusions'])} configured runs: {exclusion_details}. They remain in source results and aggregate score tables but are omitted from every statistical figure and fitted relationship.",
+        "- Grouping: Tura Balanced High, Tura Direct High, Codex CLI Medium, and Codex CLI High remain separate configurations.",
         "- Rounds: reconstructed from each run's contiguous `agent-rounds.jsonl` indexes.",
         "- Usage: read from the run-level aggregate contract and, where the historical schema populated usage, independently checked against summed provider-round usage.",
         f"- Source usage-complete runs: {audit['usage_available_runs']}; usage-unavailable runs: {audit['usage_unavailable_runs']}.",
         f"- Aggregate-only historical usage: {audit['aggregate_only_usage_runs']} runs; their round contracts contain null usage fields.",
         "- Success: `sum(passed) / sum(checks)` for weighted summaries; points retain run-level ratios.",
-        "- Cost: `(uncached input*5 + cached input*0.5 + output*30) / 1,000,000` USD.",
+        f"- Cost: `(uncached input*{price['uncached_input']:g} + cached input*{price['cached_input']:g} + output*{price['output']:g}) / 1,000,000` USD.",
         "",
         "## Formula test",
         "",
@@ -1007,22 +802,43 @@ def write_report(
 
 def main() -> None:
     args = parse_args()
-    output_dir = args.output.resolve()
+    config = load_analysis_config(args.config)
+    global ANALYSIS_CONFIG, AGENT_ORDER, PRICE_PER_MILLION, RELATIONSHIP_EXCLUSIONS
+    ANALYSIS_CONFIG = config
+    AGENT_ORDER = tuple(config["configurations"])
+    PRICE_PER_MILLION = dict(config["pricingUsdPer1mTokens"])
+    RELATIONSHIP_EXCLUSIONS = {
+        item["runId"]: item for item in config["relationshipExclusions"]
+    }
+    results_root = (
+        repository_path(args.results)
+        if args.results
+        else configured_path(config, "resultsRoot")
+    )
+    output_dir = (
+        repository_path(args.output)
+        if args.output
+        else configured_path(config, "outputs", "modelRuns")
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
-    records = load_runs(args.results.resolve())
-    audit = audit_runs(records)
+    records = load_runs(results_root, config["reports"])
+    audit = audit_runs(records, config["population"])
     analysis_records, excluded = select_analysis_records(records)
     analysis_sample = summarize_analysis_sample(analysis_records, excluded)
-    if len(analysis_records) != 267 or len(excluded) != 3:
+    expected_relationship_runs = int(config["population"]["relationshipRuns"])
+    expected_exclusions = len(config["relationshipExclusions"])
+    if (
+        len(analysis_records) != expected_relationship_runs
+        or len(excluded) != expected_exclusions
+    ):
         raise ValueError(
-            f"Expected 267 included and 3 excluded runs, found "
+            f"Expected {expected_relationship_runs} included and "
+            f"{expected_exclusions} configured exclusions, found "
             f"{len(analysis_records)} and {len(excluded)}"
         )
     token_models = fit_token_models(analysis_records)
     success_models = fit_success_models(analysis_records)
     cost_models = fit_cost_models(analysis_records)
-    font_path = extract_archivo(args.reference_svg, output_dir)
-    configure_style(font_path, output_dir)
     write_csv(analysis_records, output_dir)
     write_excluded_csv(excluded, output_dir)
     write_report(
@@ -1033,9 +849,6 @@ def main() -> None:
         cost_models,
         output_dir,
     )
-    plot_tokens(analysis_records, token_models, output_dir)
-    plot_success(analysis_records, success_models, output_dir)
-    plot_cost(analysis_records, cost_models, output_dir)
     print(
         json.dumps(
             {

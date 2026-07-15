@@ -4,7 +4,7 @@ Tura Benchmark is the reproducible evaluation repository for long-horizon
 coding agents. It contains portable task definitions, agent and runtime
 configuration, benchmark runners, validation schemas, and published result
 artifacts for debug, rewrite, and design evaluations. The published Rewrite
-cohort contains five tasks, three configurations, two replicates, and 30
+cohort contains five tasks, four configurations, two replicates, and 40
 canonical sessions; its scoring and recomputed results are documented in the
 methodology and current evidence record below.
 
@@ -98,28 +98,11 @@ This command checks local executables and the Docker daemon only. It does not
 verify provider credentials, pull images, launch agents, or consume provider
 quota.
 
-### Rebuild the official mini-swe-agent 20-task matrix
-
-The repository publishes a summary-only normalization of all 20 tasks in the
-Tura DeepSWE inventory for official GPT-5.6 SOL Medium and High
-`mini-swe-agent` trials. Rebuild the eight reports and 160 runs from the current
-official trial index with:
-
-```sh
-npm run import:deep-swe:official
-```
-
-The import records the source SHA-256 and keeps every official trial row beside
-its normalized contracts. See the
-[official mini-swe-agent import record](doc/official-deepswe-mini-swe-agent-import.md)
-for selection, replicate, and missing-artifact rules.
-
 ## Documentation
 
 - [Architecture and repository contracts](doc/architecture.md)
 - [Benchmark methodology](doc/benchmark-methodology.md)
 - [Current test-set evidence record](doc/current-test-set-record.md)
-- [Official DeepSWE mini-swe-agent import](doc/official-deepswe-mini-swe-agent-import.md)
 - [Debug workspace recovery](doc/debug-workspace-recovery.md)
 
 Published, reproducible artifacts live under `results/`. Local logs, caches,
@@ -129,6 +112,23 @@ ignored `raw/` and `.tura/` directories.
 Legacy DeepSWE debug runs can rebuild their published changed-file workspaces
 from raw patches with `npm run recover:debug-workspaces`.
 Use `npm run check:debug-workspaces` as a publication gate.
+
+### Regenerate the published statistical report assets
+
+Install the pinned analysis dependencies, then regenerate the configured
+relationship data, five cross-run figures, and two submitted-code figures:
+
+```sh
+python -m pip install -r scripts/model_run_statistics_requirements.txt
+npm run analysis:reports
+```
+
+The command reads the published run contracts and writes auditable CSV, JSON,
+Markdown, PNG, and SVG outputs under `assets/model-run-statistics` and
+`assets/harness-code-statistics`. It does not launch agents or consume provider
+quota. `config/analysis.json` is the single source of truth for the report
+cohort, population checks, exclusions, pricing, code metric, output paths, and
+published artifact names.
 
 ## License
 

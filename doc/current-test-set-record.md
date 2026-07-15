@@ -1,681 +1,389 @@
-# Current Benchmark Test-Set Record
-
-Status: public evidence record for the July 2026 published artifacts
-
-This record states what the current Tura benchmark data proves, how the data
-was collected and retained, and where the comparison is not yet controlled
-enough to support a causal claim. It is intentionally stricter than a product
-summary. A result is stated confidently only when the published artifacts can
-be recomputed or directly inspected.
-
-The report evaluates the strategy-level proposition described in the
-[Tura agent repository](https://github.com/Tura-AI/tura): architectural savings
-from fewer repeated-context model calls can either be retained as lower token
-and round use or reinvested in deeper reasoning, investigation, and
-verification. The public [benchmark article](https://turaai.net/benchmark)
-presents the cost-versus-harness-score view; the numbers and limitations in
-this report are grounded in the canonical artifacts in the
-[Tura Benchmark repository](https://github.com/Tura-AI/benchmark), not inferred
-from the article.
-
-## 1. Scope and evidence levels
-
-The current record covers three different evaluation surfaces:
-
-| Surface                 |                            Published observations | Evaluation                                          |
-| ----------------------- | ------------------------------------------------: | --------------------------------------------------- |
-| DeepSWE v1.1 subset     | 20 tasks x 3 agents x 3 replicates = 180 sessions | Official binary verifier                            |
-| Rewrite subset          |   5 tasks x 3 agents x 2 replicates = 30 sessions | Task-specific stable multi-item harnesses           |
-| Design/front-end subset |    2 tasks x 2 agents x 2 replicates = 8 sessions | Artifact and process audit; no scalar quality score |
-
-The DeepSWE numbers are recomputed from the 180 published `summary.json` and
-`source-harness-report.json` files under the three
-[`results/debug`](../results/debug/) reports. Rewrite scores and usage totals are
-recomputed from the 30-run
-[`canonical-manifest.json`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json)
-and can be traced to each run's normalized harness report. The design findings
-come from the eight archived [`design-run.json`](../results/design/) contracts,
-their HTML workspaces, and their recorded tool calls. These evidence types are
-not interchangeable: verifier and harness results support quantitative
-capability claims; eight unblinded design runs support concrete artifact and
-process findings, not statistical generalization.
-
-The task definitions, selection method, and reporting rules are documented in
-the [benchmark methodology](benchmark-methodology.md),
-[`tasks/debug/deep-swe-v1.1`](../tasks/debug/deep-swe-v1.1/),
-[`deep_swe/select_tasks.py`](../deep_swe/select_tasks.py), and the canonical
-task declarations. The executable rerun path is documented in the repository
-[`README`](../README.md).
-
-## 2. What was run
-
-### 2.1 DeepSWE cohort
-
-The fixed subset contains 20 DeepSWE v1.1 tasks: four each in Go, Python,
-TypeScript, Rust, and JavaScript, and five in each declared difficulty band.
-Each agent configuration receives the same task ID and official instruction,
-starts from the task's pinned environment, runs without task-container network
-access, and is evaluated by the corresponding official verifier.
-
-The published configurations are:
-
-| Configuration | CLI build        | Model       | Reasoning effort | Sessions |
-| ------------- | ---------------- | ----------- | ---------------- | -------: |
-| Codex CLI     | (local modified) | GPT-5.6 SOL | Medium           |       60 |
-| Tura Balanced | published build  | GPT-5.6 SOL | High             |       60 |
-| Tura Direct   | published build  | GPT-5.6 SOL | High             |       60 |
-
-The matrix used the default service tier, bounded 90-minute agent runs, and
-isolated workspaces. Tura was routed through its normal runtime and Bash command
-surface. The same 20 task IDs appear in each of the three published replicates.
-
-### 2.2 Rewrite cohort
-
-The rewrite subset contains four Rust-to-Python CLI source ports (`eza`,
-`nushell`, `xsv`, and `zip-password-finder`) plus one benchmark-owned HTML
-reference rebuilt as a TypeScript/TanStack Start full-stack application. Each
-task was run twice with Codex CLI Medium, Tura Balanced High, and Tura Direct
-High, all using GPT-5.6 SOL and the default service tier. This yields 10
-sessions per configuration and 30 canonical sessions in total.
-
-The CLI harnesses compare the rebuilt executable with the pinned reference for
-exit status, stdout, and stderr across declared behavior families. The
-full-stack harness checks application structure, visual fidelity, marketplace
-flows, backend and database behavior, computed analytics, tests, browser
-robustness, and code quality. The five harnesses contain 236 stable items per
-replicate; because each configuration has two replicates, its pooled denominator
-is 472 valid harness items.
-
-### 2.3 Design and front-end cohort
-
-The design subset contains an East Asian squid recipe slide deck and an
-interactive Paris summer-temperature 3D experience. Each was run twice with
-Codex CLI and twice with Tura Direct, using GPT-5.6 SOL High for both agents.
-These runs therefore provide a same-model, same-effort process comparison,
-separate from DeepSWE's High-versus-Medium configuration comparison.
-
-## 3. Acquisition, persistence, and provenance
-
-The benchmark keeps three evidence layers.
-
-1. **Raw execution layer.** Provider events, untouched stdout/stderr, agent
-   summaries, prompts, workspaces, patches, and verifier output are written
-   beneath the local ignored `raw/` tree while the run is active.
-2. **Normalized contract layer.** Provider-specific callbacks are converted to
-   schema-defined rounds, tool calls, usage, agent summaries, and harness
-   reports. Cumulative usage snapshots are deduplicated; absent usage remains
-   absent rather than being estimated.
-3. **Published layer.** Compact run manifests, normalized summaries, source
-   agent summaries, source harness reports, patches, rewrite workspaces, and
-   design workspaces are copied under [`results/`](../results/). Every published
-   DeepSWE and rewrite run retains task ID, agent ID, model, effort, replicate,
-   source batch, token usage, rounds, elapsed time, patch or workspace metadata,
-   and verifier or harness outcome.
-
-### 3.1 Codex CLI modification disclosure
-
-The official Codex CLI version was modified specifically to obtain each model
-round's command records and detailed metadata. Result metadata therefore reports
-the Codex CLI build as `(local modified)`, not as the corresponding official
-release version. The public `results/` tree retains each round's complete
-`input` and `output`, normalized commands, timing, source identifiers, and
-reconstruction metadata. It omits only the round-level `inputTokens` and
-`outputTokens` fields from Codex normalized per-round contracts and their
-embedded copies; run-level usage summaries remain retained.
-
-Because the experiment modified the official Codex CLI version, these data may
-differ from data produced by the corresponding official version. This report
-does not claim that the modification has zero effect. Independent reproductions
-are welcome, particularly crossed official-versus-modified experiments that can
-demonstrate whether the version difference causes an obvious and repeatable
-change in outcomes or resource use.
-
-The collection and normalization boundaries are implemented in
-[`deep_swe/run_matrix.mjs`](../deep_swe/run_matrix.mjs),
-[`lib/generic_agent_cli.mjs`](../lib/generic_agent_cli.mjs), and the typed
-contracts under [`src`](../src/). Published artifacts preserve the source
-paths needed to trace a normalized record back to its physical execution
-batch. Local absolute paths inside historical source records are provenance
-captured at run time; they are not portability instructions.
-
-No missing command, score, or token field is manufactured. A valid verifier
-failure remains a failure. Retries and superseded physical attempts remain in
-the raw attempt trees instead of being silently deleted; only the selected
-published observation occupies a replicate slot.
-
-## 4. What “same batch” does and does not mean
-
-The comparison is cohort-aligned on the strongest stable boundaries:
-
-- identical 20-task selection and task IDs;
-- identical replicate numbers and 60-session denominator per agent;
-- identical GPT-5.6 SOL model family and default service tier;
-- pinned task environments and official verifier images;
-- the same task-container network policy;
-- the same normalized publication schema and scoring rule.
-
-It is not literally one uninterrupted physical process. The final 180 records
-were assembled from the initial matrix plus documented continuation and
-recovery batches. This is acceptable because task identity, agent
-configuration, replicate identity, source lineage, and verifier artifacts are
-retained per observation. “Same cohort” is the accurate claim; “all 180 ran in
-one process” is not.
-
-## 5. Recomputed DeepSWE result
-
-Every number in this table was recomputed from the 180 published summaries and
-verifier reports. Tokens and rounds are aggregate observed totals; no outlier
-was trimmed.
-
-| Configuration      | Passes | Pass rate | Aggregate tokens | Rounds | Token change vs Codex | Round change vs Codex |
-| ------------------ | -----: | --------: | ---------------: | -----: | --------------------: | --------------------: |
-| Codex CLI Medium   |  38/60 |     63.3% |      333,538,349 |  3,140 |              baseline |              baseline |
-| Tura Balanced High |  48/60 |     80.0% |      229,695,477 |  2,017 |                -31.1% |                -35.8% |
-| Tura Direct High   |  39/60 |     65.0% |       75,108,167 |    969 |                -77.5% |                -69.1% |
-
-These results support two strong statements.
-
-1. In this published system configuration, Tura Balanced passed 10 more of 60
-   verifiers than Codex CLI while using 31.1% fewer aggregate tokens.
-2. Tura Direct used 77.5% fewer aggregate tokens and achieved a similar binary
-   verifier result: 39 passes versus Codex CLI's 38.
-
-They do not prove that one isolated runtime feature caused the difference.
-
-## 6. Recomputed rewrite result
-
-Every number in this section was recomputed from the 30 entries in the
-[`canonical-manifest.json`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json).
-Each configuration has two valid replicates of all five tasks. The assertion
-micro rate is `sum(passed) / sum(total)` across those runs; the task macro
-average first pools each task's two replicates, computes five task rates, and
-then gives those five rates equal weight. Run percentages are never averaged.
-
-| Configuration      | Harness checks | Micro rate | Task macro avg | Aggregate tokens | Token change vs Codex |
-| ------------------ | -------------: | ---------: | -------------: | ---------------: | --------------------: |
-| Codex CLI Medium   |        351/472 |      74.4% |          76.4% |       62,609,358 |              baseline |
-| Tura Balanced High |        389/472 |      82.4% |          84.2% |       24,997,927 |                -60.1% |
-| Tura Direct High   |        353/472 |      74.8% |          77.4% |        8,368,639 |                -86.6% |
-
-The task-level pooled results make the heterogeneous harnesses visible instead
-of hiding them inside one percentage:
-
-| Rewrite task                                | Items per replicate | Codex CLI Medium | Tura Balanced High | Tura Direct High |
-| ------------------------------------------- | ------------------: | ---------------: | -----------------: | ---------------: |
-| `eza`                                       |                  52 |   74/104 (71.2%) |     93/104 (89.4%) |   83/104 (79.8%) |
-| `nushell`                                   |                  48 |    59/96 (61.5%) |      71/96 (74.0%) |    61/96 (63.5%) |
-| `prompt-gallery-tanstack-fullstack-rebuild` |                  63 |  123/126 (97.6%) |    121/126 (96.0%) |  119/126 (94.4%) |
-| `xsv`                                       |                  55 |   60/110 (54.5%) |     68/110 (61.8%) |   54/110 (49.1%) |
-| `zip-password-finder`                       |                  18 |    35/36 (97.2%) |     36/36 (100.0%) |   36/36 (100.0%) |
-
-Balanced passed 38 more of 472 checks than Codex, an 8.1 percentage-point
-micro-rate gain, while using 60.1% fewer aggregate tokens. Direct passed two
-more checks than Codex while using 86.6% fewer tokens. Codex scored highest on
-the TanStack rebuild; Balanced scored highest or tied highest on all four CLI
-ports. These are results for the named High-versus-Medium configurations, not
-an isolated measurement of runtime architecture or reasoning effort.
-
-## 7. Anomalies and severe long tails were retained
-
-The totals include behavior that makes Tura look worse. This is deliberate.
-
-| Configuration | Agent timeouts/non-zero exits | Median elapsed | P95 elapsed | Maximum tokens | Maximum rounds |
-| ------------- | ----------------------------: | -------------: | ----------: | -------------: | -------------: |
-| Codex CLI     |                             1 |       21.8 min |    65.0 min |     12,473,035 |             91 |
-| Tura Balanced |                             8 |       35.3 min |    90.0 min |     35,464,917 |            242 |
-| Tura Direct   |                             0 |       19.1 min |    61.2 min |      3,762,598 |             35 |
-
-The worst Tura Balanced run,
-`dynamodb-toolbox-conditional-attribute-requirements` replicate 1, timed out at
-90 minutes after 35.46 million tokens and 242 rounds. It remains in Balanced's
-229.70 million-token aggregate. Seven other Balanced agent executions and one
-Codex execution also reached a non-zero timeout outcome. Where a verifier could
-still evaluate the resulting workspace, the verifier result remained the task
-outcome rather than being discarded.
-
-One Balanced replicate of that same DynamoDB task also has a timed-out,
-non-zero harness report and no valid completed verifier result. The published
-headline nevertheless keeps it as a failure in the 60-run denominator, yielding
-48/60 = 80.0%. This is conservative for Tura but is a protocol deviation from
-the stated rule that infrastructure-invalid verifier runs should be excluded
-until rerun. Excluding it would produce 48/59 = 81.4%; this record retains the
-published 80.0% to avoid retroactively improving the headline.
-
-This is what retaining long-tail evidence means: aggregate efficiency is not a
-median-only story, and operational failures are not removed because they are
-embarrassing.
-
-## 8. Why Tura High is compared with Codex Medium
-
-This is a comparison of named product configurations, not a controlled
-reasoning-effort experiment. Tura uses High because its Balanced mode is meant
-to spend the runtime's saved round-trip budget on deeper investigation and
-verification; Direct uses the same High model setting while minimizing the
-execution path. Codex Medium is the selected reference configuration.
-
-That choice makes the efficiency result harder, not easier, in one narrow
-sense: despite requesting High reasoning, both Tura configurations consumed
-fewer aggregate observed tokens than Codex Medium. It also creates an obvious
-confound: High and Medium are not the same treatment, so the pass-rate gap
-cannot be attributed to the agent runtime alone.
-
-The correct interpretation is therefore:
-
-- valid: the named Tura High systems achieved the published pass/token/round
-  outcomes against the named Codex Medium system;
-- invalid: High-versus-Medium by itself proves Tura's architecture caused the
-  gain;
-- still required: a crossed 2x2 matrix running Tura and Codex at both Medium
-  and High under otherwise identical benchmark conditions.
-
-## 9. Compact context and missing ablations
-
-Tura's archived contracts contain explicit `task_status.compact_context`
-interventions. The product README reports an average 2.6 rounds from those
-events to resumed execution, compared with an estimated 5.4 rounds for Codex
-from sharp input-token drops. Codex does not expose an equivalent event, so
-those two measurements are asymmetric. They are useful operational evidence,
-not a randomized causal ablation.
-
-There is no completed experiment that disables `compact_context` while holding
-the rest of Tura fixed. There is likewise no completed isolation of
-`command_run`, backward-reasoning instructions, operation manuals, task-state
-management, or provider-cache effects. Claims that any one of these features
-alone caused the aggregate savings would exceed the evidence.
-
-## 10. Design and front-end evidence
-
-Across the eight same-model, same-High-effort design runs, Tura used fewer
-tokens and turns while recording substantially more evidence-gathering and
-verification actions.
-
-| Task, two replicates per agent | Codex tokens | Tura tokens | Token change | Codex turns | Tura turns | Recorded tool actions, Codex / Tura |
-| ------------------------------ | -----------: | ----------: | -----------: | ----------: | ---------: | ----------------------------------: |
-| Squid recipe slides            |    2,312,139 |   1,465,194 |       -36.6% |          27 |         20 |                            21 / 164 |
-| Paris temperature 3D           |    2,387,714 |   1,185,246 |       -50.4% |          27 |         21 |                            22 / 100 |
-
-Across both tasks, Tura used 43.6% fewer tokens and 24.1% fewer turns while
-recording 264 tool actions versus Codex's 43. Tool actions are not a quality
-score. They do, however, show where Tura spent the saved model budget: the Tura
-runs record 82 web-discovery calls, 24 media inspections, 25 image generations,
-browser/Playwright checks, link probes, and responsive-state verification.
-The Codex runs record no equivalent media inspection and no archived browser
-capture review.
-
-### 10.1 Squid recipe links
-
-The four public HTML artifacts can be inspected directly:
-
-- Codex CLI: [run 1](../results/design/east-asian-squid-recipes-slides/report-20260711-design-matrix/codex-cli-r01/workspace/index.html), [run 2](../results/design/east-asian-squid-recipes-slides/report-20260711-design-matrix/codex-cli-r02/workspace/index.html)
-- Tura Direct: [run 1](../results/design/east-asian-squid-recipes-slides/report-20260711-design-matrix/tura-direct-r01/workspace/index.html), [run 2](../results/design/east-asian-squid-recipes-slides/report-20260711-design-matrix/tura-direct-r02/workspace/index.html)
-
-A structural URL audit and a title-level content audit give two different,
-important results:
-
-The audit was rerun on 2026-07-12. Across Tura's 20 slots, the 15 unique recipe
-URLs all returned HTTP 200 with matching page titles, and the 15 unique YouTube
-IDs all resolved through `yt-dlp`. Availability is time-sensitive; the exact
-dish-match counts below come from page and video titles, not status codes alone.
-
-| Agent, two runs | Direct recipe/content pages | Exact-dish recipe pages | Search or broad index pages | Specific YouTube `watch` pages | Exact-dish video titles | YouTube search-result pages |
-| --------------- | --------------------------: | ----------------------: | --------------------------: | -----------------------------: | ----------------------: | --------------------------: |
-| Codex CLI       |                  8/20 (40%) |       not fully audited |                 12/20 (60%) |                           0/20 |                    0/20 |                20/20 (100%) |
-| Tura Direct     |                20/20 (100%) |             18/20 (90%) |                        0/20 |                   20/20 (100%) |             18/20 (90%) |                        0/20 |
-
-Thus the Codex decks do not satisfy the literal requirement for a working
-YouTube cooking-video link: every video destination is a search-results page.
-Tura's decks use resolvable, specific video pages in all 20 slots. Title-level
-inspection confirms 18 exact-dish matches. Two run-1 videos are neighboring
-evidence rather than exact matches: `Bi mu da kao` links to a braised
-cuttlefish/pork/egg video, and `Hot-pot squid` links to a general hot-pot video.
-The same run has two method-level recipe sources rather than exact squid-dish
-sources: a chicken-and-shrimp dry-pot recipe and a general hot-pot guide. Tura
-run 2 is 10/10 exact at this level for both recipe pages and video titles.
-
-Sixty percent of Codex's nominal recipe sources are Google searches, site
-searches, or broad recipe indexes rather than direct dish pages. Every Codex
-video destination is a YouTube search-results page, so none satisfies the
-literal request for a cooking-video link. The remaining eight direct Codex
-recipe pages include some technique substitutions; they were not all promoted
-to exact-dish matches in this audit.
-
-This is a title/page-identity audit, not a blinded culinary replication study.
-It verifies destination type and obvious dish identity; it does not prove that
-every ingredient quantity or cooking step in the deck faithfully reproduces
-the cited source.
-
-The artifacts are published under
-[`results/design/east-asian-squid-recipes-slides`](../results/design/east-asian-squid-recipes-slides/).
-
-### 10.2 Paris 3D implementation and validation
-
-The four public HTML artifacts can be inspected directly:
-
-- Codex CLI: [run 1](../results/design/paris-summer-temperature-3d/report-20260711-design-matrix/codex-cli-r01/workspace/index.html), [run 2](../results/design/paris-summer-temperature-3d/report-20260711-design-matrix/codex-cli-r02/workspace/index.html)
-- Tura Direct: [run 1](../results/design/paris-summer-temperature-3d/report-20260711-design-matrix/tura-direct-r01/workspace/index.html), [run 2](../results/design/paris-summer-temperature-3d/report-20260711-design-matrix/tura-direct-r02/workspace/index.html)
-
-Both Tura artifacts implement an actual Three.js/WebGL scene with a
-`PerspectiveCamera`, explicit camera position/look-at behavior, depth-aware
-geometry, and rendering through `WebGLRenderer`. The archived Tura runs execute
-real-browser checks, inspect desktop/tablet/mobile captures, verify WebGL
-rendering and console state, and exercise year and metric selection. This is
-direct evidence that the intended camera angle and interaction path were
-validated, not merely written.
-
-The Codex artifacts use CSS 3D transforms and stacked `z-index` layers. Public
-inspection of those HTML pages found incorrect viewing angles and layer-order
-problems that weaken the intended 3D reading. This is a disclosed human
-artifact observation, not an automated harness score; readers can verify or
-challenge it against the four links above. The archived Codex process records
-syntax and disclosure checks but no equivalent real-browser screenshot review.
-
-Tura's screenshot work is not inferred from a closing claim. Its published run
-contracts record Playwright capture generation at 1440, 768, and 390 pixels,
-three subsequent `read_media` inspections, WebGL and console checks, and
-interaction assertions. The capture files themselves remained in the ignored
-raw workspace rather than the published result tree. The durable public
-evidence is therefore the run contract plus the final HTML, while future runs
-should publish the captures alongside both agents' artifacts.
-
-The artifacts are published under
-[`results/design/paris-summer-temperature-3d`](../results/design/paris-summer-temperature-3d/).
-
-## 11. How architecture savings support two budget strategies
-
-The published configurations represent two strategy-level uses of the claimed
-architecture advantage. Tura Balanced reinvests part of the reduced
-model-context and round-trip budget in higher reasoning effort, investigation,
-and verification. Tura Direct retains more of that advantage as lower token and
-round use while still performing task verification. These are complete agent
-policies, not isolated interventions.
-
-The observed pattern is not “Tura does less.” Tura makes fewer model round
-trips, batches independent commands into one structured execution step, and
-keeps tool output attached to normalized rounds. The saved model-context budget
-can then be spent on external work that does not require another full prompt
-replay: repository search, source retrieval, generated assets, browser checks,
-link validation, responsive captures, and test reruns.
-
-DeepSWE shows the same distinction. Codex used 3,140 model rounds and 2,496
-recorded commands. Balanced used 2,017 rounds but 10,149 commands; Direct used
-969 rounds and 4,340 commands. Command counts are not comparable as atomic work
-units because Tura's macro calls and Codex's shell calls have different
-granularity. Still, the direction is unambiguous: lower model-round cost did
-not come from avoiding execution and verification.
-
-The causal mechanism remains a hypothesis until feature ablations are run.
-The observed system-level fact is already strong: fewer aggregate model tokens
-coexisted with more archived verification activity and, for Balanced, more
-DeepSWE verifier passes. For Direct, the relevant question is different: how
-much token, round, and cost reduction can be retained without an unacceptable
-verified-outcome loss. The current near-comparison is descriptive because no
-formal non-inferiority margin was predeclared.
-
-## 12. Five cross-run descriptive relationships
-
-The following five figures answer a different question from the untrimmed
-publication totals in Sections 5–7. They examine cross-run relationships after
-an explicit sensitivity filter: the two isolated Balanced observations above
-90 rounds (113 and 242 rounds) and the one zero-token, usage-unavailable run
-that did not execute are excluded. The source remains 270 debug and rewrite
-runs; the explanatory sample contains 267 runs across the same 25 tasks. The
-three exclusions are listed in
-[`excluded-runs.csv`](../assets/model-run-statistics/excluded-runs.csv), and the
-267 included observations are published in
-[`run-level-data.csv`](../assets/model-run-statistics/run-level-data.csv).
-
-This filtering does not replace the conservative headline aggregates. It keeps
-the long tails visible in the public result while preventing three exceptional
-records from setting the scale and functional shape of this separate
-relationship analysis. All fitted curves below are descriptive associations,
-not randomized treatment effects.
-
-### 12.1 Round count is process length, not an efficiency score
-
-The run-level data show a positive fitted association between round count and
-success in all three groups. We fit a weighted binomial regression using the
-logarithm of one plus each run's round count. Each run contributes its passed
-and total harness-check counts. This produces a saturating probability curve:
-fitted gains decline as round count increases.
-
-| Agent group   | Log-scale association coefficient | Round-count IQR | Fitted success at IQR endpoints | IQR fitted gain |
-| ------------- | --------------------------------: | --------------: | ------------------------------: | --------------: |
-| Tura Balanced |                             0.959 |           19–32 |                     76.4%→84.0% |         +7.6 pp |
-| Tura Direct   |                             1.644 |      9.25–17.75 |                     69.3%→85.9% |        +16.6 pp |
-| Codex CLI     |                             0.989 |     29.25–60.75 |                     72.9%→84.5% |        +11.6 pp |
+# Current Benchmark Evidence Record
+
+Status: July 2026 four-configuration analysis
+
+## 1. Analysis scope
+
+This report compares four agent configurations across 280
+published runs. Most charts use 278 runs because two unusually long Tura
+Balanced traces would compress the visible range. A plausible reason for those
+long traces is task-specific stopping behavior, but this report does not assume
+that explanation is true. This record reports the current DeepSWE and rewrite
+results for Tura Balanced
+High, Tura Direct High, Codex CLI Medium, and Codex CLI High. It separates
+configuration-level aggregates from cross-run regression analyses. Regression
+coefficients are descriptive associations unless a causal design is explicitly
+stated; no causal design is used here.
+
+Three analysis populations are used:
+
+| Population                         | Tasks |       Runs | Use                                                                                                      |
+| ---------------------------------- | ----: | ---------: | -------------------------------------------------------------------------------------------------------- |
+| Published result population        |    25 |        280 | Configuration score, token, round, and cost aggregates                                                   |
+| Cross-run relationship population  |    25 |        278 | Figures 1-7 and their fitted models                                                                      |
+| Submitted-code observed population |    25 | 272 of 278 | All-harness code-size analysis; 206 runs across 19 outcome-varying tasks identify the pooled coefficient |
+
+The 278-run relationship population excludes two Tura Balanced observations
+with more than 90 rounds: 113 rounds for `quill-shared-toolbar-focus` and 242
+rounds for `dynamodb-toolbox-conditional-attribute-requirements`. The threshold
+is applied uniformly to every statistical figure. Both observations remain in
+the published result population and configuration-level aggregate tables. The
+exact exclusions are recorded in
+[`excluded-runs.csv`](../assets/model-run-statistics/excluded-runs.csv).
+
+## 2. Configuration and provenance
+
+The comparison is not a clean A/B test: the two Codex
+rows differ in both build and reasoning effort, and the runtimes record commands
+differently. Those implementation differences may explain part of the observed
+gaps, so the formal report treats configuration names as bundles rather than as
+single isolated mechanisms. The exact configurations and source populations are:
+
+| Configuration    | Runtime/build                    | Model       | Reasoning | Published runs | Relationship runs |
+| ---------------- | -------------------------------- | ----------- | --------- | -------------: | ----------------: |
+| Tura Balanced    | Published Tura runtime           | GPT-5.6 SOL | High      |             70 |                68 |
+| Tura Direct      | Published Tura runtime           | GPT-5.6 SOL | High      |             70 |                70 |
+| Codex CLI Medium | Locally instrumented Codex build | GPT-5.6 SOL | Medium    |             70 |                70 |
+| Codex CLI High   | Official Codex CLI `0.144.1`     | GPT-5.6 SOL | High      |             70 |                70 |
+
+DeepSWE observations come from six canonical reports under
+[`results/debug`](../results/debug/): three reports containing Tura Balanced,
+Tura Direct, and Codex Medium, and three reports containing Codex High. Rewrite
+observations come from the 30-run
+[`report-20260710-gpt56-sol`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json)
+and the 10-run
+[`report-20260714-codex-cli-0.144.1-gpt56-sol-high`](../results/rewrite/report-20260714-codex-cli-0.144.1-gpt56-sol-high/canonical-manifest.json).
+
+Codex Medium used a locally instrumented build to retain command, timing, and
+provenance fields. Its per-round contracts do not disclose input/output token
+components; run-level aggregate usage is therefore the token source. Codex High
+used the unmodified official `0.144.1` release. Build and reasoning effort are
+not held constant between the two Codex configurations.
+
+Acquisition reads canonical manifests, normalized harness contracts, aggregate
+usage contracts, and contiguous round indexes directly from the published run
+directories. No score, token component, command count, or missing source body is
+reconstructed from narrative agent summaries. The local Codex modification is
+therefore relevant only to Medium command/provenance instrumentation; High data
+come from the official `0.144.1` publication path.
+
+Retries are permitted only when an environment or provider failure invalidates
+the attempt. A declared task timeout, agent non-zero exit, or agent-reported
+failure is retained as experimental behavior and is not retried. One Codex
+Medium rewrite run has unavailable usage; token and cost aggregates are observed
+totals without imputation.
+
+## 3. Configuration-level results
+
+Tura uses fewer aggregate rounds and tokens in this test
+set, while Tura Balanced also records the highest pass totals. One possible
+explanation is a different allocation of work per round; another is that build,
+reasoning, and runtime behavior jointly change when an agent stops. The aggregate
+tables alone cannot separate these explanations. The following tables use all
+published observations and report the configurations as observed. They use all
+280 published runs, including the two Tura Balanced
+long-tail observations excluded from relationship models.
+
+### 3.1 DeepSWE
+
+Tura Balanced passes 48 of 60 tasks with fewer total
+rounds and tokens than either Codex configuration. A plausible hypothesis is
+that it completes more useful work per recorded round, but task interaction,
+runtime batching, and stopping behavior are competing explanations. Aggregate
+DeepSWE outcomes are:
+
+| Configuration      | Passes | Pass rate | Observed tokens | Rounds | Estimated cost |
+| ------------------ | -----: | --------: | --------------: | -----: | -------------: |
+| Tura Balanced High |  48/60 |     80.0% |     229,695,477 |  2,017 |       $221.138 |
+| Tura Direct High   |  39/60 |     65.0% |      75,108,167 |    969 |        $99.620 |
+| Codex CLI Medium   |  38/60 |     63.3% |     333,538,349 |  3,140 |       $257.173 |
+| Codex CLI High     |  36/60 |     60.0% |     455,742,296 |  6,074 |       $327.483 |
+
+Codex High records 36 passes and Codex Medium records 38. Codex High also
+records 2,934 additional rounds and 122,203,947 additional observed tokens.
+Because build and reasoning effort differ, this contrast does not identify an
+isolated reasoning-effort effect.
+
+### 3.2 Rewrite
+
+Rewrite success rates are close for Tura Direct and both
+Codex settings, while Tura Balanced is higher and uses fewer rounds than Codex.
+A plausible hypothesis is that its interaction strategy helps on these five
+tasks, although ten runs per configuration are too few to isolate a mechanism.
+The assertion-weighted micro rate is `sum(passed) / sum(checks)`. The task macro
+first pools the two replicates within each task and then assigns equal weight to
+the five task-level rates.
+
+| Configuration      | Harness checks | Micro rate | Task macro | Observed tokens | Rounds | Estimated cost |
+| ------------------ | -------------: | ---------: | ---------: | --------------: | -----: | -------------: |
+| Tura Balanced High |        389/472 |      82.4% |      84.2% |      24,997,927 |    229 |        $35.609 |
+| Tura Direct High   |        353/472 |      74.8% |      77.4% |       8,368,639 |    123 |        $17.806 |
+| Codex CLI Medium   |        351/472 |      74.4% |      76.4% |      48,979,410 |    425 |        $43.658 |
+| Codex CLI High     |        352/472 |      74.6% |      77.8% |      63,348,476 |    726 |        $52.031 |
+
+The Codex micro-rate difference is 0.2 percentage points. Codex High records
+301 additional rounds and 14,369,066 additional observed tokens. This is a
+configuration contrast, not an effort-only estimate.
+
+## 4. Cross-run relationship models
+
+Longer traces usually coincide with more recorded work,
+more tokens, and—except for Codex High—a higher fitted success probability over
+the middle half of each configuration's data. A plausible explanation is that
+some extra rounds are productive diagnosis and verification; the competing
+explanation is that difficult tasks both run longer and finish differently. The
+models below describe associations in the filtered
+relationship population; they are not estimates of what would happen if a round
+budget were experimentally increased. Figures 1-5 use the 278-run relationship
+population. Harness outcomes are
+represented as `passed_i` successes from `checks_i` trials. Model-based
+intervals condition on the stated regression specification and do not account
+for all task-, configuration-, or replicate-level dependence.
+
+### 4.1 Command-count density per agent round
+
+A Tura round contains about four to six recorded command
+items on average, whereas a Codex round contains about one normalized tool
+record. The likely explanation is batching plus different instrumentation, not
+that one runtime necessarily performs four times as much semantic work. The
+aggregate statistic and within-configuration fits are:
+
+The aggregate command-density statistic is
+`sum(recorded commands) / sum(agent rounds)`: 5.61 for Tura Balanced, 4.57 for
+Tura Direct, 0.88 for Codex Medium, and 0.99 for Codex High. Ordinary
+least-squares lines summarize command count against round count within each
+configuration.
 
 <p align="center">
-  <img src="../assets/model-run-statistics/claim-charts/04-round-count-vs-success.png" alt="Run-level round count and success association with fitted curves" width="800">
+  <img src="../assets/model-run-statistics/claim-charts/04-rounds-vs-commands.png" alt="Run-level recorded command count by agent-round count" width="800">
 </p>
 
-This does not make round count an efficiency score. Codex averaged 46.9 rounds
-and Direct averaged 14.6, yet their aggregate weighted success rates were nearly
-the same: 73.0% and 72.5%. Rounds measure process length; efficiency also needs
-an outcome and a resource measure. Task difficulty, stopping behavior, timeout
-policy, and agent policy affect both round count and success, so the fitted lines are
-descriptive associations rather than causal round-budget effects.
+_Figure 1. Points are runs from the 278-run relationship population after
+excluding two Tura Balanced observations above 90 rounds (113 and 242), both
+retained in published aggregates. Tura counts constituent `command_run`
+commands; Codex counts normalized tool-command records. The ratio and OLS
+coefficient therefore describe runtime-specific command records, not a common
+atomic-work unit._
 
-### 12.2 Balanced is on the observed cost–success frontier
+The observed slopes are approximately four recorded commands per additional
+round for both Tura configurations and approximately one for both Codex
+configurations. This is consistent with Tura's runtime recording multiple
+constituent commands from a batched interaction, but the instrumentation
+boundary is also part of the contrast. The result does not establish that Tura
+performs four times as much work. A mechanism test would map both runtimes to a
+common semantic command ontology, or count comparable operating-system process
+invocations, before estimating a batching effect.
 
-For each agent group, aggregate cost is the arithmetic mean of run-level API
-cost. Aggregate success is the total number of passed harness checks divided by
-the total number of harness checks across all runs in that group.
+### 4.2 Round count and fitted success probability
 
-Balanced averaged \$3.19 per run at 79.0% weighted success. Direct averaged
-\$1.56 at 72.5%, while Codex averaged \$4.19 at 73.0%. Under the observed Pareto
-rule, one configuration dominates another when it costs no more and succeeds at
-least as often, with at least one strict advantage. Balanced therefore dominates
-Codex in this sample. Direct and Balanced form the two meaningful frontier
-endpoints: Direct is cheaper, while Balanced buys a higher observed success
-rate.
+From the first to the third round-count quartile, fitted
+success rises for Tura Balanced, Tura Direct, and Codex Medium. Codex High is
+essentially flat. Extra diagnosis or verification may help in the first three
+configurations, while harder tasks and different stopping rules may also produce
+the same pattern. The four small panels use the same visual language as the
+earlier all-configuration round/success chart: run-level harness ratios are
+shown as points and each configuration has its own fitted curve. The Q1-to-Q3
+contrast is printed inside the lower-right corner of its corresponding panel.
 
-The figure below replaces the three isolated aggregate points with all 267
-runs. Each panel fits a weighted binomial regression using the logarithm of one
-plus run-level API cost.
+Each configuration is estimated separately:
 
-| Agent group   | Log-scale association coefficient |      Cost IQR | Fitted success at IQR endpoints | IQR fitted gain |
-| ------------- | --------------------------------: | ------------: | ------------------------------: | --------------: |
-| Tura Balanced |                             1.161 | \$2.29–\$3.60 |                     75.4%→81.9% |         +6.5 pp |
-| Tura Direct   |                             2.322 | \$1.09–\$1.94 |                     67.7%→82.2% |        +14.5 pp |
-| Codex CLI     |                             1.289 | \$2.68–\$4.82 |                     69.8%→80.7% |        +10.8 pp |
+`logit(P(success_i)) = α + β log(1 + rounds_i)`.
+
+The reported estimand is the fitted probability at the configuration-specific
+third quartile of rounds minus the fitted probability at its first quartile.
+
+| Configuration    |  Round Q1 to Q3 | Estimated probability difference | 95% model-based CI |
+| ---------------- | --------------: | -------------------------------: | -----------------: |
+| Tura Balanced    |  19.75 to 32.00 |                          +9.7 pp |   +6.4 to +13.0 pp |
+| Tura Direct      |  11.00 to 19.75 |                         +14.1 pp |  +10.4 to +17.9 pp |
+| Codex CLI Medium |  38.25 to 61.00 |                          +8.7 pp |   +5.4 to +11.9 pp |
+| Codex CLI High   | 64.50 to 123.75 |                          -0.8 pp |    -5.8 to +4.3 pp |
 
 <p align="center">
-  <img src="../assets/model-run-statistics/claim-charts/05-cost-vs-success.png" alt="Run-level API cost and success association with fitted curves" width="800">
+  <img src="../assets/model-run-statistics/claim-charts/05-rounds-vs-success.png" alt="Run-level harness ratios and configuration-specific fitted success probabilities by round count" width="800">
 </p>
 
-Calling Balanced the strongest “compromise” is a decision interpretation, not
-a universal optimum. A user who values minimum spend above the observed success
-gap may rationally choose Direct. No monetary value per successful check was
-predeclared.
+_Figure 2. The 278-run relationship population excludes the two declared Tura
+Balanced observations above 90 rounds (113 and 242), retained in published
+aggregates. Marker area is proportional to harness check count. The estimates
+pool heterogeneous tasks within configuration. Task difficulty, stopping rules,
+and unresolved failures can affect both rounds and outcome; β is not a causal
+round-budget effect._
 
-### 12.3 Tura has a larger output share than Codex
+The Q1-to-Q3 fitted differences are positive for Tura Balanced, Tura Direct,
+and Codex Medium, whereas the Codex High estimate is near zero and its interval
+includes both directions. One compatible explanation is that additional rounds
+within the first three configurations often coincide with further diagnosis,
+implementation, or verification, while the longer Codex High traces contain
+less incremental outcome information over their observed range. The model does
+not distinguish productive reinvestment from harder tasks simply requiring more
+rounds. A controlled test would randomize round caps within task and
+configuration, retain censored runs, and estimate task-stratified marginal
+effects.
 
-Total tokens are not a unique dollar-cost measure because token classes have
-different prices. Every run is repriced at standard-tier rates of $5.00 per
-million uncached input tokens, $0.50 per million cached input tokens, and $30.00
-per million output tokens. Reasoning tokens are already included in output
-tokens and are not charged twice.
+### 4.3 Token components and priced cost components
+
+Output is a small share of token volume for every
+configuration but a much larger share of estimated cost, especially for Tura.
+The most direct hypothesis is the declared 6x price premium of output over
+uncached input, combined with different output/context allocations. This is a
+cost-composition observation, not an efficiency ranking. The figure places token
+composition and cost composition side
+by side, with four compact rows so every configuration is visible at the same
+height.
+
+For each configuration, token shares and estimated-cost shares are computed from
+the included run-level components. Estimated cost is
+`(5U + 0.5K + 30O) / 1,000,000`, where `U`, `K`, and `O` are uncached input,
+cached input, and output tokens.
+
+| Configuration    | Output share of tokens | Output share of estimated cost |
+| ---------------- | ---------------------: | -----------------------------: |
+| Tura Balanced    |                  1.17% |                         31.98% |
+| Tura Direct      |                  1.77% |                         37.64% |
+| Codex CLI Medium |                  0.34% |                         12.80% |
+| Codex CLI High   |                  0.41% |                         17.00% |
 
 <p align="center">
-  <img src="../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png" alt="Token volume and cost composition" width="800">
+  <img src="../assets/model-run-statistics/claim-charts/06-token-volume-vs-cost-composition.png" alt="Token-volume and estimated-cost composition by configuration" width="800">
 </p>
 
-Output is a small share of token count for all three groups, but the Tura shares
-are materially higher than Codex's:
+_Figure 3. Shares use the 278-run relationship population after excluding the
+two declared Tura Balanced observations above 90 rounds (113 and 242), retained
+in published aggregates. The difference is a cost-allocation contrast under the
+declared price schedule; it is not an efficiency or quality estimand._
 
-| Agent group   | Output share of tokens | Output share of cost | Token-share multiple vs Codex | Cost-share multiple vs Codex |
-| ------------- | ---------------------: | -------------------: | ----------------------------: | ---------------------------: |
-| Tura Balanced |                  1.23% |                32.9% |                          3.3x |                         2.3x |
-| Tura Direct   |                  1.97% |                39.6% |                          5.2x |                         2.7x |
-| Codex CLI     |                  0.38% |                14.5% |                          1.0x |                         1.0x |
+Tura output tokens comprise 1.17%-1.77% of observed tokens, compared with
+0.34%-0.41% for Codex, but output accounts for 31.98%-37.64% of Tura estimated
+cost because the declared output rate exceeds both input rates. The contrast is
+consistent with different allocations between generated reasoning/action text
+and repeated context input. It does not show that either allocation is
+intrinsically more efficient: outcome, task mix, caching, and pricing all enter
+the comparison. A robustness analysis should recompute shares under alternative
+price schedules and compare matched tasks at fixed harness outcome.
 
-The interpretation is comparative: Tura emits a larger output fraction than
-Codex, and the 30-to-1 output-versus-cached-input price ratio magnifies that
-difference in the bill. Cached input still dominates token volume in every
-group. Total tokens remain useful for measuring context and system load, but
-cost analysis must retain the uncached, cached, and output components.
+### 4.4 Tura command count and fitted success probability
 
-### 12.4 More recorded Tura commands are associated with higher success
+Within both Tura settings, runs with more recorded
+commands have higher fitted success over the middle half of the command-count
+range. Broader implementation or verification is one possible explanation, but
+command count also tracks duration, difficulty, and the decision to keep going.
+The command unit is comparable only within the normalized Tura
+contracts, so Codex is deliberately excluded from this model.
 
-For the Tura runs, command count is reconstructed from three normalized contract
-schemas: `summary.events.commands`, legacy `task-report.source.commands`, or the
-sum of `commands[]` entries in `agent-rounds.jsonl`. All 177 included Tura runs
-have a positive count. We fit a weighted binomial regression using the logarithm
-of one plus each run's normalized command count. Each run contributes its passed
-and total harness-check counts.
+For each Tura configuration, the model is
+`logit(P(success_i)) = α + β log(1 + commands_i)`. Codex is excluded because its
+normalized command record can encapsulate multiple shell commands and does not
+share the Tura counting unit.
 
-| Agent group   | Log-scale association coefficient | Command-count IQR | Fitted success at IQR endpoints | IQR fitted gain |
-| ------------- | --------------------------------: | ----------------: | ------------------------------: | --------------: |
-| Tura Balanced |                             1.133 |         113–177.5 |                     78.0%→85.5% |         +7.5 pp |
-| Tura Direct   |                             1.032 |       39.25–84.75 |                     72.3%→85.1% |        +12.8 pp |
+| Configuration | Command Q1 to Q3 | Estimated probability difference | 95% model-based CI |
+| ------------- | ---------------: | -------------------------------: | -----------------: |
+| Tura Balanced | 121.75 to 181.25 |                          +7.4 pp |   +4.3 to +10.5 pp |
+| Tura Direct   |   51.25 to 88.50 |                         +16.0 pp |  +11.7 to +20.3 pp |
 
 <p align="center">
-  <img src="../assets/model-run-statistics/claim-charts/07-command-count-vs-success.png" alt="Tura-only run-level command count and success association with fitted curves" width="800">
+  <img src="../assets/model-run-statistics/claim-charts/07-tura-commands-vs-success.png" alt="Run-level Tura harness ratios and fitted success probabilities by recorded command count" width="800">
 </p>
 
-Codex is deliberately excluded from this command-count inference. A single
-Codex shell/tool call can contain multiple shell commands, while Tura's
-`command_run` contracts expose constituent commands at a different macro
-granularity. The current artifacts cannot split those Codex calls reliably, so
-placing Codex on the same command axis would imply a false common unit.
+_Figure 4. The 278-run relationship population excludes the two declared Tura
+Balanced observations above 90 rounds (113 and 242), retained in published
+aggregates. The model does not distinguish implementation, investigation, and
+verification commands. Task difficulty and run duration can jointly increase
+command count and observed success; β is not a causal command effect._
 
-Within Tura, both slopes are positive, but the interpretation remains
-descriptive. Harder tasks may require more commands and have different success
-rates; successful agents may also continue into more verification commands.
-Establishing a causal command effect requires controlled command-budget or tool
-ablation experiments.
+Within each Tura configuration, the fitted probability is higher at the third
+quartile of recorded commands than at the first; the estimated difference is
+larger for Direct (+16.0 pp) than Balanced (+7.4 pp). This is compatible with
+broader implementation or verification coverage, but command count is also a
+proxy for run duration, task difficulty, and stopping behavior. It cannot be
+read as the return from adding one more command. A follow-up should classify
+commands by investigation, implementation, and verification, then randomize or
+instrument batching policy while holding task and round budget fixed.
 
-### 12.5 Token volume and billed cost have different elasticities
+### 4.5 Round-count models for token volume, billed cost, and effective rate
 
-For a common descriptive scale, both quantities are summarized over the
-observed range with a power-law fit. Its scaling exponent is the fitted
-elasticity: a 1% increase in rounds corresponds to the listed percentage change
-in the measured quantity within the sampled range.
+More rounds bring more than proportional token growth,
+while total cost generally grows more slowly than token volume. The resulting
+average price per observed token falls with round count. A plausible explanation
+is that later rounds replay a larger cached context; this lowers average token
+price but does not make a longer run cheaper in total. Following the earlier
+published SVG, both panels use log-log
+axes and configuration-specific power laws: `tokens = a_T rounds^p_T` and
+`cost = a_C rounds^p_C`. The effective-rate exponent is therefore
+`p_C - p_T`; it is reported in the table rather than as a separate panel.
 
-| Agent group   | Total-token scaling exponent | Cost scaling exponent |
-| ------------- | ---------------------------: | --------------------: |
-| Tura Balanced |                        1.498 |                 0.981 |
-| Tura Direct   |                        1.444 |                 0.856 |
-| Codex CLI     |                        1.152 |                 0.910 |
+| Configuration    | Token-growth exponent `p_T` | Cost-growth exponent `p_C` | Effective-rate exponent `p_C - p_T` |
+| ---------------- | --------------------------: | -------------------------: | ----------------------------------: |
+| Tura Balanced    |                       1.474 |                      0.944 |                              -0.530 |
+| Tura Direct      |                       1.397 |                      0.876 |                              -0.520 |
+| Codex CLI Medium |                       1.240 |                      0.949 |                              -0.291 |
+| Codex CLI High   |                       1.382 |                      1.050 |                              -0.332 |
+
+All four token exponents exceed 1, indicating superlinear token growth over the
+observed range. Three cost exponents are below 1; Codex High is the near-linear
+exception at 1.050. Because `p_C - p_T` is negative in every configuration, the
+effective billed rate decreases with round count in each fitted configuration.
 
 <p align="center">
-  <img src="../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png" alt="Token and cost scaling" width="800">
+  <img src="../assets/model-run-statistics/claim-charts/08-token-vs-cost-scaling.png" alt="Total token volume and estimated billed cost by round count with configuration-specific power-law fits on log-log axes" width="800">
 </p>
 
-Across the observed range, total token volume is therefore superlinear but
-subquadratic, while billed cost is approximately linear or mildly sublinear.
-The mechanism is consistent with the pricing identity and the data: cached
-input represents 94.2% of Balanced input, 90.7% of Direct input, and 96.2% of
-Codex input, and its share is higher among the longer-run half of every group.
-Additional context tokens are increasingly likely to be discounted cache hits.
+_Figure 5. The 278-run relationship population excludes the two declared Tura
+Balanced observations above 90 rounds (113 and 242), retained in published
+aggregates. Panel A shows total token volume and Panel B shows total estimated
+billed cost. Points are runs; lines are configuration-specific power-law fits.
+The fitted exponents summarize elasticity over the observed range and are not a
+universal long-run law or a causal round-budget effect._
 
-The power law is used here as a compact elasticity summary, not as a universal
-long-run law. A competing two-parameter model combines linear per-round context
-with cumulative context growth. It has similar leave-one-task-out error and is
-retained by the predeclared 5% tolerance rule for all three groups. The data
-support “observed superlinear, subquadratic growth”; they do not distinguish a
-permanent power law from a quadratic process whose linear term remains material
-in the sampled range.
+The gap between the token and cost exponents is consistent with later rounds
+replaying more cached input: token volume can accelerate while billed cost stays
+near linear. Total cost still increases with rounds in every configuration. A
+stronger specification would estimate within-task curves and repeat the fits
+under alternative cache-price schedules.
 
-The figures, SVG sources, fitted summaries, and exact pricing assumptions are
-published under
-[`assets/model-run-statistics`](../assets/model-run-statistics/), with the five
-claim-specific outputs under
-[`claim-charts`](../assets/model-run-statistics/claim-charts/).
+## 5. Identification limits
 
-## 13. Limitations
+The benchmark can compare the four complete
+configurations, but it cannot tell which individual feature caused a difference.
+The likely contributors—batching, context handling, prompts, build, and
+reasoning effort—change together or are measured differently. The design
+limitations are that the configuration matrix does not isolate compact-context
+behavior, command
+batching, operation-manual instructions, backward-reasoning instructions, or
+reasoning effort. Cross-task-group differences in rounds and recorded command
+counts provide descriptive signals, but no component-specific causal estimate.
+A crossed ablation would need to hold build, task revision, model, reasoning
+effort, timeout, service tier, network policy, and retry policy constant while
+varying one mechanism.
 
-- The DeepSWE subset is deterministic and stratified, not a random sample of
-  all software work.
-- Three replicates reduce stochastic noise but do not create 60 independent
-  tasks; outcomes within a task and repository are correlated.
-- The rewrite subset has only five heterogeneous tasks and two replicates. Its
-  472 harness checks per configuration are not 472 independent tasks; both the
-  task-macro and assertion-micro rates must remain visible.
-- Four rewrite tasks cover Rust-to-Python CLI ports and one covers a single
-  TanStack product shape, so the result does not generalize to arbitrary
-  language pairs, frameworks, or application categories.
-- High-versus-Medium confounds agent/runtime and effort.
-- Compact-context and feature-level effects have not been ablated.
-- Token totals measure observed provider usage, not a universal dollar cost;
-  cache pricing and provider policy can change.
-- The cross-run fits in Section 12 use an explicitly filtered 267-run
-  sensitivity sample. They pool heterogeneous tasks and configurations, so
-  fitted slopes and success curves are associations rather than causal response
-  functions.
-- The design sample has only two tasks and two replicates, no blinded reviewers,
-  and no validated scalar quality rubric.
-- A direct URL is not by itself proof of content relevance, and a successful
-  page load is not proof of culinary accuracy.
-- The Paris comparison lacks retained Codex screenshots, preventing a symmetric
-  post-hoc visual inspection.
-- A verifier can be imperfect. Passing the current harness proves conformance
-  to that harness, not maintainability, security, or upstream acceptance.
+Additional limitations are the curated task sample, correlated replicates,
+heterogeneous harness granularity, six missing rewrite source bodies, one
+missing usage record, and the Codex build/effort boundary. Model-based intervals
+reported here do not resolve those design limitations.
 
-## 14. Next experiments
+## 7. Conclusion
 
-1. Run the crossed Tura/Codex x Medium/High effort matrix with identical task,
-   timeout, service-tier, and concurrency policies.
-2. Ablate `command_run`, `compact_context`, backward-reasoning instructions,
-   and operation-manual loading one at a time and in selected interactions.
-3. Predeclare infrastructure-invalid handling, automatically enforce it, and
-   publish both intent-to-run and valid-verifier denominators.
-4. Report paired task-level confidence intervals and bootstrap sensitivity,
-   not only pooled session percentages.
-5. Expand rewrite coverage to additional source/target language pairs and
-   full-stack product shapes while retaining task-level macro reporting.
-6. Add a deterministic design integrity harness for link type, HTTP status,
-   video-page identity, local assets, browser console state, viewport captures,
-   WebGL availability, and interaction paths.
-7. Add blinded multi-reviewer visual and editorial scoring with a predeclared
-   rubric and inter-rater agreement.
-8. Retain browser captures for every design agent so visual claims can be
-   reviewed symmetrically after publication.
+Tura records fewer rounds, batches more command records
+per round, and allocates a larger cost share to output. Three configurations show
+a positive round/success association; Codex High is flat. Token volume grows
+faster than billed cost, and more submitted production code is associated with
+higher within-task success. These are patterns to test, not causal verdicts. On
+the published 280-run population, Tura configurations record fewer aggregate
+rounds than the Codex configurations, and Tura command-density ratios are higher
+under the runtime-specific command definitions. In the 278-run relationship
+population, the Q1-to-Q3 fitted success-probability differences are positive for
+both Tura configurations and Codex Medium, while the Codex High interval includes
+zero. Token-component shares show a larger output allocation for both Tura
+configurations under the declared pricing schedule. Configuration-specific
+token-volume exponents are all greater than 1, billed-cost exponents stay much
+closer to 1, and the implied effective-rate exponents are negative.
 
-## 15. Repository and article citations
+Across all harness tasks with outcome variation, submitted production-code
+volume has a positive task-adjusted association with run-level success, and the
+association remains positive after configuration adjustment. The rewrite-only
+estimate is imprecise. None of these analyses identifies a component-level or
+code-volume causal effect.
 
-| Source                                                                                                                                         | Role in this report                                                                   |
-| ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| [Tura agent repository](https://github.com/Tura-AI/tura)                                                                                       | Architecture, orchestration, context-management, and strategy framing                 |
-| [Public benchmark article](https://turaai.net/benchmark)                                                                                       | Public cost-versus-harness-score presentation                                         |
-| [Tura Benchmark repository](https://github.com/Tura-AI/benchmark)                                                                              | Report source, task declarations, schemas, runners, and published evidence            |
-| [Benchmark methodology](https://github.com/Tura-AI/benchmark/blob/main/doc/benchmark-methodology.md)                                           | Selection, scoring, normalization, reporting, and strategy-level interpretation rules |
-| [DeepSWE replicate 1](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r01/manifest.json)      | Canonical 60-session manifest for replicate 1                                         |
-| [DeepSWE replicate 2](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r02/manifest.json)      | Canonical 60-session manifest for replicate 2                                         |
-| [DeepSWE replicate 3](https://github.com/Tura-AI/benchmark/blob/main/results/debug/report-deepswe-v1.1-gpt56-sol-local-r03/manifest.json)      | Canonical 60-session manifest for replicate 3                                         |
-| [Rewrite canonical manifest](https://github.com/Tura-AI/benchmark/blob/main/results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json) | Canonical 30-session rewrite scores, token totals, and computed costs                 |
-| [Filtered run-level relationship data](../assets/model-run-statistics/run-level-data.csv)                                                      | 267-run explanatory sample used for Section 12                                        |
-| [Claim-chart fitted summary](../assets/model-run-statistics/claim-charts/claim-chart-summary.json)                                             | Recomputed run-level associations, composition shares, and scaling exponents          |
-
-The agent repository and public article state the hypothesis and summarize the
-result. The benchmark repository and manifests are the evidence sources used
-for recomputation. None of these citations turns the current system-level
-comparison into a feature-level ablation.
-
-## Conclusion
-
-The current evidence is sufficient to be unequivocal about the published
-system-level result: on this fixed 20-task DeepSWE cohort, Tura Balanced passed
-more verifiers with fewer aggregate tokens and rounds, while Tura Direct
-matched the reference pass count within one run at a fraction of the token and
-round budget. Severe Tura long tails and failures were retained rather than
-trimmed. On the five-task rewrite cohort, Balanced achieved an 84.2% task-macro
-average and 82.4% assertion-micro rate while using 60.1% fewer tokens than
-Codex; Direct achieved 77.4% and 74.8% respectively while using 86.6% fewer
-tokens. In the small same-effort design cohort, Tura also used fewer tokens
-while preserving far more source, media, link, browser, and responsive
-verification evidence.
-
-The evidence is not sufficient to assign those gains to one feature or to call
-the effort settings controlled. Those are limitations to test next, not reasons
-to dilute the results that are already directly reproducible.
-
-The filtered cross-run sensitivity analysis adds five descriptive observations:
-rounds and cost both have positive fitted associations with success, but round
-count alone is not an efficiency score; Balanced lies on the observed aggregate
-cost-success frontier; Tura allocates a larger token and dollar share to output
-than Codex; within Tura, more normalized command records are associated with
-higher success, while Codex command granularity is not comparable; and discounted
-cache reuse separates superlinear token growth from near-linear billed cost.
-These observations sharpen the system-level result without turning correlation
-into a feature-level causal claim.
+Batching, cached-context reuse, productive extra diagnosis, and broader
+implementation coverage are all compatible with parts of the evidence, but none
+is isolated by this design.

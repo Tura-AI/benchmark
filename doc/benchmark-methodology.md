@@ -12,18 +12,31 @@ The resulting suite contains **27 tasks in total**. Of these, **25 are harness-s
 
 This document describes the task-selection criteria, data normalization rules, evaluation boundaries, known anomalies, and limitations. The task inventory, executable contracts, selection logic, and published result artifacts are maintained in this repository; the [current test-set evidence record](current-test-set-record.md) applies the methodology to the July 2026 artifacts.
 
-### 1.1 Primary strategy question
+### 1.1 Research questions and estimands
 
-The benchmark's primary purpose is to test a **system-level budget-allocation strategy**, not merely to rank agents or measure an isolated feature. Tura's public architecture and benchmark framing proposes that batching independent tool work, reducing repeated context, and reducing model round trips can create a token and cost advantage. That advantage can then be used in two ways.[^tura-repository] [^tura-benchmark-article]
+The primary unit of comparison is the complete configured agent system. The
+four-configuration matrix evaluates outcome and resource measurements jointly;
+it does not estimate an isolated runtime-component effect.[^tura-repository]
 
-| Strategy                      | Budget policy                                                                                 | Strategy-level question                                                                                  |
-| ----------------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| **Verification reinvestment** | Reinvest part of the saved budget in higher reasoning effort, investigation, and verification | Can the configured system achieve better verified outcomes while still using fewer tokens or lower cost? |
-| **Token-and-round reduction** | Preserve more of the saved budget as fewer model tokens and fewer model round trips           | Can the configured system retain comparable verified outcomes at materially lower resource use?          |
+| Analysis question                | Primary estimand                                                                                               | Required controls or qualifications                                                                                                                     |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Configuration outcome            | DeepSWE pass proportion; rewrite task-macro and assertion-micro rates                                          | Report numerator, denominator, task revision, replicate count, model, effort, build, and retry policy                                                   |
+| Resource allocation              | Observed tokens, rounds, estimated cost, and command records                                                   | Keep token components separate; command records are runtime-specific units                                                                              |
+| Additional reasoning effort      | Codex High-minus-Medium configuration contrast                                                                 | Build and effort differ simultaneously; the contrast is not an effort-only effect                                                                       |
+| Round and command associations   | Q1-to-Q3 difference in fitted success probability                                                              | Descriptive binomial models; task difficulty and stopping behavior remain uncontrolled                                                                  |
+| Submitted production-code volume | Within-task association between code additions and run-level harness success ratio across all 25 harness tasks | Equal run weights; task fixed effects; task-clustered uncertainty; configuration-adjusted and subset sensitivity models; missing source remains missing |
 
-Tura Balanced represents the verification-reinvestment policy in the published matrix; Tura Direct represents the stronger token-and-round-reduction policy. The comparison must therefore report outcome quality and resource use together: verifier or harness results, observed model tokens, model rounds, computed cost when available, and traceable verification activity. Lower token use without acceptable task outcomes is not a successful strategy, and more verification without a favorable total cost-outcome tradeoff does not establish the claimed benefit.
+Tura Balanced operationalizes the verification-reinvestment configuration and
+Tura Direct operationalizes the token-and-round-reduction configuration. Their
+labels identify configured policies; they do not encode a success criterion.
+Every comparison reports harness outcome, observed model tokens, model rounds,
+estimated cost when usage is available, and the relevant uncertainty or
+identification limit.
 
-This is **not a feature-level ablation study**. The unit under test is the complete configured agent strategy, including its runtime architecture, tool orchestration, context policy, reasoning effort, instructions, and verification behavior. The benchmark does not attribute an observed difference to `command_run`, context compaction, backward reasoning, an operation manual, or any other component in isolation. Such causal attribution requires a separately predeclared crossed experiment that holds the remaining system and effort settings constant. Where the current matrix compares different effort settings, it supports a system-level cost-outcome comparison rather than a pure architecture effect.
+This matrix is not a feature-level ablation. Runtime architecture, tool
+orchestration, context policy, reasoning effort, instructions, and verification
+behavior vary jointly. A component-level causal estimand requires a crossed
+design that holds the remaining factors constant.
 
 ## 2. Design principles
 
@@ -203,34 +216,108 @@ Keep the macro and micro rates labeled and adjacent. The micro rate gives the 63
 
 The harness does not require source-level similarity. Alternative implementations are acceptable when they satisfy the declared behavior. Conversely, compilation or visual resemblance alone is insufficient when behavioral checks fail.
 
-### 5.4 Execution and published evidence
+### 5.4 Published run matrix
 
-Each rewrite run starts in an isolated workspace containing the pinned source or benchmark-owned reference, the task prompt, and the required build contract. The four CLI tasks prohibit internet search, existing ports, wrappers around the reference binary, and Docker; agents must produce a Python implementation plus an idempotent `compile.sh` and directly runnable `executable` entrypoint. The evaluator runs the reference and candidate with matched arguments, input files, standard input, and environment, then compares exit status, stdout, and stderr. The TanStack task evaluates the rebuilt application across structure, visual fidelity, product flows, backend behavior, database behavior, analytics, tests, browser robustness, and code quality.
+The July 2026 rewrite publication contains five tasks, four configurations, and
+two replicates per configuration: 40 canonical runs. The 30-run Tura Balanced,
+Tura Direct, and Codex Medium source is
+[`report-20260710-gpt56-sol`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json).
+The 10-run Codex High source is
+[`report-20260714-codex-cli-0.144.1-gpt56-sol-high`](../results/rewrite/report-20260714-codex-cli-0.144.1-gpt56-sol-high/canonical-manifest.json).
+Per-run prompts, normalized rounds, aggregate usage, retained workspaces, and
+harness reports remain under those report directories.
 
-The July 2026 publication contains five tasks, three named configurations, and two replicates per configuration: **30 canonical sessions**. Its source of truth is [`results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json`](../results/rewrite/report-20260710-gpt56-sol/canonical-manifest.json). Per-run prompts, normalized rounds, token usage, patches or workspaces, and harness reports are retained beneath the same report directory. The recomputed totals and task-level table are recorded in the [current test-set evidence record](current-test-set-record.md).
+## 6. Submitted production-code volume analysis across harness tasks
 
-## 6. Design subset
+The secondary research question applies to all 25 harness-scored tasks: within
+the same task, is a larger submitted production-code volume associated with a
+higher expected run-level harness success ratio? The exposure is submitted
+production-code additions, defined separately at the stable artifact boundary
+for each task class:
 
-### 6.1 Why design tasks are outside the harness
+- **DeepSWE:** added lines reported by `git apply --numstat` for the final patch,
+  restricted to production `.go`, `.py`, `.pyi`, `.js`, `.jsx`, `.ts`, `.tsx`,
+  `.mjs`, `.cjs`, and `.rs` files;
+- **rewrite:** physical lines in retained submitted production source, treated
+  as additions from an empty target; the TanStack task uses the archived
+  evaluator `source_lines` field.
+
+Exclude tests, specs, fixtures, harnesses, benchmarks, examples, reference
+source, and test/verify helpers. Missing source remains missing rather than
+zero. In the declared 278-run relationship population, code volume is observed
+for all 238 DeepSWE runs and 34 of 40 rewrite runs, for 272 observations.
+
+For run `i` in task `t`, define
+
+`z_i = [log(1 + additions_i) - median_t(log(1 + additions))] / s_within`,
+
+where `s_within = 0.33631` is the pooled standard deviation after within-task
+median centering. This transformation permits zero additions and prevents raw
+patch line counts from being interpreted on the same scale as a greenfield
+rewrite.
+
+Let `y_i = passed_i / checks_i`. Fit an equal-run-weight fractional-logit model:
+
+`logit(E[y_i]) = α_t + β z_i`,
+
+where `α_t` is a task fixed effect. Each run contributes one quasi-likelihood
+observation regardless of its harness item count; rewrite tasks therefore do
+not dominate DeepSWE merely because their harnesses contain more assertions.
+Tasks with no observed outcome variation remain in descriptive displays but do
+not identify `β`.
+
+Report four predeclared specifications: pooled task fixed effects, DeepSWE-only
+task fixed effects, rewrite-only task fixed effects, and pooled task plus
+configuration fixed effects. Report `exp(β)` and the standardized fitted
+probability difference between `z = -0.5` and `z = +0.5`, averaging retained
+task intercepts equally. Construct two-sided 95% intervals from a CR1 sandwich
+covariance clustered by task and a `t_(G-1)` critical value, where `G` is the
+number of identifying task clusters. The rewrite-only specification has four
+identifying clusters and must be interpreted as low precision.
+
+<p align="center">
+  <img src="../assets/harness-code-statistics/09-code-additions-vs-harness-success.png" alt="DeepSWE and rewrite harness success against within-task standardized production-code additions" width="800">
+</p>
+
+_Method figure 1. The 278-run relationship population excludes two Tura
+Balanced observations above 90 rounds (113 and 242), both retained in published
+aggregates; 272 runs have observed code volume. The panels show run-level
+outcomes and subset-specific task-fixed-effect fractional-logit fits. Six
+unavailable rewrite source bodies remain missing._
+
+<p align="center">
+  <img src="../assets/harness-code-statistics/10-code-size-model-estimates.png" alt="Task-clustered code-volume association estimates under pooled, subset, and configuration-adjusted specifications" width="800">
+</p>
+
+_Method figure 2. The same 278-run population and two-run exclusion apply; 272
+runs have observed code volume. Odds-ratio and standardized
+probability-difference estimates use 95% CR1 task-clustered intervals. The
+complete run-level data, task table, coefficients, covariance matrices,
+exclusions, and missing-source IDs are published in
+[`assets/harness-code-statistics`](../assets/harness-code-statistics/)._
+
+## 7. Design subset
+
+### 7.1 Why design tasks are outside the harness
 
 The design tasks have stable prompts, run metadata, and required output paths, but no `harness.json`. They are excluded from automated score aggregation because their central outcomes—visual hierarchy, information design, editorial quality, interaction clarity, and responsible use of sources—cannot currently be reduced to the same deterministic pass/fail contract used by the engineering tasks.
 
 Simple existence checks such as “`index.html` was created” are useful integrity checks but are not evidence of design quality. Until a separate rubric is validated, these tasks should be reported as **completed artifact / invalid artifact / not run**, followed by blinded human review or clearly labeled qualitative analysis. They must not silently receive a zero or a perfect score in the 25-task harness result.
 
-### 6.2 Complete design task inventory
+### 7.2 Complete design task inventory
 
 | Task                              | Required deliverable                                                  | Core requirements                                                                                                                                                                                                                                                                                                      | Evaluation boundary                                                                                                                                                                |
 | --------------------------------- | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `east-asian-squid-recipes-slides` | A navigable English HTML presentation at `./index.html`               | Fifteen illustrated slides covering ten distinct squid cooking methods from East Asian countries or regions; each method needs cultural attribution, ingredient quantities, preparation and cooking steps, timing, a recipe-source link, and a working YouTube cooking-video link; all assets remain in the workspace. | Review completeness, factual sourcing, editorial structure, image relevance, readability, navigation, and link validity. No automated harness score.                               |
 | `paris-summer-temperature-3d`     | A responsive English interactive 3D HTML experience at `./index.html` | Show the evolution of Paris summer temperature from 1986 through 2026 with a clear time axis, spatial depth, animation, and controls for yearly values, trends, and notable heat events; keep assets local and distinguish observed historical values from provisional or projected 2026 values.                       | Review data provenance, historical/provisional labeling, legibility, interaction stability, 3D communication value, responsiveness, and accessibility. No automated harness score. |
 
-## 7. Data organization and normalization
+## 8. Data organization and normalization
 
-### 7.1 Immutable task identity
+### 8.1 Immutable task identity
 
 Every task is keyed by a stable task ID. Repository tasks additionally retain the repository URL and base commit. Rewrite tasks retain their source tag/commit and target runtime. Results from different task revisions must not be merged under one ID without a revision field or migration record.
 
-### 7.2 Run identity and repeats
+### 8.2 Run identity and repeats
 
 A run record should include at least:
 
@@ -245,9 +332,13 @@ A run record should include at least:
 - observable token/usage fields without imputation;
 - infrastructure status and retry lineage.
 
-Agentic runs are stochastic. Replicates are independent observations, not backup files to be cherry-picked. A retry replaces a run only when the original was invalid for a documented infrastructure reason. A valid task failure must remain in the dataset.
+Agentic runs are stochastic. Replicates are independent observations, not
+backup files to be cherry-picked. Retry only a documented environment failure
+or provider failure that invalidates the attempt. A normal task timeout, agent
+non-zero exit, agent-reported error, or valid verifier failure is experimental
+behavior and must remain in the dataset without retry.
 
-### 7.3 Raw, normalized, and published layers
+### 8.3 Raw, normalized, and published layers
 
 - **Raw layer:** untouched provider events, stdout/stderr, workspace state, and verifier output.
 - **Normalized layer:** schema-validated rounds, tool calls, usage, task reports, and harness reports.
@@ -255,31 +346,55 @@ Agentic runs are stochastic. Replicates are independent observations, not backup
 
 Normalization may rename or structure fields, but it must not invent commands, tool results, token counts, assertions, or scores. Cumulative usage updates must be deduplicated before summation; otherwise repeated provider snapshots inflate cost and token totals.
 
-#### 7.3.1 Codex CLI instrumentation and publication boundary
+#### 8.3.1 Codex CLI instrumentation and publication boundary
 
-The Codex CLI runs in the published matrix used a locally modified build, identified in result metadata as `(local modified)`, rather than an unmodified official release binary. The official Codex CLI version was modified specifically to obtain each round's command records and detailed metadata for the command, usage, timing, and provenance analyses in this repository. Published Codex result artifacts retain each round's complete `input` and `output`, normalized commands, timing, and reconstruction metadata. They omit only the round-level `inputTokens` and `outputTokens` fields from normalized per-round contracts and their embedded copies; run-level usage summaries remain retained.
+Codex Medium used a locally instrumented Codex build to retain round commands,
+timing, and provenance. Its normalized round contracts omit per-round input and
+output components, while run-level aggregate usage remains retained. Codex
+High used the unmodified official Codex CLI `0.144.1` release. Keep the two
+configurations separate in every table and fit. The build boundary is a
+confounder; do not attribute a High-versus-Medium difference solely to
+reasoning effort.
 
-Because the experiment modified the official Codex CLI version, the resulting data may differ from data produced by the corresponding official version. The current matrix does not isolate or estimate that effect. Reproductions are welcome, particularly official-versus-modified crossed experiments that can demonstrate whether the version difference causes an obvious and repeatable change in outcomes or resource use.
-
-### 7.4 Missing and malformed data
+### 8.4 Missing and malformed data
 
 Use explicit states rather than coercing all anomalies to zero:
 
-| Condition                                                                                     | Treatment                                                             |
-| --------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Valid harness reward or assertion result                                                      | Include in task score                                                 |
-| Agent completed; valid verifier returns failure                                               | Count as task failure                                                 |
-| Agent process or task reaches its declared task timeout and verifier can still run            | Preserve timeout status and score only from the valid verifier        |
-| Verifier crashes, report is absent/malformed, environment fails, or source cannot be prepared | Mark invalid/infrastructure failure; do not count as task failure     |
-| Token or cost field unavailable                                                               | Keep null/missing; do not estimate                                    |
-| Assertion text absent in an archived report                                                   | Keep evidence text empty; retain stable assertion ID if known         |
-| Duplicate cumulative provider-usage event                                                     | Deduplicate using the cumulative state before aggregation             |
-| Design artifact missing or entry path wrong                                                   | Mark invalid artifact; do not manufacture a design score              |
-| External link unavailable during design review                                                | Record link-check time and failure separately from artifact rendering |
+| Condition                                                                          | Treatment                                                             |
+| ---------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Valid harness reward or assertion result                                           | Include in task score                                                 |
+| Agent completed; valid verifier returns failure                                    | Count as task failure                                                 |
+| Agent process or task reaches its declared task timeout and verifier can still run | Preserve timeout status and score only from the valid verifier        |
+| Agent process times out or exits non-zero                                          | Retain as experimental behavior; do not retry                         |
+| Provider or environment failure invalidates the attempt                            | Mark invalid and retry with lineage retained                          |
+| Verifier crashes, report is absent/malformed, or source cannot be prepared         | Mark invalid/infrastructure failure; do not count as task failure     |
+| Token or cost field unavailable                                                    | Keep null/missing; do not estimate                                    |
+| Assertion text absent in an archived report                                        | Keep evidence text empty; retain stable assertion ID if known         |
+| Duplicate cumulative provider-usage event                                          | Deduplicate using the cumulative state before aggregation             |
+| Design artifact missing or entry path wrong                                        | Mark invalid artifact; do not manufacture a design score              |
+| External link unavailable during design review                                     | Record link-check time and failure separately from artifact rendering |
 
-## 8. Reporting protocol
+### 8.5 Analysis populations and declared exclusion
 
-### 8.1 Primary metrics
+Configuration-level result tables use all 280 published harness-scored runs.
+Cross-run relationship figures use a 278-run population after excluding exactly
+two Tura Balanced observations above 90 rounds: 113 rounds for
+`quill-shared-toolbar-focus` and 242 rounds for
+`dynamodb-toolbox-conditional-attribute-requirements`. The observations remain
+in raw contracts and configuration-level aggregates. Record their identities,
+values, and exclusion reason in `assets/model-run-statistics/excluded-runs.csv`.
+Do not apply additional visual trimming or replace missing values with zero.
+
+The threshold changes the estimand from the full empirical population to the
+declared non-long-tail relationship population. Every statistical figure and
+caption must state the 278-run denominator and the two-run exclusion. The
+submitted-code analysis additionally states its 272-run observed-code
+population, 206-run pooled identifying population, task-cluster counts, and six
+missing-source records.
+
+## 9. Reporting protocol
+
+### 9.1 Primary metrics
 
 Report the three subsets separately:
 
@@ -291,93 +406,132 @@ For every strategy comparison, report these outcome metrics beside observed tota
 
 For comparisons between agents, use the same task revision, model where the agent comparison requires it, effort setting, timeout policy, network policy, and replicate count. Publish the run matrix before interpreting differences.
 
-### 8.2 Strategy-level interpretation
+### 9.2 Statistical reporting contract
 
-Evaluate the two budget policies separately before making any overall statement.
+For every regression analysis, state the analysis population, response,
+predictor transformation, weighting or trial denominator, adjustment variables,
+estimand, interval construction, missing-data treatment, and exclusion rule.
+Report coefficients only with their units or transformations. Report fitted
+probability differences in percentage points and odds ratios as `exp(β)`.
 
-- **Verification reinvestment:** compare verified task outcomes against tokens, rounds, cost, and retained verification evidence. The intended claim is a better cost-outcome frontier, not simply a larger number of tool commands.
-- **Token-and-round reduction:** compare tokens, rounds, and cost against the verified outcome gap. Describe outcomes as comparable only with a predeclared tolerance or with suitably cautious descriptive language; an informal near-tie is not a formal non-inferiority result.
-- **Mechanism boundary:** label conclusions as system-level strategy results. Component-level causal claims require ablations or a crossed design and must not be inferred from these comparisons.
+Round and command models use separate binomial logistic regressions by
+configuration: `logit(P(success_i)) = α + β log(1 + x_i)`. Their estimand is the
+Q1-to-Q3 change in fitted success probability within that configuration's
+observed predictor range. Harness check count supplies the binomial trial
+denominator; it is not a semantic-difficulty weight.
 
-When reasoning effort differs between configurations, report that difference prominently. A lower-cost, higher-outcome configured system can still be a valid strategy-level result, but it does not identify how much of the result came from architecture, effort, instructions, or their interaction.
+Token volume uses pooled quadratic OLS on the natural round axis. Effective
+billed rate is `cost × 1,000,000 / total tokens` and uses pooled log-linear OLS.
+These pooled coefficients combine within- and between-configuration variation.
+Command counts are not compared as equal atomic-work units across runtimes.
 
-### 8.3 Optional overall summaries
+The submitted-code model uses one equal-weight fractional-logit observation per
+run, task fixed effects, and CR1 covariance clustered by task. Its primary
+estimand is the common within-task association between standardized
+`log(1 + additions)` and expected harness ratio. Report pooled, DeepSWE-only,
+rewrite-only, and task-plus-configuration specifications together. The
+association remains vulnerable to attempt-scope, architecture, stopping-rule,
+and semantic-coverage confounding and is not a causal effect of writing more
+lines.
+
+Configuration differences are system-level contrasts. A component-level causal
+claim requires a crossed design. Codex High versus Medium is jointly confounded
+by build and reasoning effort.
+
+### 9.3 Optional overall summaries
 
 If an overall engineering score is required, use a task-level macro average over the **25 harness-scored tasks** so that each task contributes equally after its own harness has produced a task score. Label the formula and keep the subset scores adjacent. Do not include the two design tasks unless a separate, predeclared scoring protocol exists.
 
-### 8.4 Uncertainty
+### 9.4 Uncertainty
 
-Always show counts with percentages. For repeated binary task outcomes, report replicate dispersion or a confidence interval and avoid treating small differences as meaningful. Twenty DeepSWE tasks are sufficient for a controlled comparison on this subset, but not for precise estimates of the full 113-task benchmark. The official DeepSWE site likewise reports uncertainty and cautions against overinterpreting small qualitative frequencies.[^deepswe-home] [^deepswe-methodology]
+Always show counts with percentages. Regression figures report 95% intervals
+and identify their covariance estimator, clustering unit, and reference
+distribution. Round and command intervals are model-based and do not correct
+for task dependence. Submitted-code intervals use CR1 covariance clustered by
+task but still rely on only 19 pooled, 15 DeepSWE, or 4 rewrite identifying
+clusters. Twenty DeepSWE tasks and five rewrite tasks do not support precise
+population generalization beyond the curated subset. The official DeepSWE site
+likewise reports uncertainty and cautions against overinterpreting small
+qualitative frequencies.[^deepswe-home] [^deepswe-methodology]
 
-## 9. Anomalies and edge cases
+## 10. Anomalies and edge cases
 
-### 9.1 Difficulty is empirical and model-pool dependent
+### 10.1 Difficulty is empirical and model-pool dependent
 
 The official pass rate depends on the models, agent harness, effort settings, and trial mix present in the v1.1 official records. A task labeled hard may be easy for a later model, and a low rate can partly reflect verifier or environment friction. Difficulty labels should be regenerated or versioned when the official trial pool changes.
 
-### 9.2 Sparse language pools distort target rates
+### 10.2 Sparse language pools distort target rates
 
 Go and Python offered 34 eligible tasks each and TypeScript 35, but Rust and JavaScript offered only five each in the captured selection. Four strata over five candidates cannot closely match four fixed completion-rate targets. Equal language representation is preserved at the cost of a less uniform difficulty profile.
 
-### 9.3 Rank-band boundary effects
+### 10.3 Rank-band boundary effects
 
 Selecting the first item in each rank band is deterministic but sensitive to small rate changes near a band boundary. It also tends to select the easier edge of every band. A future revision could predeclare nearest-target matching with uniqueness constraints, but changing the algorithm would define a new subset version and should not retroactively alter existing results.
 
-### 9.4 Unequal verifier granularity
+### 10.4 Unequal verifier granularity
 
 One harness item can represent a narrow argument check or a broad browser flow. Assertion counts are therefore not units of semantic difficulty. This is why task-level macro aggregation is preferred over pooling all assertions.
 
-### 9.5 Environment and platform sensitivity
+### 10.5 Environment and platform sensitivity
 
 CLI output can vary with operating system, locale, filesystem ordering, path separators, terminal capabilities, timestamps, permissions, and archive libraries. Fixtures should disable irrelevant color/icon output, pin locale and dependency versions, normalize only declared nondeterministic fields, and preserve exit code, stdout, and stderr semantics.
 
-### 9.6 Network and source drift
+### 10.6 Network and source drift
 
 Repositories, package registries, videos, recipe pages, and climate-data endpoints can change or disappear. Source commits and local task assets must be pinned where licensing permits. External-link checks should record their date; link rot is not automatically an agent failure if the artifact used a valid source at run time.
 
-### 9.7 Verifier incompleteness
+### 10.7 Verifier incompleteness
 
 Program-based verifiers approximate a specification; they are not the specification itself. They can miss valid alternative behaviors or permit incomplete implementations. DeepSWE's authors explicitly motivate behavioral verification and also identify verifier design as an area for continued improvement.[^deepswe-methodology] Harness changes require versioning and re-evaluation of comparability.
 
-### 9.8 Design-review subjectivity
+### 10.8 Design-review subjectivity
 
 Human design ratings can vary with reviewer background, display, browser, cultural familiarity, and aesthetic preference. Any future design comparison should use multiple blinded reviewers, a predeclared rubric, calibrated examples, and inter-rater agreement. Automated visual checks may detect clipping or missing assets, but should not be presented as a complete measure of quality.
 
-## 10. Limitations and threats to validity
+## 11. Limitations and threats to validity
 
-### 10.1 Construct validity
+### 11.1 Construct validity
 
 The benchmark measures performance under specific prompts, tools, timeouts, environments, and verifiers. It does not fully measure maintainability, security, product judgment, long-term operation, collaboration, or whether a patch would be accepted by upstream maintainers.
 
-### 10.2 External validity
+### 11.2 External validity
 
 DeepSWE covers five languages but excludes major ecosystems such as Java and C++. Its official corpus is concentrated in TypeScript, Go, and Python, and is drawn from established open-source repositories; DeepSWE's authors note these same coverage limits.[^deepswe-methodology] Equal-language sampling further differs from real-world language prevalence.
 
 The rewrite subset is small and intentionally heterogeneous. All four CLI ports begin with Rust sources and target Python, so the result should not be generalized to arbitrary language pairs. The HTML task tests one framework and one product shape.
 
-### 10.3 Selection bias
+### 11.3 Selection bias
 
 The DeepSWE subset is stratified, not random. It overrepresents Rust and JavaScript relative to their available task pools and chooses deterministic band-edge examples. The rebuild and design tasks were purposefully selected for breadth and evaluability. Reported performance is conditional on this curation.
 
-### 10.4 Contamination
+### 11.4 Contamination
 
 DeepSWE reduces direct benchmark leakage by using original tasks rather than fixes copied from existing public commits.[^deepswe-methodology] This lowers but does not eliminate contamination: models may have seen the underlying repositories, libraries, task descriptions after publication, or similar implementations. Research on code-generation benchmarks finds that both surface and semantic overlap with training corpora can materially inflate measured performance.[^contamination-paper]
 
 The four rebuild sources are public and may be present in model training data. They should be interpreted as behavioral reconstruction tasks, not contamination-free tests of novel algorithm discovery.
 
-### 10.5 Temporal validity
+### 11.5 Temporal validity
 
 Model APIs, agent implementations, package registries, benchmark artifacts, and source repositories evolve. Every publication should state the benchmark revision, selection timestamp, model identifier, agent version, configuration, and execution period. Results from different revisions are not directly comparable without a compatibility audit.
 
-### 10.6 Statistical power and dependence
+### 11.6 Statistical power and dependence
 
 Twenty DeepSWE tasks and five rewrite tasks provide limited power. Outcomes within a repository, language, or agent runtime may be correlated, so treating every harness assertion as an independent sample understates uncertainty. Replicates reduce stochastic noise but do not create new independent tasks.
 
-### 10.7 Cost and timeout effects
+### 11.7 Cost and timeout effects
 
 Long-horizon performance is sensitive to token budget, reasoning effort, tool-call limits, wall-clock timeout, network access, and service tier. More resources may improve completion rate while increasing cost. Capability and efficiency should therefore be reported together, not collapsed without an explicit utility function.
 
-## 11. Reproduction checklist
+### 11.8 Compact context and missing ablations
+
+The current matrix does not isolate compact-context behavior, command batching,
+operation-manual text, or reasoning effort. Cross-task-group differences in
+model rounds and recorded command output define descriptive associations only;
+they do not estimate an individual mechanism's causal effect. A controlled
+ablation must hold the build, task set, model, effort, timeout, service tier,
+network policy, and retry policy constant.
+
+## 12. Reproduction checklist
 
 Before publishing or comparing a run:
 
@@ -391,10 +545,12 @@ Before publishing or comparing a run:
 - distinguish valid task failures from infrastructure-invalid runs;
 - report DeepSWE, rewrite, and design results separately;
 - include counts and denominators with every rate;
+- identify the published, relationship-model, and observed-code populations;
+- publish every regression formula, estimand, adjustment set, and interval assumption;
 - keep design tasks outside harness aggregation;
 - document every exclusion, rerun, harness revision, and manual judgment.
 
-## 12. References
+## 13. References
 
 [^deepswe-home]: Datacurve AI, “DeepSWE,” official benchmark website and v1.1 leaderboard, <https://deepswe.datacurve.ai/> (accessed 2026-07-12).
 

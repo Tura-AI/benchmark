@@ -152,8 +152,8 @@ rename or relocate existing published artifacts.
 Result directories and manifests describe benchmark subsets. A subset must not
 be presented as the complete upstream benchmark or as representative beyond its
 declared task population. Publication and comparison rules are defined in the
-[benchmark methodology](benchmark-methodology.md); current evidence is recorded
-in the [test-set record](current-test-set-record.md).
+[benchmark methodology](benchmark-methodology.md); current four-configuration
+evidence is recorded in the [test-set record](current-test-set-record.md).
 
 ## Maintenance rules
 
@@ -177,6 +177,12 @@ in the [test-set record](current-test-set-record.md).
 10. Update this document whenever directory structure or a contract boundary
     changes.
 
+Statistical publication is configured by `config/analysis.json`. The three
+`analysis:*` entry points consume that shared cohort, population, exclusion,
+pricing, path, and artifact contract rather than maintaining independent
+defaults. Generated CSV source paths are relative to the configured `resultsRoot`
+so checked-in analysis artifacts remain portable.
+
 ## Quality gates
 
 Before merging framework changes:
@@ -189,6 +195,9 @@ Before merging framework changes:
 - run formatting and dead-code checks;
 - confirm generated and temporary files remain ignored;
 - confirm the `tasks/` inventory was not removed or rewritten unintentionally.
+- run `node --test tests/analysis_reports.test.mjs` after regenerating analysis
+  assets to catch report-cohort, sample-count, source-path, pricing, and chart-set
+  drift.
 
 `npm run check` runs the repository's standard local gates. Live benchmark
 execution is a separate validation step because it can use external resources
