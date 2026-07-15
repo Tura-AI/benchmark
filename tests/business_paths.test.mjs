@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   benchmarkRawRoot,
   businessRunPaths,
+  costEstimateForProviderCalls,
   costEstimateForUsage,
   normalizeBusinessSummary,
 } from "../lib/business_paths.mjs";
@@ -36,6 +37,50 @@ test("GPT-5.6 Sol pricing charges cached input once at the official rate", () =>
     output: 100_000,
     reasoning: 25_000,
     total: 1_200_000,
+  });
+});
+
+test("GPT-5.6 Sol pricing applies the 272K surcharge per provider call", () => {
+  const estimate = costEstimateForProviderCalls(
+    [
+      {
+        usage: {
+          input_tokens: 200_000,
+          cached_input_tokens: 100_000,
+          output_tokens: 10_000,
+          reasoning_tokens: 2_000,
+          total_tokens: 210_000,
+        },
+      },
+      {
+        usage: {
+          input_tokens: 300_000,
+          cached_input_tokens: 200_000,
+          output_tokens: 20_000,
+          reasoning_tokens: 4_000,
+          total_tokens: 320_000,
+        },
+      },
+    ],
+    { model: "gpt-5.6-sol", serviceTier: "default" },
+  );
+  assert.equal(estimate.context, "mixed");
+  assert.equal(estimate.requestCount, 2);
+  assert.equal(estimate.longContextRequestCount, 1);
+  assert.equal(estimate.costUsd, 2.95);
+  assert.deepEqual(estimate.rateBands, {
+    short: {
+      input: 5,
+      cachedInput: 0.5,
+      cacheWrite: 6.25,
+      output: 30,
+    },
+    long: {
+      input: 10,
+      cachedInput: 1,
+      cacheWrite: 12.5,
+      output: 45,
+    },
   });
 });
 

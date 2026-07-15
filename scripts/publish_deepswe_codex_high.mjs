@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   buildAgentRoundContracts,
+  costEstimateForProviderCalls,
   costEstimateForUsage,
 } from "../lib/business_paths.mjs";
 import { projectPython } from "../lib/python_runtime.mjs";
@@ -106,6 +108,7 @@ export function publishDeepSweCodexHigh(options) {
     new Set(selection.tasks.map((task) => task.task_id)).size,
     EXPECTED_TASKS,
   );
+  auditCodexSourceArtifacts(source, manifest);
   if (options.checkSourceOnly)
     return { ok: true, mode: "check-source", source, ...sourceAudit };
 
@@ -162,7 +165,7 @@ export function publishDeepSweCodexHigh(options) {
         !fs.existsSync(to),
         `refusing to overwrite published report: ${to}`,
       );
-      fs.renameSync(from, to);
+      publishDirectory(from, to);
     }
     const auditFrom = path.join(stagingDebug, auditName);
     const auditTo = path.join(destinationDebug, auditName);
@@ -170,7 +173,7 @@ export function publishDeepSweCodexHigh(options) {
       !fs.existsSync(auditTo),
       `refusing to overwrite published audit: ${auditTo}`,
     );
-    fs.renameSync(auditFrom, auditTo);
+    publishFile(auditFrom, auditTo);
     fs.rmSync(stagingRoot, { recursive: true, force: true });
     return {
       ok: true,
@@ -184,6 +187,45 @@ export function publishDeepSweCodexHigh(options) {
     error.message = `${error.message}\nstaging retained for audit: ${stagingRoot}`;
     throw error;
   }
+}
+
+export function publishDirectory(from, to) {
+  const temporary = `${to}.publishing-${process.pid}`;
+  assert(!fs.existsSync(temporary), `stale publish directory: ${temporary}`);
+  fs.cpSync(from, temporary, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+  });
+  renameWithRetry(temporary, to);
+}
+
+export function publishFile(from, to) {
+  const temporary = `${to}.publishing-${process.pid}`;
+  assert(!fs.existsSync(temporary), `stale publish file: ${temporary}`);
+  fs.copyFileSync(from, temporary, fs.constants.COPYFILE_EXCL);
+  renameWithRetry(temporary, to);
+}
+
+function renameWithRetry(from, to) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!new Set(["EPERM", "EBUSY", "EACCES"]).has(error?.code)) throw error;
+      if (attempt < 10)
+        Atomics.wait(
+          new Int32Array(new SharedArrayBuffer(4)),
+          0,
+          0,
+          attempt * 50,
+        );
+    }
+  }
+  throw lastError;
 }
 
 function publishReplicate({
@@ -200,6 +242,14 @@ function publishReplicate({
     .sort((left, right) => left.task.task_id.localeCompare(right.task.task_id));
   assert.equal(jobs.length, EXPECTED_TASKS);
   const runs = [];
+  const totals = {
+    rounds: 0,
+    messages: 0,
+    inputMessages: 0,
+    outputMessages: 0,
+    commands: 0,
+    toolCalls: 0,
+  };
   for (const job of jobs) {
     const taskId = job.task.task_id;
     const task = selection.tasks.find((item) => item.task_id === taskId);
@@ -223,6 +273,7 @@ function publishReplicate({
       task,
       job,
     });
+    for (const key of Object.keys(totals)) totals[key] += published[key];
     runs.push({
       runId,
       taskId,
@@ -262,10 +313,17 @@ function publishReplicate({
     },
     runs,
   });
-  return { id: reportId, replicate, runCount: runs.length };
+  return {
+    id: reportId,
+    replicate,
+    runCount: runs.length,
+    passed: runs.filter((run) => run.status === "pass").length,
+    failed: runs.filter((run) => run.status === "fail").length,
+    ...totals,
+  };
 }
 
-function writeTaskContracts(task, taskRoot) {
+export function writeTaskContracts(task, taskRoot) {
   if (fs.existsSync(path.join(taskRoot, "task.json"))) return;
   const taskId = task.task_id;
   const corpusTaskRoot = path.join(root, "raw", "_cache", "deep-swe", taskId);
@@ -385,6 +443,12 @@ function publishRun({
   assert.equal(rawSummary.reasoning, EFFORT);
   assert.equal(rawSummary.model, MODEL);
   assert.equal(Number(rawHarness.reward?.reward), Number(job.harness_score));
+  assert.equal(rawHarness.model_patch_applied, true);
+  assert.match(String(rawHarness.model_patch_sha256 || ""), /^[0-9a-f]{64}$/i);
+  assert.equal(
+    rawHarness.model_patch_sha256,
+    sha256File(path.join(sourceRun, "model.patch")),
+  );
 
   const metadataRoot = path.join(runRoot, "metadata");
   const contractsRoot = path.join(metadataRoot, "contracts");
@@ -455,10 +519,17 @@ function publishRun({
     0,
   );
   const usage = normalizeUsage(rawSummary.usage);
-  const pricing = costEstimateForUsage(usage, {
+  const pricingOptions = {
     model: MODEL,
     serviceTier: "default",
-  });
+    usage,
+  };
+  const pricingCalls = rawSummary.provider_calls?.length
+    ? rawSummary.provider_calls
+    : (rawSummary.rounds || []).map((round) => ({ usage: round.usage }));
+  const pricing = pricingCalls.length
+    ? costEstimateForProviderCalls(pricingCalls, pricingOptions)
+    : costEstimateForUsage(usage, pricingOptions);
   const prompt = fs.readFileSync(path.join(sourceRun, "prompt.md"), "utf8");
   const patch = fs.readFileSync(path.join(sourceRun, "model.patch"), "utf8");
   const taskContract = readJson(path.join(runRoot, "..", "..", "task.json"));
@@ -604,7 +675,23 @@ function publishRun({
       roundFile: "round-{NNNN}.json",
     },
   });
-  return { rounds: rounds.length, commands };
+  return {
+    rounds: rounds.length,
+    messages: rounds.reduce((total, round) => total + round.messages.length, 0),
+    inputMessages: rounds.reduce(
+      (total, round) => total + round.input.messages.length,
+      0,
+    ),
+    outputMessages: rounds.reduce(
+      (total, round) => total + round.output.messages.length,
+      0,
+    ),
+    commands,
+    toolCalls: rounds.reduce(
+      (total, round) => total + round.toolCalls.length,
+      0,
+    ),
+  };
 }
 
 function rebuildRoundContracts({ sourceRun, rawSummary, taskId }) {
@@ -686,7 +773,7 @@ function rebuildRoundContracts({ sourceRun, rawSummary, taskId }) {
   });
 }
 
-function commandFromToolCall(tool, index) {
+export function commandFromToolCall(tool, index) {
   const args =
     tool?.arguments && typeof tool.arguments === "object" ? tool.arguments : {};
   const exitCode = Number.isInteger(args.exit_code) ? args.exit_code : null;
@@ -723,7 +810,7 @@ function commandFromToolCall(tool, index) {
   };
 }
 
-function assertRoundCompleteness(round, taskId) {
+export function assertRoundCompleteness(round, taskId) {
   const label = `${taskId} round ${round.roundIndex}`;
   assert.equal(
     round.schema,
@@ -964,7 +1051,7 @@ function buildWebRun({
   };
 }
 
-function normalizeUsage(usage = {}) {
+export function normalizeUsage(usage = {}) {
   const inputTokens = Number(usage.input_tokens || 0);
   const outputTokens = Number(usage.output_tokens || 0);
   return {
@@ -976,13 +1063,13 @@ function normalizeUsage(usage = {}) {
   };
 }
 
-function rewardBreakdown(reward = {}, prefix) {
+export function rewardBreakdown(reward = {}, prefix) {
   const total = Number(reward[`${prefix}_total`] || 0);
   const passed = Number(reward[`${prefix}_passed`] || 0);
   return { passed, failed: Math.max(0, total - passed), total };
 }
 
-function validateStaging(stagingRoot) {
+export function validateStaging(stagingRoot) {
   const result = spawnSync(
     projectPython(root, process.env),
     [
@@ -1026,6 +1113,48 @@ function parseArgs(argv) {
 
 function copyOptional(from, to) {
   if (fs.existsSync(from)) fs.copyFileSync(from, to);
+}
+
+function auditCodexSourceArtifacts(source, manifest) {
+  for (const job of manifest.jobs) {
+    const sourceRun = path.join(
+      source,
+      "runs",
+      job.task.task_id,
+      `codex-cli-r${job.replicate}`,
+    );
+    const summary = readJson(path.join(sourceRun, "agent-summary.json"));
+    const harness = readJson(path.join(sourceRun, "harness", "report.json"));
+    const patchPath = path.join(sourceRun, "model.patch");
+    assert.equal(
+      summary.round_contract_validation?.allLlmTurnsRecovered,
+      true,
+      `${job.key} all LLM turns`,
+    );
+    assert.equal(
+      summary.rounds?.length,
+      Number(job.round_count),
+      `${job.key} round count`,
+    );
+    assert.equal(harness.model_patch_applied, true, `${job.key} patch applied`);
+    assert.match(
+      String(harness.model_patch_sha256 || ""),
+      /^[0-9a-f]{64}$/i,
+      `${job.key} patch sha256`,
+    );
+    assert.equal(
+      harness.model_patch_sha256,
+      sha256File(patchPath),
+      `${job.key} applied patch hash`,
+    );
+  }
+}
+
+function sha256File(file) {
+  return crypto
+    .createHash("sha256")
+    .update(fs.readFileSync(file))
+    .digest("hex");
 }
 
 function required(value, label) {

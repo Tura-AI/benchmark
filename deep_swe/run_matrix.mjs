@@ -12,18 +12,27 @@ import {
   findCodexCliExe,
   genericAgentKind,
   genericAgentMode,
+  eventsForAgent,
+  eventsWithUsageRounds,
   priorityEnabled,
+  reconcileGenericAgentProviderRounds,
   runGenericAgentCli,
+  usageForAgent,
+  validateGenericAgentRoundContracts,
 } from "../lib/generic_agent_cli.mjs";
 import { projectPython } from "../lib/python_runtime.mjs";
 import {
   HARNESS_CONCURRENCY,
+  HARNESS_IMAGE_CONCURRENCY,
   VERIFIER_COMMAND,
   buildHarnessBatches,
   validHarnessReport,
 } from "./harness.mjs";
 import { captureChangedWorkspace } from "../lib/debug_workspace_recovery.mjs";
-import { costEstimateForUsage } from "../lib/business_paths.mjs";
+import {
+  costEstimateForProviderCalls,
+  costEstimateForUsage,
+} from "../lib/business_paths.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -68,6 +77,9 @@ const diskSafetyFloorGb = Number(
   process.env.DEEP_SWE_DISK_SAFETY_FLOOR_GB || 5,
 );
 const keepWorkspaces = truthy(process.env.DEEP_SWE_KEEP_WORKSPACES);
+const sharedTuraTaskContainers = truthy(
+  process.env.DEEP_SWE_SHARED_TASK_CONTAINERS,
+);
 const turaExe =
   process.env.COMMAND_RUN_AGENT_TURA_EXE ||
   findCommand("tura") ||
@@ -110,11 +122,32 @@ assert.equal(
   0,
   "DeepSWE task count must divide evenly into task batches",
 );
-assert.equal(
-  concurrency,
-  taskBatchSize * variants.length,
-  "DeepSWE concurrency must equal taskBatchSize x configured variants",
-);
+if (sharedTuraTaskContainers) {
+  assert.equal(
+    concurrency,
+    taskBatchSize,
+    "shared-container concurrency must equal the task batch size",
+  );
+  assert.equal(variants.length, 2, "shared task containers require two agents");
+  assert(
+    variants.every(
+      (variant) =>
+        genericAgentKind(variant.agent) === "tura" && variant.replicate === 1,
+    ),
+    "shared task containers require two single-replicate Tura agents",
+  );
+  assert.deepEqual(
+    new Set(variants.map((variant) => variant.agent)),
+    new Set(["balanced", "direct"]),
+    "shared task containers are pinned to balanced and direct",
+  );
+} else {
+  assert.equal(
+    concurrency,
+    taskBatchSize * variants.length,
+    "DeepSWE concurrency must equal taskBatchSize x configured variants",
+  );
+}
 const selectedAgentKinds = new Set(
   variants.map((variant) => genericAgentKind(variant.agent)),
 );
@@ -168,6 +201,8 @@ const jobs = selection.tasks.flatMap((task, taskIndex) =>
     finished_at: null,
     exit_code: null,
     error: null,
+    retryable: null,
+    failure_classification: null,
     round_count: 0,
     tool_call_count: 0,
     input_tokens: 0,
@@ -207,13 +242,10 @@ if (oldManifest?.jobs) {
     }
     if (repairCodexDockerRoutingFalseNegative(job)) continue;
     if (repairContractValidTimeout(job)) continue;
-    if (repairRecoverableCodexCapacityExit(job)) continue;
+    if (repairContractValidCodexCapacityExit(job)) continue;
     const summaryPath = agentSummaryPath(job);
     const patchPath = path.join(agentDirectory(job), "model.patch");
-    if (
-      job.state === "completed" &&
-      (!fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0)
-    ) {
+    if (job.state === "completed" && !fs.existsSync(patchPath)) {
       job.state = "pending";
       job.phase = "resume-missing-patch";
       job.harness_state = "pending";
@@ -221,13 +253,25 @@ if (oldManifest?.jobs) {
     } else if (job.state === "completed" && !fs.existsSync(summaryPath)) {
       job.state = "pending";
       job.phase = "resume-missing-summary";
-    } else if (job.state !== "completed") {
+    } else if (job.state === "running" || job.state === "pending") {
       // A stopped runner can leave jobs marked `running` even though their
-      // worker process no longer exists. Normalize every unfinished job so
-      // resumed manifests report only the six workers actually relaunched.
+      // worker process no longer exists. Runner interruption is an explicit
+      // environment failure and is safe to resume.
       job.state = "pending";
       job.phase = "resume-pending";
       job.worker = null;
+      job.retryable = true;
+      job.failure_classification = "runner-environment-interruption";
+    } else if (job.state === "failed") {
+      const policy = applyAgentFailurePolicy(job);
+      if (policy.retryable) {
+        job.state = "pending";
+        job.phase = `resume-${policy.classification}`;
+        job.worker = null;
+      } else {
+        job.phase = `terminal-${policy.classification}`;
+        job.worker = null;
+      }
     }
   }
 }
@@ -257,6 +301,11 @@ const manifest = {
   tura_embedded: false,
   tura_sandbox: false,
   tura_shell: "bash",
+  shared_tura_task_containers: sharedTuraTaskContainers,
+  docker_concurrency: concurrency,
+  agent_worker_capacity: sharedTuraTaskContainers
+    ? concurrency * variants.length
+    : concurrency,
   harness_after_all_agent_runs: true,
   disk_safety_floor_gb: diskSafetyFloorGb,
   keep_workspaces: keepWorkspaces,
@@ -276,6 +325,8 @@ let monitorTimer = null;
 await main();
 
 async function main() {
+  await repairCompletedTuraArtifactCaptureFailures();
+  repairCompletedTuraRoundContracts();
   writeState("initializing");
   if (harnessCompletedOnly) {
     await runCompletedOnlyHarness();
@@ -283,7 +334,9 @@ async function main() {
   }
   manifest.phase = "agent-runs";
   writeState(
-    `starting ${manifest.task_batch_count} sequential task batches; each batch has ${taskBatchSize} tasks x ${variants.length} replicates = ${manifest.runs_per_task_batch} concurrent runs`,
+    sharedTuraTaskContainers
+      ? `starting ${manifest.task_batch_count} sequential task batches; each batch has ${taskBatchSize} shared Docker task containers x ${variants.length} agents = ${manifest.runs_per_task_batch} concurrent agent runs`
+      : `starting ${manifest.task_batch_count} sequential task batches; each batch has ${taskBatchSize} tasks x ${variants.length} replicates = ${manifest.runs_per_task_batch} concurrent runs`,
   );
   monitorTimer = setInterval(() => {
     recordMonitor(`scheduled ${Math.round(monitorMs / 1000)}-second monitor`);
@@ -292,28 +345,49 @@ async function main() {
   monitorTimer.unref?.();
 
   await runAgentBatches();
-  if (stopped || jobs.some((job) => job.state !== "completed")) {
+  const retryableFailures = jobs.filter(
+    (job) => job.state === "failed" && job.retryable === true,
+  );
+  const unfinished = jobs.filter((job) =>
+    ["pending", "running"].includes(job.state),
+  );
+  if (stopped || retryableFailures.length > 0 || unfinished.length > 0) {
     manifest.phase = "agent-runs-stopped";
     writeState(manifest.stop_reason || "agent matrix did not complete");
     process.exitCode = 1;
     return;
   }
 
+  const terminalFailures = jobs.filter((job) => job.state === "failed");
+  if (terminalFailures.length > 0) {
+    manifest.terminal_agent_failures = terminalFailures.map((job) => ({
+      key: job.key,
+      classification: job.failure_classification,
+      retryable: false,
+    }));
+    writeState(
+      `${terminalFailures.length} non-retryable agent attempts retained; continuing with completed-output harness`,
+    );
+    await runCompletedOnlyHarness();
+    return;
+  }
+
   const missingPatches = jobs.filter((job) => {
     const patchPath = path.join(agentDirectory(job), "model.patch");
-    return !fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0;
+    return !fs.existsSync(patchPath);
   });
   if (missingPatches.length > 0) {
     manifest.phase = "patch-gate-failed";
-    manifest.stop_reason = `missing non-empty patches: ${missingPatches.map((job) => job.key).join(", ")}`;
+    manifest.stop_reason = `missing patch artifacts: ${missingPatches.map((job) => job.key).join(", ")}`;
     writeState(manifest.stop_reason);
     process.exitCode = 1;
     return;
   }
 
   manifest.phase = "harness";
+  manifest.stop_reason = null;
   writeState(
-    `all ${jobs.length} agent runs have non-empty patches; starting official verifier one task image at a time with ${variants.length} variants in parallel`,
+    `all ${jobs.length} agent runs have patch artifacts; starting official verifier with ${HARNESS_IMAGE_CONCURRENCY} task images in parallel and ${variants.length} variants per image`,
   );
   await runHarnessBatches();
   if (stopped || jobs.some((job) => job.harness_state !== "completed")) {
@@ -332,11 +406,232 @@ async function main() {
   console.log(`[deep-swe] complete manifest=${manifestPath}`);
 }
 
+function repairCompletedTuraRoundContracts() {
+  for (const job of jobs) {
+    if (genericAgentKind(job.agent) !== "tura" || job.state !== "completed")
+      continue;
+    const agentDir = agentDirectory(job);
+    const summaryPath = agentSummaryPath(job);
+    const roundsPath = path.join(agentDir, "agent-rounds.jsonl");
+    if (![summaryPath, roundsPath].every((item) => fs.existsSync(item)))
+      continue;
+    const summary = readJson(summaryPath, null);
+    if (!summary) continue;
+    const stdout = readText(path.join(agentDir, "stdout.jsonl"));
+    const usageInfo = usageForAgent(agentDir, stdout, job.agent);
+    const rounds = reconcileGenericAgentProviderRounds(
+      Array.isArray(summary.rounds) ? summary.rounds : parseJsonl(roundsPath),
+      usageInfo.provider_calls,
+    );
+    const validation = validateGenericAgentRoundContracts(rounds);
+    validation.expectedLlmRounds = usageInfo.provider_calls.length;
+    validation.recoveredLlmRounds = rounds.length;
+    validation.allLlmTurnsRecovered =
+      validation.expectedLlmRounds === validation.recoveredLlmRounds;
+    if (!validation.allLlmTurnsRecovered) {
+      validation.ok = false;
+      validation.errors.push(
+        `recovered ${rounds.length} rounds but observed ${usageInfo.provider_calls.length} LLM turns`,
+      );
+    }
+    if (!validation.ok) continue;
+
+    writeText(
+      roundsPath,
+      `${rounds.map((round) => JSON.stringify(round)).join("\n")}\n`,
+    );
+    for (const round of rounds) {
+      if (!round.rawCallbackPath || !fs.existsSync(round.rawCallbackPath))
+        continue;
+      assertInside(agentDir, round.rawCallbackPath);
+      writeJson(round.rawCallbackPath, round);
+    }
+    const scheme = {
+      ...(summary.scheme_validation || {}),
+      ok: true,
+      round_contract_ok: true,
+      round_count: rounds.length,
+      tool_call_count: validation.tool_call_count,
+      errors: [],
+    };
+    writeJson(summaryPath, {
+      ...summary,
+      usage: usageInfo.usage,
+      usage_source: usageInfo.usage_source,
+      provider_calls: usageInfo.provider_calls,
+      rounds,
+      round_contract_validation: validation,
+      scheme_validation: scheme,
+    });
+    writeJson(path.join(agentDir, "scheme-validation.json"), scheme);
+    job.round_count = rounds.length;
+    job.tool_call_count = validation.tool_call_count;
+    assignUsage(job, usageInfo.usage);
+    job.scheme_ok = true;
+    job.docker_routing_ok = true;
+  }
+}
+
+async function repairCompletedTuraArtifactCaptureFailures() {
+  for (const job of jobs) {
+    if (genericAgentKind(job.agent) !== "tura") continue;
+    if (fs.existsSync(agentSummaryPath(job))) continue;
+
+    const agentDir = agentDirectory(job);
+    const status = readJson(path.join(agentDir, "status.json"), null);
+    const processResult = status?.result;
+    const patchPath = path.join(agentDir, "model.patch");
+    const roundsPath = path.join(agentDir, "agent-rounds.jsonl");
+    const snapshot = readJson(
+      path.join(agentDir, "workspace", ".benchmark-workspace.json"),
+      null,
+    );
+    const preflight = readJson(
+      path.join(agentDir, "docker-preflight.json"),
+      null,
+    );
+    if (
+      Number(processResult?.status) !== 0 ||
+      processResult?.timed_out ||
+      !fs.existsSync(patchPath) ||
+      !fs.existsSync(roundsPath) ||
+      !snapshot ||
+      !preflight?.baseline_tree
+    )
+      continue;
+
+    const stdout = readText(path.join(agentDir, "stdout.jsonl"));
+    const usageInfo = usageForAgent(agentDir, stdout, job.agent);
+    const events = eventsWithUsageRounds(
+      eventsForAgent(stdout, job.agent),
+      usageInfo.usage,
+    );
+    const rounds = parseJsonl(roundsPath).map((round) => {
+      const toolCalls = Array.isArray(round?.toolCalls) ? round.toolCalls : [];
+      return {
+        ...round,
+        messages: Array.isArray(round?.messages) ? round.messages : [],
+        commands: Array.isArray(round?.commands)
+          ? round.commands
+          : toolCalls.map((toolCall) => ({ ...toolCall })),
+        toolCalls,
+      };
+    });
+    const roundValidation = validateGenericAgentRoundContracts(rounds);
+    roundValidation.expectedLlmRounds = Number(events.llm_rounds || 0);
+    roundValidation.recoveredLlmRounds = rounds.length;
+    roundValidation.allLlmTurnsRecovered =
+      roundValidation.expectedLlmRounds === rounds.length;
+    if (!roundValidation.allLlmTurnsRecovered) {
+      roundValidation.ok = false;
+      roundValidation.errors.push(
+        `recovered ${rounds.length} rounds but observed ${roundValidation.expectedLlmRounds} LLM turns`,
+      );
+    }
+    if (!roundValidation.ok) continue;
+    writeText(
+      roundsPath,
+      `${rounds.map((round) => JSON.stringify(round)).join("\n")}\n`,
+    );
+
+    const result = {
+      ...processResult,
+      stdout,
+      usage_info: usageInfo,
+      events,
+      rounds,
+      rounds_directory: path.join(agentDir, "rounds"),
+      rounds_jsonl_path: roundsPath,
+      round_contract_validation: roundValidation,
+    };
+    const container = job.shared_container;
+    const containerWorkdir = job.shared_container_workdir;
+    const scheme = await validateScheme(
+      job,
+      result,
+      container,
+      containerWorkdir,
+    );
+    if (!scheme.ok) continue;
+    writeJson(path.join(agentDir, "scheme-validation.json"), scheme);
+
+    const patchText = fs.readFileSync(patchPath, "utf8");
+    const summary = {
+      schema: "tura.benchmark.deep-swe-agent-summary.v1",
+      agent: job.agent,
+      agent_id: job.agent,
+      agent_kind: genericAgentKind(job.agent),
+      agent_mode: genericAgentMode(job.agent),
+      replicate: job.replicate,
+      model: "openai/gpt-5.6-sol",
+      tura_model: "openai/gpt-5.6-sol",
+      reasoning: job.reasoning,
+      service_tier: "default",
+      priority_enabled: false,
+      task: job.task.task_id,
+      task_id: job.task.task_id,
+      instance_id: job.task.task_id,
+      repo: job.task.repository_url,
+      workspace: job.workspace_path,
+      docker: {
+        container,
+        image: job.task.docker_image,
+        workdir: containerWorkdir,
+        network: "none",
+        shared_task_container: true,
+      },
+      elapsed_ms: result.duration_ms,
+      exit_code: result.status,
+      signal: result.signal,
+      timed_out: false,
+      first_output_ms: result.first_output_ms,
+      last_progress_ms: result.last_progress_ms,
+      error: null,
+      stdout_path: path.join(agentDir, "stdout.jsonl"),
+      stderr_path: path.join(agentDir, "stderr.log"),
+      provider_log_path: path.join(agentDir, "provider-log"),
+      usage: usageInfo.usage,
+      usage_source: usageInfo.usage_source,
+      provider_calls: usageInfo.provider_calls,
+      rounds,
+      rounds_directory: result.rounds_directory,
+      rounds_jsonl_path: roundsPath,
+      round_contract_validation: roundValidation,
+      scheme_validation: scheme,
+      events,
+      patch: {
+        patch_path: patchPath,
+        patch_bytes: Buffer.byteLength(patchText),
+        changed_files: changedFiles(patchText),
+        baseline_tree: preflight.baseline_tree,
+      },
+      workspace_snapshot: snapshot,
+      artifact_capture_recovered: true,
+    };
+    writeJson(agentSummaryPath(job), summary);
+    job.exit_code = 0;
+    job.round_count = rounds.length;
+    job.tool_call_count = roundValidation.tool_call_count;
+    assignUsage(job, usageInfo.usage);
+    job.patch_bytes = summary.patch.patch_bytes;
+    job.scheme_ok = true;
+    job.docker_routing_ok = true;
+    job.state = "completed";
+    job.phase = "completed";
+    job.error = null;
+    job.retryable = false;
+    job.failure_classification = "docker-environment-artifact-capture-repaired";
+    job.repaired_validation =
+      "retained contract-valid Tura exit-0 attempt after Docker artifact capture failure";
+    job.finished_at = job.finished_at || new Date().toISOString();
+  }
+}
+
 async function runCompletedOnlyHarness() {
   const harnessJobs = jobs.filter((job) => job.state === "completed");
   const missingPatches = harnessJobs.filter((job) => {
     const patchPath = path.join(agentDirectory(job), "model.patch");
-    return !fs.existsSync(patchPath) || fs.statSync(patchPath).size === 0;
+    return !fs.existsSync(patchPath);
   });
   assert.equal(
     missingPatches.length,
@@ -348,7 +643,7 @@ async function runCompletedOnlyHarness() {
   manifest.harness_agent_outputs = harnessJobs.length;
   manifest.stop_reason = null;
   writeState(
-    `starting official verifier for ${harnessJobs.length} completed outputs; one task image at a time`,
+    `starting official verifier for ${harnessJobs.length} completed outputs; ${HARNESS_IMAGE_CONCURRENCY} task images in parallel`,
   );
   monitorTimer = setInterval(() => {
     recordMonitor(`scheduled ${Math.round(monitorMs / 1000)}-second monitor`);
@@ -384,7 +679,7 @@ async function runAgentBatches() {
       manifest.runs_per_task_batch,
       `agent batch ${batchIndex} must contain exactly ${manifest.runs_per_task_batch} runs`,
     );
-    const pending = batchJobs.filter((job) => job.state !== "completed");
+    const pending = batchJobs.filter((job) => job.state === "pending");
     if (pending.length === 0) {
       writeState(
         `agent batch ${batchIndex}/${manifest.task_batch_count} already complete`,
@@ -393,14 +688,27 @@ async function runAgentBatches() {
     }
     manifest.current_batch = batchIndex;
     writeState(
-      `agent batch ${batchIndex}/${manifest.task_batch_count}: ${taskBatchSize} tasks x ${variants.length} replicates; pending=${pending.length}; worker-capacity=${concurrency}`,
+      sharedTuraTaskContainers
+        ? `agent batch ${batchIndex}/${manifest.task_batch_count}: ${taskBatchSize} shared task containers x ${variants.length} Tura agents; pending=${pending.length}; docker-capacity=${concurrency}; agent-capacity=${concurrency * variants.length}`
+        : `agent batch ${batchIndex}/${manifest.task_batch_count}: ${taskBatchSize} tasks x ${variants.length} replicates; pending=${pending.length}; worker-capacity=${concurrency}`,
     );
-    await runQueue(pending, concurrency, runAgentJob);
+    if (sharedTuraTaskContainers) {
+      const pendingByTask = selection.tasks
+        .slice((batchIndex - 1) * taskBatchSize, batchIndex * taskBatchSize)
+        .map((task) =>
+          pending.filter((job) => job.task.task_id === task.task_id),
+        )
+        .filter((taskJobs) => taskJobs.length > 0);
+      await runQueue(pendingByTask, concurrency, runSharedTuraTaskContainer);
+    } else {
+      await runQueue(pending, concurrency, runAgentJob);
+    }
     const invalid = batchJobs.filter(
       (job) =>
-        job.state !== "completed" ||
-        job.scheme_ok !== true ||
-        job.docker_routing_ok !== true,
+        ["pending", "running"].includes(job.state) ||
+        (job.state === "failed" && job.retryable === true) ||
+        (job.state === "completed" &&
+          (job.scheme_ok !== true || job.docker_routing_ok !== true)),
     );
     if (stopped || invalid.length > 0) {
       manifest.stop_reason =
@@ -418,20 +726,40 @@ async function runAgentBatches() {
 async function runHarnessBatches(harnessJobs = jobs, allowPartial = false) {
   const batches = buildHarnessBatches(selection.tasks, harnessJobs, {
     allowPartial,
+    expectedOutputsPerTask: variants.length,
   });
-  for (const batch of batches) {
-    const pending = batch.jobs.filter(
-      (job) => job.harness_state !== "completed",
+  const imageGroups = chunk(batches, HARNESS_IMAGE_CONCURRENCY);
+  for (let groupIndex = 0; groupIndex < imageGroups.length; groupIndex += 1) {
+    const group = imageGroups[groupIndex];
+    const runnable = group.filter((batch) =>
+      batch.jobs.some((job) => job.harness_state !== "completed"),
     );
-    if (pending.length === 0) continue;
-    const taskId = batch.tasks[0].task_id;
-    const batchConcurrency =
-      taskId === "numba-stencil-boundary-modes" ? 2 : HARNESS_CONCURRENCY;
+    if (runnable.length === 0) continue;
     writeState(
-      `harness image batch ${batch.index}/${batches.length}: ${taskId}; ${batch.jobs.length} variants share this task image; concurrency=${batchConcurrency}`,
+      `harness image group ${groupIndex + 1}/${imageGroups.length}: ${runnable.length} task images in parallel`,
     );
-    await runQueue(pending, batchConcurrency, runHarnessJob);
-    if (stopped || pending.some((job) => job.harness_state !== "completed"))
+    await Promise.all(
+      runnable.map(async (batch) => {
+        const pending = batch.jobs.filter(
+          (job) => job.harness_state !== "completed",
+        );
+        const taskId = batch.tasks[0].task_id;
+        const batchConcurrency = Math.min(
+          pending.length,
+          taskId === "numba-stencil-boundary-modes" ? 2 : HARNESS_CONCURRENCY,
+        );
+        writeState(
+          `harness image ${batch.index}/${batches.length}: ${taskId}; ${pending.length} pending variants; concurrency=${batchConcurrency}`,
+        );
+        await runQueue(pending, batchConcurrency, runHarnessJob);
+      }),
+    );
+    if (
+      stopped ||
+      runnable.some((batch) =>
+        batch.jobs.some((job) => job.harness_state !== "completed"),
+      )
+    )
       return;
   }
 }
@@ -450,6 +778,290 @@ async function runQueue(queue, workers, callback) {
       }
     }),
   );
+}
+
+function chunk(items, size) {
+  const groups = [];
+  for (let index = 0; index < items.length; index += size) {
+    groups.push(items.slice(index, index + size));
+  }
+  return groups;
+}
+
+function safeSegment(value) {
+  return String(value || "item")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+}
+
+async function runSharedTuraTaskContainer(taskJobs) {
+  assert(taskJobs.length > 0 && taskJobs.length <= variants.length);
+  assert.equal(
+    new Set(taskJobs.map((job) => job.task.task_id)).size,
+    1,
+    "shared container jobs must belong to one task",
+  );
+  const task = taskJobs[0].task;
+  const attemptId = `${Date.now()}-${crypto.randomUUID()}`;
+  const prepared = taskJobs.map((job) => ({
+    job,
+    agentDir: agentDirectory(job),
+    workspace: workspacePath(job, attemptId),
+    containerWorkdir: `/tura-workspaces/${safeSegment(job.agent)}`,
+    baselineTree: null,
+  }));
+  let seedContainer = null;
+  let container = null;
+  try {
+    assertDiskCapacity();
+    await ensureImage(task.docker_image);
+    for (const item of prepared) {
+      const { job, agentDir, workspace } = item;
+      const promptRevision = readJson(
+        path.join(runRoot, "prompt-revision.json"),
+        null,
+      );
+      if (promptRevision?.revision) {
+        job.run_generation = "post-tdd-debug-prompt";
+        job.prompt_revision = promptRevision.revision;
+        job.prompt_revision_marked_at = promptRevision.marked_at;
+        job.tdd_debug_runtime_prompt_applies = true;
+      }
+      archivePreviousAttempt(job);
+      Object.assign(job, {
+        state: "running",
+        phase: "pulling-image",
+        exit_code: null,
+        error: null,
+        retryable: null,
+        failure_classification: null,
+        round_count: 0,
+        tool_call_count: 0,
+        input_tokens: 0,
+        cached_input_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: 0,
+        total_tokens: 0,
+        patch_bytes: 0,
+        scheme_ok: null,
+        docker_routing_ok: null,
+        workspace_path: workspace,
+        started_at: job.started_at || new Date().toISOString(),
+      });
+      fs.mkdirSync(agentDir, { recursive: true });
+      await resetWorkspace(workspace);
+      fs.mkdirSync(workspace, { recursive: true });
+      writeState(`starting ${job.key} in shared task container`);
+    }
+
+    seedContainer = containerName(taskJobs[0], "pair-seed");
+    await removeContainer(seedContainer);
+    await runOk(
+      "docker",
+      [
+        "run",
+        "-d",
+        "--init",
+        "--name",
+        seedContainer,
+        "--network",
+        "none",
+        "-w",
+        "/app",
+        task.docker_image,
+        "sleep",
+        "infinity",
+      ],
+      { timeoutMs: 120_000 },
+    );
+    for (const item of prepared) {
+      item.job.phase = "copying-workspace";
+      await runOk("docker", ["cp", `${seedContainer}:/app/.`, item.workspace], {
+        timeoutMs: 20 * 60_000,
+      });
+      await runOk("git", [
+        "-C",
+        item.workspace,
+        "config",
+        "core.filemode",
+        "false",
+      ]);
+      await runOk("git", [
+        "-C",
+        item.workspace,
+        "config",
+        "core.autocrlf",
+        "false",
+      ]);
+      await runOk("git", [
+        "-C",
+        item.workspace,
+        "config",
+        "core.safecrlf",
+        "false",
+      ]);
+    }
+    await removeContainer(seedContainer);
+    seedContainer = null;
+
+    container = containerName(taskJobs[0], "pair-agent");
+    await removeContainer(container);
+    const mounts = prepared.flatMap((item) => [
+      "--mount",
+      `type=bind,source=${item.workspace},target=${item.containerWorkdir}`,
+    ]);
+    await runOk(
+      "docker",
+      [
+        "run",
+        "-d",
+        "--init",
+        "--name",
+        container,
+        "--network",
+        "none",
+        "--cpus",
+        String(Number(task.cpus) * prepared.length),
+        "--memory",
+        `${Number(task.memory_mb) * prepared.length}m`,
+        ...mounts,
+        "-w",
+        prepared[0].containerWorkdir,
+        task.docker_image,
+        "sleep",
+        "infinity",
+      ],
+      { timeoutMs: 120_000 },
+    );
+    const imageId = (
+      await runOk("docker", [
+        "image",
+        "inspect",
+        task.docker_image,
+        "--format",
+        "{{.Id}}",
+      ])
+    ).stdout.trim();
+
+    for (const item of prepared) {
+      const preflight = await runOk(
+        "docker",
+        [
+          "exec",
+          "-w",
+          item.containerWorkdir,
+          container,
+          "bash",
+          "-lc",
+          [
+            "git config core.filemode false",
+            "git config core.autocrlf false",
+            `test \"$(git rev-parse HEAD)\" = \"$(git rev-parse '${task.base_commit_hash}^{commit}')\"`,
+            `test \"$(pwd)\" = ${item.containerWorkdir}`,
+            "git status --porcelain",
+          ].join(" && "),
+        ],
+        { timeoutMs: 10 * 60_000 },
+      );
+      item.baselineTree = (
+        await runOk(
+          "docker",
+          [
+            "exec",
+            "-w",
+            item.containerWorkdir,
+            container,
+            "bash",
+            "-lc",
+            [
+              "git add -A",
+              "tree=$(git write-tree)",
+              "git reset --mixed -q HEAD",
+              "printf '%s' \"$tree\"",
+            ].join(" && "),
+          ],
+          { timeoutMs: 10 * 60_000 },
+        )
+      ).stdout.trim();
+      assert(
+        /^[0-9a-f]{40,64}$/i.test(item.baselineTree),
+        `invalid image baseline tree for ${item.job.key}: ${item.baselineTree}`,
+      );
+      writeJson(path.join(item.agentDir, "docker-preflight.json"), {
+        schema: "tura.benchmark.deep-swe-docker-preflight.v1",
+        container,
+        image: task.docker_image,
+        image_id: imageId,
+        workdir: item.containerWorkdir,
+        base_commit_hash: task.base_commit_hash,
+        baseline_tree: item.baselineTree,
+        initial_git_status: preflight.stdout,
+        network: "none",
+        cpus: Number(task.cpus) * prepared.length,
+        memory_mb: Number(task.memory_mb) * prepared.length,
+        shared_task_container: true,
+        shared_container_agents: prepared.map(({ job }) => job.agent),
+        output: preflight.stdout,
+      });
+      item.job.shared_container = container;
+      item.job.shared_container_workdir = item.containerWorkdir;
+    }
+
+    await Promise.all(
+      prepared.map(async (item) => {
+        try {
+          await executePreparedAgentJob(item.job, {
+            ...item,
+            container,
+            sharedContainer: true,
+          });
+        } catch (error) {
+          item.job.state = "failed";
+          item.job.phase = "failed";
+          item.job.error = String(error?.stack || error);
+          item.job.finished_at = new Date().toISOString();
+          writeText(
+            path.join(item.agentDir, "runner-error.log"),
+            item.job.error,
+          );
+          applyAgentFailurePolicy(item.job);
+          if (/no space left|not enough space|disk full/i.test(item.job.error))
+            stopForDisk(item.job.error);
+        }
+      }),
+    );
+  } catch (error) {
+    const message = String(error?.stack || error);
+    for (const item of prepared) {
+      if (item.job.state === "completed") continue;
+      item.job.state = "failed";
+      item.job.phase = "failed";
+      item.job.error = item.job.error || message;
+      item.job.finished_at = new Date().toISOString();
+      writeText(path.join(item.agentDir, "runner-error.log"), item.job.error);
+      applyAgentFailurePolicy(item.job);
+    }
+    if (/no space left|not enough space|disk full/i.test(message))
+      stopForDisk(message);
+  } finally {
+    if (seedContainer) await removeContainer(seedContainer);
+    if (container) await removeContainer(container);
+    for (const item of prepared) {
+      if (!keepWorkspaces && fs.existsSync(item.workspace)) {
+        const cleanup = await removeWorkspaceWithRetry(item.workspace);
+        writeJson(path.join(item.agentDir, "workspace-lifecycle.json"), {
+          removed_after_patch_capture: cleanup.removed,
+          retained_after_cleanup_retries: !cleanup.removed,
+          cleanup_error: cleanup.error,
+          removal_is_normal_lifecycle_not_disk_recovery: true,
+          attempted_at: new Date().toISOString(),
+        });
+      }
+      writeState(`${item.job.key} ${item.job.state}`);
+    }
+  }
+  return taskJobs;
 }
 
 async function runAgentJob(job) {
@@ -501,6 +1113,7 @@ async function runAgentJob(job) {
       [
         "run",
         "-d",
+        "--init",
         "--name",
         seedContainer,
         "--network",
@@ -531,6 +1144,7 @@ async function runAgentJob(job) {
       [
         "run",
         "-d",
+        "--init",
         "--name",
         container,
         "--network",
@@ -617,156 +1231,14 @@ async function runAgentJob(job) {
       output: preflight.stdout,
     });
 
-    job.phase = "agent-running";
-    writeManifest();
-    const prompt = buildPrompt(job, container);
-    fs.writeFileSync(path.join(agentDir, "prompt.md"), prompt, "utf8");
-    const result = await runGenericAgentCli({
-      agentId: job.agent,
-      workspace,
+    await executePreparedAgentJob(job, {
       agentDir,
-      prompt,
-      repoRoot,
-      model: "gpt-5.6-sol",
-      turaModel: "openai/gpt-5.6-sol",
-      reasoning: job.reasoning,
-      serviceTier: "default",
-      timeoutMs: Math.max(60_000, Number(job.task.agent_timeout_sec) * 1000),
-      idleTimeoutMs: 0,
-      turaBashDockerContainer: container,
-      turaBashDockerWorkdir: "/app",
-      turaDbRoot: path.join(agentDir, "session-db-root"),
-      sessionLogDbRoot: path.join(agentDir, "session-db-root"),
-      onRound: (round, rounds) => {
-        job.round_count = rounds.length;
-        job.tool_call_count = rounds.reduce(
-          (total, item) => total + (item.toolCalls?.length || 0),
-          0,
-        );
-        job.total_tokens = rounds.reduce(
-          (total, item) => total + Number(item.usage?.totalTokens || 0),
-          0,
-        );
-        job.last_round_at = new Date().toISOString();
-        writeManifest();
-      },
-    });
-
-    const gitStatus = await runOk(
-      "docker",
-      ["exec", container, "git", "status", "--short"],
-      { timeoutMs: 180_000 },
-    );
-    fs.writeFileSync(
-      path.join(agentDir, "git-status.txt"),
-      gitStatus.stdout,
-      "utf8",
-    );
-    const patchResult = await runOk(
-      "docker",
-      [
-        "exec",
-        container,
-        "bash",
-        "-lc",
-        ["git add -A", `git diff --cached --binary ${baselineTree}`].join(
-          " && ",
-        ),
-      ],
-      { timeoutMs: 5 * 60_000, maxBuffer: 256 * 1024 * 1024 },
-    );
-    const patchPath = path.join(agentDir, "model.patch");
-    fs.writeFileSync(patchPath, patchResult.stdout, "utf8");
-    const workspaceSnapshot = captureChangedWorkspace({
-      sourceWorkspace: workspace,
-      outputDirectory: path.join(agentDir, "workspace"),
-      patchText: patchResult.stdout,
-      provenance: {
-        agent: job.agent,
-        taskId: job.task.task_id,
-        sourceRun: `runs/${job.task.task_id}/${job.agent}-r${job.replicate}`,
-        repository: job.task.repository_url,
-        baseCommit: job.task.base_commit_hash,
-        baselineTree,
-        recoverySource: "captured-before-raw-workspace-cleanup",
-        diffVerifiedByteForByte: true,
-      },
-    });
-
-    const scheme = await validateScheme(job, result, container);
-    writeJson(path.join(agentDir, "scheme-validation.json"), scheme);
-    const summary = {
-      schema: "tura.benchmark.deep-swe-agent-summary.v1",
-      agent: job.agent,
-      agent_id: job.agent,
-      agent_kind: genericAgentKind(job.agent),
-      agent_mode: genericAgentMode(job.agent),
-      replicate: job.replicate,
-      model: job.agent === "codex-cli" ? "gpt-5.6-sol" : "openai/gpt-5.6-sol",
-      tura_model:
-        genericAgentKind(job.agent) === "tura" ? "openai/gpt-5.6-sol" : null,
-      reasoning: job.reasoning,
-      service_tier: "default",
-      priority_enabled: false,
-      task: job.task.task_id,
-      task_id: job.task.task_id,
-      instance_id: job.task.task_id,
-      repo: job.task.repository_url,
       workspace,
-      docker: {
-        container,
-        image: job.task.docker_image,
-        workdir: "/app",
-        network: "none",
-      },
-      elapsed_ms: result.duration_ms,
-      exit_code: result.status,
-      signal: result.signal,
-      timed_out: Boolean(result.timed_out),
-      first_output_ms: result.first_output_ms,
-      last_progress_ms: result.last_progress_ms,
-      error: result.error || null,
-      stdout_path: path.join(agentDir, "stdout.jsonl"),
-      stderr_path: path.join(agentDir, "stderr.log"),
-      provider_log_path: path.join(agentDir, "provider-log"),
-      usage: result.usage_info?.usage || emptyUsage(),
-      usage_source: result.usage_info?.usage_source || null,
-      provider_calls: result.usage_info?.provider_calls ?? null,
-      rounds: result.rounds,
-      rounds_directory: result.rounds_directory,
-      rounds_jsonl_path: result.rounds_jsonl_path,
-      round_contract_validation: result.round_contract_validation,
-      scheme_validation: scheme,
-      events: result.events || {},
-      patch: {
-        patch_path: patchPath,
-        patch_bytes: Buffer.byteLength(patchResult.stdout),
-        changed_files: changedFiles(patchResult.stdout),
-        baseline_tree: baselineTree,
-      },
-      workspace_snapshot: workspaceSnapshot,
-    };
-    writeJson(agentSummaryPath(job), summary);
-    job.exit_code = result.status;
-    job.round_count = result.rounds.length;
-    job.tool_call_count = Math.max(
-      result.round_contract_validation.tool_call_count,
-      countCompletedCodexCommands(path.join(agentDir, "stdout.jsonl")),
-    );
-    assignUsage(job, result.usage_info?.usage);
-    job.patch_bytes = summary.patch.patch_bytes;
-    job.scheme_ok = scheme.round_contract_ok;
-    job.docker_routing_ok = scheme.docker_routing_ok;
-    // Official SWE-style execution captures and grades the workspace at the
-    // time limit. A timeout is therefore a completed agent attempt when its
-    // emitted rounds and Docker routing still satisfy the data contract.
-    job.state =
-      (result.status === 0 || result.timed_out) && scheme.ok
-        ? "completed"
-        : "failed";
-    job.phase = job.state;
-    job.error = result.error || (scheme.ok ? null : scheme.errors.join("; "));
-    job.finished_at = new Date().toISOString();
+      container,
+      containerWorkdir: "/app",
+      baselineTree,
+      sharedContainer: false,
+    });
   } catch (error) {
     job.state = "failed";
     job.phase = "failed";
@@ -776,6 +1248,7 @@ async function runAgentJob(job) {
     if (/no space left|not enough space|disk full/i.test(job.error))
       stopForDisk(job.error);
   } finally {
+    if (job.state === "failed") applyAgentFailurePolicy(job);
     if (seedContainer) await removeContainer(seedContainer);
     if (container) await removeContainer(container);
     if (!keepWorkspaces && fs.existsSync(workspace)) {
@@ -793,6 +1266,166 @@ async function runAgentJob(job) {
   return job;
 }
 
+async function executePreparedAgentJob(
+  job,
+  {
+    agentDir,
+    workspace,
+    container,
+    containerWorkdir,
+    baselineTree,
+    sharedContainer,
+  },
+) {
+  job.phase = "agent-running";
+  writeManifest();
+  const prompt = buildPrompt(job, container, containerWorkdir);
+  fs.writeFileSync(path.join(agentDir, "prompt.md"), prompt, "utf8");
+  const result = await runGenericAgentCli({
+    agentId: job.agent,
+    workspace,
+    agentDir,
+    prompt,
+    repoRoot,
+    model: "gpt-5.6-sol",
+    turaModel: "openai/gpt-5.6-sol",
+    reasoning: job.reasoning,
+    serviceTier: "default",
+    timeoutMs: Math.max(60_000, Number(job.task.agent_timeout_sec) * 1000),
+    idleTimeoutMs: 0,
+    turaBashDockerContainer: container,
+    turaBashDockerWorkdir: containerWorkdir,
+    turaDbRoot: path.join(agentDir, "session-db-root"),
+    sessionLogDbRoot: path.join(agentDir, "session-db-root"),
+    onRound: (round, rounds) => {
+      job.round_count = rounds.length;
+      job.tool_call_count = rounds.reduce(
+        (total, item) => total + (item.toolCalls?.length || 0),
+        0,
+      );
+      job.total_tokens = rounds.reduce(
+        (total, item) => total + Number(item.usage?.totalTokens || 0),
+        0,
+      );
+      job.last_round_at = new Date().toISOString();
+      writeManifest();
+    },
+  });
+
+  // The agent workspace is a host bind mount. Capture artifacts with host Git
+  // so a Docker container made unresponsive by orphaned timed-out compiler/test
+  // processes cannot discard an otherwise completed model run.
+  const gitStatus = await runOk("git", ["-C", workspace, "status", "--short"], {
+    timeoutMs: 180_000,
+  });
+  fs.writeFileSync(
+    path.join(agentDir, "git-status.txt"),
+    gitStatus.stdout,
+    "utf8",
+  );
+  await runOk("git", ["-C", workspace, "add", "-A"], {
+    timeoutMs: 5 * 60_000,
+  });
+  const patchResult = await runOk(
+    "git",
+    ["-C", workspace, "diff", "--cached", "--binary", baselineTree],
+    { timeoutMs: 5 * 60_000, maxBuffer: 256 * 1024 * 1024 },
+  );
+  const patchPath = path.join(agentDir, "model.patch");
+  fs.writeFileSync(patchPath, patchResult.stdout, "utf8");
+  const workspaceSnapshot = captureChangedWorkspace({
+    sourceWorkspace: workspace,
+    outputDirectory: path.join(agentDir, "workspace"),
+    patchText: patchResult.stdout,
+    provenance: {
+      agent: job.agent,
+      taskId: job.task.task_id,
+      sourceRun: `runs/${job.task.task_id}/${job.agent}-r${job.replicate}`,
+      repository: job.task.repository_url,
+      baseCommit: job.task.base_commit_hash,
+      baselineTree,
+      recoverySource: "captured-before-raw-workspace-cleanup",
+      diffVerifiedByteForByte: true,
+    },
+  });
+
+  const scheme = await validateScheme(job, result, container, containerWorkdir);
+  writeJson(path.join(agentDir, "scheme-validation.json"), scheme);
+  const summary = {
+    schema: "tura.benchmark.deep-swe-agent-summary.v1",
+    agent: job.agent,
+    agent_id: job.agent,
+    agent_kind: genericAgentKind(job.agent),
+    agent_mode: genericAgentMode(job.agent),
+    replicate: job.replicate,
+    model: job.agent === "codex-cli" ? "gpt-5.6-sol" : "openai/gpt-5.6-sol",
+    tura_model:
+      genericAgentKind(job.agent) === "tura" ? "openai/gpt-5.6-sol" : null,
+    reasoning: job.reasoning,
+    service_tier: "default",
+    priority_enabled: false,
+    task: job.task.task_id,
+    task_id: job.task.task_id,
+    instance_id: job.task.task_id,
+    repo: job.task.repository_url,
+    workspace,
+    docker: {
+      container,
+      image: job.task.docker_image,
+      workdir: containerWorkdir,
+      network: "none",
+      shared_task_container: sharedContainer,
+    },
+    elapsed_ms: result.duration_ms,
+    exit_code: result.status,
+    signal: result.signal,
+    timed_out: Boolean(result.timed_out),
+    first_output_ms: result.first_output_ms,
+    last_progress_ms: result.last_progress_ms,
+    error: result.error || null,
+    stdout_path: path.join(agentDir, "stdout.jsonl"),
+    stderr_path: path.join(agentDir, "stderr.log"),
+    provider_log_path: path.join(agentDir, "provider-log"),
+    usage: result.usage_info?.usage || emptyUsage(),
+    usage_source: result.usage_info?.usage_source || null,
+    provider_calls: result.usage_info?.provider_calls ?? null,
+    rounds: result.rounds,
+    rounds_directory: result.rounds_directory,
+    rounds_jsonl_path: result.rounds_jsonl_path,
+    round_contract_validation: result.round_contract_validation,
+    scheme_validation: scheme,
+    events: result.events || {},
+    patch: {
+      patch_path: patchPath,
+      patch_bytes: Buffer.byteLength(patchResult.stdout),
+      changed_files: changedFiles(patchResult.stdout),
+      baseline_tree: baselineTree,
+    },
+    workspace_snapshot: workspaceSnapshot,
+  };
+  writeJson(agentSummaryPath(job), summary);
+  job.exit_code = result.status;
+  job.round_count = result.rounds.length;
+  job.tool_call_count = Math.max(
+    result.round_contract_validation.tool_call_count,
+    countCompletedCodexCommands(path.join(agentDir, "stdout.jsonl")),
+  );
+  assignUsage(job, result.usage_info?.usage);
+  job.patch_bytes = summary.patch.patch_bytes;
+  job.scheme_ok = scheme.round_contract_ok;
+  job.docker_routing_ok = scheme.docker_routing_ok;
+  // Official SWE-style execution captures and grades the workspace at the
+  // time limit. A timeout is therefore a completed agent attempt when its
+  // emitted rounds and Docker routing still satisfy the data contract.
+  job.state =
+    (result.status === 0 || result.timed_out) && scheme.ok
+      ? "completed"
+      : "failed";
+  job.phase = job.state;
+  job.error = result.error || (scheme.ok ? null : scheme.errors.join("; "));
+  job.finished_at = new Date().toISOString();
+}
+
 async function runHarnessJob(job) {
   const agentDir = agentDirectory(job);
   const harnessDir = path.join(agentDir, "harness");
@@ -802,12 +1435,16 @@ async function runHarnessJob(job) {
     writeManifest();
     const verifierImage = await ensureVerifierImage(job.task);
     const logsDir = path.join(harnessDir, "logs");
+    const inputDir = path.join(logsDir, "input");
     const artifactsDir = path.join(logsDir, "artifacts");
+    const verifierOutputDir = path.join(logsDir, "verifier");
+    fs.mkdirSync(inputDir, { recursive: true });
     fs.mkdirSync(artifactsDir, { recursive: true });
-    fs.copyFileSync(
-      path.join(agentDir, "model.patch"),
-      path.join(artifactsDir, "model.patch"),
-    );
+    fs.mkdirSync(verifierOutputDir, { recursive: true });
+    const modelPatchPath = path.join(agentDir, "model.patch");
+    const harnessInputPatchPath = path.join(inputDir, "model.patch");
+    fs.copyFileSync(modelPatchPath, harnessInputPatchPath);
+    const modelPatchSha256 = hashBuffer(fs.readFileSync(modelPatchPath));
     const container = containerName(job, "verify");
     await removeContainer(container);
     const result = await runProcess(
@@ -862,6 +1499,9 @@ async function runHarnessJob(job) {
       timed_out: result.timedOut,
       reward,
       passed: Number(reward.reward) === 1,
+      model_patch_applied: true,
+      model_patch_sha256: modelPatchSha256,
+      model_patch_input_path: harnessInputPatchPath,
       verifier_script_line_endings_normalized: true,
       completed_at: new Date().toISOString(),
     };
@@ -885,7 +1525,12 @@ async function runHarnessJob(job) {
   }
 }
 
-async function validateScheme(job, result, container) {
+async function validateScheme(
+  job,
+  result,
+  container,
+  containerWorkdir = "/app",
+) {
   const errors = [];
   const invocationPath = path.join(
     agentDirectory(job),
@@ -928,11 +1573,11 @@ async function validateScheme(job, result, container) {
       errors.push(
         "Tura invocation did not archive the assigned Docker container",
       );
-    if (invocation.env?.TURA_BASH_DOCKER_WORKDIR !== "/app")
-      errors.push("Tura Docker workdir is not /app");
+    if (invocation.env?.TURA_BASH_DOCKER_WORKDIR !== containerWorkdir)
+      errors.push(`Tura Docker workdir is not ${containerWorkdir}`);
     dockerRoutingOk =
       invocation.env?.TURA_BASH_DOCKER_CONTAINER === container &&
-      invocation.env?.TURA_BASH_DOCKER_WORKDIR === "/app";
+      invocation.env?.TURA_BASH_DOCKER_WORKDIR === containerWorkdir;
   } else {
     const commands = parseJsonl(path.join(agentDirectory(job), "stdout.jsonl"))
       .filter((event) => event?.item?.type === "command_execution")
@@ -1042,15 +1687,86 @@ function repairContractValidTimeout(job) {
   const summary = readJson(summaryPath, null);
   const scheme = readJson(schemePath, null);
   const patchPath = summary?.patch?.patch_path;
+  if (!summary?.timed_out) return false;
+  if (!patchPath || !fs.existsSync(patchPath)) return false;
+  const oldSchemeErrors = Array.isArray(scheme?.errors) ? scheme.errors : [];
   if (
-    !summary?.timed_out ||
-    !scheme?.ok ||
-    !summary.round_contract_validation?.ok
+    scheme?.json_schema_ok !== true ||
+    scheme?.docker_routing_ok !== true ||
+    oldSchemeErrors.some(
+      (error) =>
+        !/^recovered \d+ rounds but observed \d+ LLM turns$/.test(
+          String(error),
+        ),
+    )
   )
     return false;
-  if (!patchPath || !fs.existsSync(patchPath)) return false;
+
+  const agentDir = agentDirectory(job);
+  const roundsPath = path.join(agentDir, "agent-rounds.jsonl");
+  const stdout = readText(path.join(agentDir, "stdout.jsonl"));
+  const usageInfo = usageForAgent(agentDir, stdout, job.agent);
+  const providerCallCount = usageInfo.provider_calls.length;
+  const rounds = parseJsonl(roundsPath).map((round) => {
+    const toolCalls = Array.isArray(round?.toolCalls) ? round.toolCalls : [];
+    return {
+      ...round,
+      messages: Array.isArray(round?.messages) ? round.messages : [],
+      commands: Array.isArray(round?.commands)
+        ? round.commands
+        : toolCalls.map((toolCall) => ({ ...toolCall })),
+      toolCalls,
+    };
+  });
+  const roundValidation = validateGenericAgentRoundContracts(rounds);
+  roundValidation.expectedLlmRounds = providerCallCount;
+  roundValidation.recoveredLlmRounds = rounds.length;
+  roundValidation.allLlmTurnsRecovered = providerCallCount === rounds.length;
+  if (!roundValidation.allLlmTurnsRecovered) {
+    roundValidation.ok = false;
+    roundValidation.errors.push(
+      `recovered ${rounds.length} rounds but observed ${providerCallCount} provider calls`,
+    );
+  }
+  if (!roundValidation.ok) return false;
+
+  const events = eventsWithUsageRounds(
+    eventsForAgent(stdout, job.agent),
+    usageInfo.usage,
+  );
+  events.llm_rounds = Math.max(
+    Number(events.llm_rounds || 0),
+    providerCallCount,
+  );
+  const repairedScheme = {
+    ...scheme,
+    ok: true,
+    round_contract_ok: true,
+    round_count: rounds.length,
+    tool_call_count: roundValidation.tool_call_count,
+    errors: [],
+  };
+  writeText(
+    roundsPath,
+    `${rounds.map((round) => JSON.stringify(round)).join("\n")}\n`,
+  );
+  writeJson(schemePath, repairedScheme);
+  writeJson(summaryPath, {
+    ...summary,
+    usage: usageInfo.usage,
+    usage_source: usageInfo.usage_source,
+    provider_calls: usageInfo.provider_calls,
+    rounds,
+    events,
+    round_contract_validation: roundValidation,
+    scheme_validation: repairedScheme,
+    timeout_contract_repaired: true,
+  });
   job.state = "completed";
   job.phase = "completed";
+  job.round_count = rounds.length;
+  job.tool_call_count = roundValidation.tool_call_count;
+  assignUsage(job, usageInfo.usage);
   job.scheme_ok = true;
   job.docker_routing_ok = true;
   job.timed_out = true;
@@ -1059,7 +1775,54 @@ function repairContractValidTimeout(job) {
   return true;
 }
 
-function repairRecoverableCodexCapacityExit(job) {
+function applyAgentFailurePolicy(job) {
+  const policy = classifyAgentFailure(job);
+  job.retryable = policy.retryable;
+  job.failure_classification = policy.classification;
+  return policy;
+}
+
+function classifyAgentFailure(job) {
+  const agentDir = agentDirectory(job);
+  const summary = readJson(agentSummaryPath(job), null);
+  if (job.timed_out === true || summary?.timed_out === true) {
+    return { retryable: false, classification: "agent-timeout" };
+  }
+
+  const evidence = [
+    job.error,
+    readText(path.join(agentDir, "runner-error.log")),
+    readText(path.join(agentDir, "stdout.jsonl")),
+    readText(path.join(agentDir, "stderr.log")),
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (
+    /selected model is at capacity|(?:provider|model|api).*(?:overloaded|unavailable|capacity|rate.?limit|temporar(?:y|ily)|internal server error|bad gateway|gateway timeout)|(?:429|500|502|503|504).*(?:provider|model|api|request)|(?:service unavailable|too many requests|upstream request timeout)/i.test(
+      evidence,
+    )
+  ) {
+    return { retryable: true, classification: "model-service-environment" };
+  }
+  if (
+    /docker\s+exec[^\r\n]*failed with null|(?:docker|container).*(?:daemon|not running|cannot connect|connection|no such container|unexpectedly stopped|is not running)|(?:daemon|container).*(?:docker|connection|unavailable)|error during connect|docker_engine/i.test(
+      evidence,
+    )
+  ) {
+    return { retryable: true, classification: "docker-environment" };
+  }
+  if (
+    /\b(?:ECONNRESET|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|ENOSPC|EPIPE)\b|spawn .* ENOENT|no space left|not enough space|disk full/i.test(
+      evidence,
+    )
+  ) {
+    return { retryable: true, classification: "host-environment" };
+  }
+  return { retryable: false, classification: "agent-terminal-failure" };
+}
+
+function repairContractValidCodexCapacityExit(job) {
   if (job.agent !== "codex-cli" || job.state !== "failed") return false;
   const agentDir = agentDirectory(job);
   const summaryPath = agentSummaryPath(job);
@@ -1078,8 +1841,7 @@ function repairRecoverableCodexCapacityExit(job) {
     !scheme?.ok ||
     !summary?.round_contract_validation?.ok ||
     !patchPath ||
-    !fs.existsSync(patchPath) ||
-    fs.statSync(patchPath).size === 0
+    !fs.existsSync(patchPath)
   )
     return false;
   const stdoutRecords = parseJsonl(stdoutPath);
@@ -1103,22 +1865,18 @@ function repairRecoverableCodexCapacityExit(job) {
     (event) =>
       event?.type === "event_msg" && event?.payload?.type === "task_complete",
   );
-  const agentMessage = rolloutRecords.some(
-    (event) =>
-      (event?.type === "event_msg" &&
-        event?.payload?.type === "agent_message") ||
-      (event?.type === "response_item" &&
-        event?.payload?.type === "message" &&
-        event?.payload?.role === "assistant"),
-  );
-  if (!taskComplete || !agentMessage) return false;
   job.state = "completed";
   job.phase = "completed";
   job.scheme_ok = true;
   job.docker_routing_ok = true;
+  job.retryable = false;
+  job.failure_classification = "model-service-environment-retained";
   job.observed_exit_code = Number(summary.exit_code);
-  job.repaired_validation =
-    "accepted contract-valid Codex task_complete whose terminal final-message request hit model capacity";
+  job.task_complete_observed = taskComplete;
+  job.attempt_incomplete = !taskComplete;
+  job.repaired_validation = taskComplete
+    ? "accepted contract-valid Codex task_complete whose terminal final-message request hit model capacity"
+    : "retained contract-valid partial Codex attempt after model-capacity exit without retry";
   return true;
 }
 
@@ -1133,7 +1891,7 @@ function listJsonlFiles(directory) {
   return files.sort();
 }
 
-function buildPrompt(job, container) {
+function buildPrompt(job, container, containerWorkdir = "/app") {
   const instruction = fs
     .readFileSync(
       path.join(tasksRoot, job.task.task_id, "instruction.md"),
@@ -1145,7 +1903,7 @@ function buildPrompt(job, container) {
     "",
     "## Benchmark environment rules",
     "",
-    `The official DeepSWE v1.1 development environment is Docker container \`${container}\` at \`/app\`.`,
+    `The official DeepSWE v1.1 development environment is Docker container \`${container}\` at \`${containerWorkdir}\`.`,
     "The container has no network, matching the official task configuration.",
     "Do not inspect or access the benchmark tests, verifier, reference solution, or DeepSWE task source directory.",
     "Make the requested implementation in the current repository workspace. Do not merely describe a patch.",
@@ -1155,13 +1913,15 @@ function buildPrompt(job, container) {
   if (job.agent === "codex-cli") {
     shared.push(
       "Every shell command, including reads, searches, git commands, and tests, MUST be executed through " +
-        `\`docker exec -w /app ${container} bash -lc '<command>'\`.`,
+        `\`docker exec -w ${containerWorkdir} ${container} bash -lc '<command>'\`.`,
       "Never run repository shell commands directly in Windows PowerShell. File-edit tools may edit the current host workspace because it is bind-mounted to /app.",
     );
   } else {
     shared.push(
-      "Your bash tool is already routed to this container and /app; use ordinary Linux bash commands without adding docker exec yourself.",
-      "File-edit tools operate on the host side of the same bind mount and are visible immediately inside /app.",
+      `Your bash tool is already routed to this container and ${containerWorkdir}; use ordinary Linux bash commands without adding docker exec yourself.`,
+      `File-edit tools operate on the host side of the same bind mount and are visible immediately inside ${containerWorkdir}.`,
+      "This is an unattended benchmark run: do not stop to ask the user a follow-up question; finish the task with the best evidence available.",
+      `A timed-out shell command can leave child processes behind. If a lingering process command or cwd belongs to ${containerWorkdir}, treat it as residue from your own earlier command, terminate only that process tree, and continue. Never terminate processes belonging to another /tura-workspaces/* workspace.`,
     );
   }
   return shared.join("\n") + "\n";
@@ -1200,16 +1960,66 @@ async function ensureVerifierImage(task) {
       task.task_id,
       (async () => {
         await ensureImage(task.docker_image);
-        const tag = `tura-deepswe-verifier:${hashText(task.task_id).slice(0, 12)}`;
+        const testsDirectory = path.join(tasksRoot, task.task_id, "tests");
+        const testScript = path.join(testsDirectory, "test.sh");
+        const testPatch = path.join(testsDirectory, "test.patch");
+        assert(
+          fs.existsSync(testScript),
+          `missing verifier script: ${testScript}`,
+        );
+        assert(
+          fs.existsSync(testPatch),
+          `missing verifier patch: ${testPatch}`,
+        );
+        const dockerfile = [
+          "ARG BASE_IMAGE",
+          "FROM ${BASE_IMAGE}",
+          "COPY test.sh /tests/test.sh",
+          "COPY test.patch /tests/test.patch",
+          "RUN chmod +x /tests/test.sh",
+          "WORKDIR /app",
+          "",
+        ].join("\n");
+        const fingerprint = hashText(
+          [
+            task.task_id,
+            task.docker_image,
+            dockerfile,
+            fs.readFileSync(testScript),
+            fs.readFileSync(testPatch),
+          ].join("\0"),
+        ).slice(0, 12);
+        const tag = `tura-deepswe-verifier:${fingerprint}`;
         const inspected = await runProcess(
           "docker",
           ["image", "inspect", tag],
           { timeoutMs: 30_000 },
         );
         if (inspected.status !== 0) {
+          const buildDirectory = path.join(
+            runRoot,
+            "_verifier-build",
+            safeSegment(task.task_id),
+            fingerprint,
+          );
+          fs.mkdirSync(buildDirectory, { recursive: true });
+          fs.copyFileSync(testScript, path.join(buildDirectory, "test.sh"));
+          fs.copyFileSync(testPatch, path.join(buildDirectory, "test.patch"));
+          fs.writeFileSync(
+            path.join(buildDirectory, "Dockerfile"),
+            dockerfile,
+            "utf8",
+          );
           await runOk(
             "docker",
-            ["build", "-t", tag, path.join(tasksRoot, task.task_id, "tests")],
+            [
+              "build",
+              "--build-arg",
+              `BASE_IMAGE=${task.docker_image}`,
+              "-t",
+              tag,
+              buildDirectory,
+            ],
             {
               timeoutMs: 30 * 60_000,
               maxBuffer: 256 * 1024 * 1024,
@@ -1247,11 +2057,16 @@ function diskFreeGb() {
 }
 
 function recordMonitor(note) {
-  const usage = aggregateJobUsage();
-  const cost = costEstimateForUsage(usage, {
+  const live = aggregateLiveJobUsage();
+  const usage = live.usage;
+  const pricingOptions = {
     model: "gpt-5.6-sol",
     serviceTier: "default",
-  });
+    usage,
+  };
+  const cost = live.providerCalls.length
+    ? costEstimateForProviderCalls(live.providerCalls, pricingOptions)
+    : costEstimateForUsage(usage, pricingOptions);
   const entry = {
     at: new Date().toISOString(),
     phase: manifest.phase,
@@ -1263,10 +2078,7 @@ function recordMonitor(note) {
     harness_completed: jobs.filter((job) => job.harness_state === "completed")
       .length,
     harness_failed: jobs.filter((job) => job.harness_state === "failed").length,
-    llm_turns: jobs.reduce(
-      (total, job) => total + Number(job.round_count || 0),
-      0,
-    ),
+    llm_turns: live.llmTurns,
     tool_calls: jobs.reduce(
       (total, job) => total + Number(job.tool_call_count || 0),
       0,
@@ -1277,6 +2089,8 @@ function recordMonitor(note) {
     reasoning_tokens: usage.reasoning_tokens,
     total_tokens: usage.total_tokens,
     estimated_cost_usd: cost.costUsd,
+    provider_calls: cost.requestCount || live.providerCalls.length,
+    long_context_calls: cost.longContextRequestCount || 0,
     free_gb: diskFreeGb(),
     note,
   };
@@ -1294,7 +2108,8 @@ function writeState(note) {
 
 function formatMonitorLine() {
   const latest = manifest.monitor_log.at(-1) || {};
-  return `phase=${manifest.phase} batch=${manifest.current_batch || "-"}/${manifest.task_batch_count} active=${jobs.filter((job) => job.state === "running" || job.harness_state === "running").length}/${concurrency} agent=${jobs.filter((job) => job.state === "completed").length}/${jobs.length} harness=${jobs.filter((job) => job.harness_state === "completed").length}/${jobs.length} turns=${latest.llm_turns || 0} input=${latest.input_tokens || 0} output=${latest.output_tokens || 0} tokens=${latest.total_tokens || 0} cost=$${Number(latest.estimated_cost_usd || 0).toFixed(6)} free=${diskFreeGb().toFixed(2)}GB`;
+  const agentCapacity = manifest.agent_worker_capacity || concurrency;
+  return `phase=${manifest.phase} batch=${manifest.current_batch || "-"}/${manifest.task_batch_count} active-agents=${jobs.filter((job) => job.state === "running" || job.harness_state === "running").length}/${agentCapacity} docker-capacity=${manifest.docker_concurrency || concurrency} agent=${jobs.filter((job) => job.state === "completed").length}/${jobs.length} harness=${jobs.filter((job) => job.harness_state === "completed").length}/${jobs.length} turns=${latest.llm_turns || 0} input=${latest.input_tokens || 0} output=${latest.output_tokens || 0} tokens=${latest.total_tokens || 0} cost=$${Number(latest.estimated_cost_usd || 0).toFixed(6)} free=${diskFreeGb().toFixed(2)}GB`;
 }
 
 function writeManifest() {
@@ -1555,24 +2370,79 @@ function assignUsage(job, usage = {}) {
   );
 }
 
-function aggregateJobUsage() {
-  return jobs.reduce(
-    (total, job) => {
-      total.input_tokens += Number(job.input_tokens || 0);
-      total.cached_input_tokens += Number(job.cached_input_tokens || 0);
-      total.output_tokens += Number(job.output_tokens || 0);
-      total.reasoning_tokens += Number(job.reasoning_tokens || 0);
-      total.total_tokens += Number(job.total_tokens || 0);
-      return total;
-    },
-    {
-      input_tokens: 0,
-      cached_input_tokens: 0,
-      output_tokens: 0,
-      reasoning_tokens: 0,
-      total_tokens: 0,
-    },
-  );
+function aggregateLiveJobUsage() {
+  const usage = emptyUsage();
+  let llmTurns = 0;
+  const providerCalls = [];
+  for (const job of jobs) {
+    const provider = providerLogUsage(
+      path.join(agentDirectory(job), "provider-log"),
+    );
+    const current =
+      provider.usage_events > 0
+        ? provider
+        : {
+            input_tokens: Number(job.input_tokens || 0),
+            cached_input_tokens: Number(job.cached_input_tokens || 0),
+            output_tokens: Number(job.output_tokens || 0),
+            reasoning_tokens: Number(job.reasoning_tokens || 0),
+            total_tokens: Number(job.total_tokens || 0),
+            usage_events: Number(job.round_count || 0),
+          };
+    usage.input_tokens += current.input_tokens;
+    usage.cached_input_tokens += current.cached_input_tokens;
+    usage.output_tokens += current.output_tokens;
+    usage.reasoning_tokens += current.reasoning_tokens;
+    usage.total_tokens += current.total_tokens;
+    usage.usage_events += current.usage_events;
+    providerCalls.push(...(provider.calls || []));
+    llmTurns += Math.max(
+      Number(job.round_count || 0),
+      Number(current.usage_events || 0),
+    );
+  }
+  return { usage, llmTurns, providerCalls };
+}
+
+function providerLogUsage(directory) {
+  const usage = emptyUsage();
+  usage.calls = [];
+  for (const file of listJsonFiles(directory)) {
+    const record = readJson(file, null);
+    const providerUsage = record?.metrics?.usage || record?.response?.usage;
+    if (!providerUsage) continue;
+    usage.calls.push({ usage: providerUsage });
+    const inputTokens = Number(providerUsage.input_tokens || 0);
+    const outputTokens = Number(providerUsage.output_tokens || 0);
+    usage.usage_events += 1;
+    usage.input_tokens += inputTokens;
+    usage.cached_input_tokens += Number(
+      providerUsage.cached_input_tokens ??
+        providerUsage.input_tokens_details?.cached_tokens ??
+        0,
+    );
+    usage.output_tokens += outputTokens;
+    usage.reasoning_tokens += Number(
+      providerUsage.reasoning_tokens ??
+        providerUsage.output_tokens_details?.reasoning_tokens ??
+        0,
+    );
+    usage.total_tokens += Number(
+      providerUsage.total_tokens || inputTokens + outputTokens,
+    );
+  }
+  return usage;
+}
+
+function listJsonFiles(directory) {
+  if (!fs.existsSync(directory)) return [];
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const item = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...listJsonFiles(item));
+    else if (entry.isFile() && entry.name.endsWith(".json")) files.push(item);
+  }
+  return files.sort();
 }
 
 function requiredEnv(name) {
@@ -1646,6 +2516,10 @@ function hashText(value) {
   return crypto.createHash("sha256").update(String(value)).digest("hex");
 }
 
+function hashBuffer(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -1664,6 +2538,14 @@ function readJson(file, fallback = undefined) {
   } catch (error) {
     if (fallback !== undefined) return fallback;
     throw error;
+  }
+}
+
+function readText(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return "";
   }
 }
 
@@ -1695,8 +2577,13 @@ function writeText(file, value) {
 async function runOk(command, args, options = {}) {
   const result = await runProcess(command, args, options);
   if (result.status !== 0) {
+    const detail = result.timedOut
+      ? "timed out"
+      : result.error
+        ? `spawn error: ${result.error}`
+        : `exit status ${result.status}`;
     throw new Error(
-      `${command} ${args.join(" ")} failed with ${result.status}\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`,
+      `${command} ${args.join(" ")} failed (${detail})\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`,
     );
   }
   return result;

