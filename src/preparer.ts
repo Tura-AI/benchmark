@@ -49,6 +49,21 @@ export interface AgentLaunchConfig {
   releaseDownloadUrl?: string;
   releaseSha256?: string;
   appendInstruction?: boolean;
+  modelConfiguration?: AgentModelConfiguration;
+}
+
+export interface AgentModelConfiguration {
+  schema: "tura.benchmark.model-configuration.v1";
+  requested_model: string;
+  effective_model: string;
+  provider: string;
+  agent_id: string;
+  sources: {
+    requested_model: string;
+    effective_model: string;
+  };
+  overrides: Array<{ source: string; value: string; selected: false }>;
+  declared_difference: string | null;
 }
 
 export interface AgentRunRequest {
@@ -261,6 +276,7 @@ function agentMetadata(
     releasePageUrl: agent.releasePageUrl ?? null,
     releaseDownloadUrl: agent.releaseDownloadUrl ?? null,
     releaseSha256: agent.releaseSha256 ?? null,
+    model_configuration: agent.modelConfiguration,
   };
 }
 

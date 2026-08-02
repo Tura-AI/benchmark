@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { projectPython } from "../lib/python_runtime.mjs";
+import { resolveModelConfiguration } from "../lib/model_configuration.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
@@ -122,8 +123,16 @@ function buildJob(task, agent, replicate) {
     args["run-id"] ||
     process.env.TURA_BENCHMARK_RUN_ID ||
     `${task.id}-${agent.id}-r${String(replicate).padStart(2, "0")}`;
-  const model =
-    args.model || process.env.TURA_BENCHMARK_MODEL || agent.defaultModel || "";
+  const modelConfiguration = resolveModelConfiguration({
+    agentId: agent.id,
+    provider: agent.provider,
+    modelEnv: agent.modelEnv,
+    cliModel: args.model,
+    configModel: config.defaults.model,
+    defaultModel: agent.defaultModel,
+    env: process.env,
+  });
+  const model = modelConfiguration.effective_model;
   const reasoning =
     args.reasoning ||
     process.env.TURA_BENCHMARK_REASONING ||
@@ -155,11 +164,11 @@ function buildJob(task, agent, replicate) {
         process.env.TURA_BENCHMARK_TIMEOUT_MS ||
         config.defaults.timeoutMs,
     ),
+    TURA_BENCHMARK_MODEL_CONFIGURATION: JSON.stringify(modelConfiguration),
   };
-  if (model) {
-    env.TURA_BENCHMARK_MODEL = model;
-    if (agent.modelEnv) env[agent.modelEnv] = model;
-  }
+  env.TURA_BENCHMARK_MODEL = model;
+  assert(agent.modelEnv, `missing model environment mapping for ${agent.id}`);
+  env[agent.modelEnv] = model;
   // Bash is part of the DeepSWE Tura configuration, not a user-tunable
   // convenience. Reassert it after --env parsing so plans and live runs agree.
   if (task.id === "deep-swe-v1.1" && agent.kind === "tura")
@@ -172,6 +181,7 @@ function buildJob(task, agent, replicate) {
     replicate,
     runId,
     runner: variant.runner,
+    modelConfiguration,
     env,
   };
 }
