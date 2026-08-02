@@ -51,6 +51,23 @@ export interface BenchmarkAgentMetadata {
   releasePageUrl: string | null;
   releaseDownloadUrl: string | null;
   releaseSha256: string | null;
+  model_configuration?: {
+    schema: "tura.benchmark.model-configuration.v1";
+    requested_model: string;
+    effective_model: string;
+    provider: string;
+    agent_id: string;
+    sources: {
+      requested_model: string;
+      effective_model: string;
+    };
+    overrides: Array<{
+      source: string;
+      value: string;
+      selected: false;
+    }>;
+    declared_difference: string | null;
+  };
 }
 
 export interface BenchmarkCliMetadata {

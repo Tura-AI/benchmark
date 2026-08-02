@@ -44,6 +44,7 @@ test("all agent profiles expose configurable command and model environment names
   for (const agent of config.agents) {
     assert.ok(agent.commandEnv, agent.id);
     assert.ok(agent.modelEnv, agent.id);
+    assert.ok(agent.provider, agent.id);
   }
 });
 
@@ -61,6 +62,26 @@ test("agent cli resolver maps each agent to an editable launch command", async (
   const claudecode = mustGet(byId, "claude-code");
   const opencode = mustGet(byId, "opencode");
   const tura = mustGet(byId, "balanced");
+
+  for (const [agentId, resolved] of byId) {
+    const profile = config.agents.find(
+      (candidate) =>
+        candidate.id === normalizeBenchmarkAgentId(agentId, config),
+    );
+    assert.equal(
+      resolved.modelConfiguration?.requested_model,
+      profile?.defaultModel,
+    );
+    assert.equal(
+      resolved.modelConfiguration?.effective_model,
+      profile?.defaultModel,
+    );
+    assert.equal(resolved.modelConfiguration?.agent_id, agentId);
+    assert.equal(
+      resolved.env?.[profile?.modelEnv ?? ""],
+      profile?.defaultModel,
+    );
+  }
 
   assert.equal(pi.cliLaunchCommandName, "pi");
   assert.deepEqual(pi.cliArgs?.slice(0, 2), ["--mode", "json"]);

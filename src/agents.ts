@@ -13,6 +13,7 @@ export interface BenchmarkAgentCliProfile {
   id: BenchmarkAgentId;
   aliases: string[];
   agentName: string;
+  provider?: string;
   defaultVersion?: string;
   githubRepositoryUrl?: string;
   releasePageUrl?: string;
@@ -169,11 +170,21 @@ export function resolveBenchmarkAgentCli(
   if (!profile)
     throw new Error(`missing benchmark agent profile: ${normalizedId}`);
   const env = options.env ?? process.env;
-  const model =
-    options.model ??
-    readEnv(env, profile.modelEnv) ??
-    profile.defaultModel ??
-    "unknown";
+  const modelCandidates = [
+    configuredValue(options.model, "option:model"),
+    configuredValue(
+      readEnv(env, profile.modelEnv),
+      profile.modelEnv ? `environment:${profile.modelEnv}` : undefined,
+    ),
+    configuredValue(profile.defaultModel, "config:agent.defaultModel"),
+  ].filter((value): value is { value: string; source: string } =>
+    Boolean(value),
+  );
+  const selectedModel = modelCandidates[0] ?? {
+    value: "unknown",
+    source: "fallback:unknown",
+  };
+  const model = selectedModel.value;
   const reasoning =
     options.reasoning ??
     readEnv(env, profile.reasoningEnv) ??
@@ -182,16 +193,38 @@ export function resolveBenchmarkAgentCli(
   const variables = {
     workspace: options.workspaceDirectory ?? ".",
     repoRoot: options.repoRoot ?? ".",
-    model,
-    reasoning,
     ...profile.defaultVariables,
     ...(runtime?.kind === "tura" ? { turaAgentId: runtime.id } : {}),
     ...options.variables,
+    model,
+    reasoning,
   };
   const cliArgs = [
     ...profile.defaultArgs.map((arg) => expandTemplate(arg, variables)),
     ...(options.extraArgs ?? []),
   ];
+  if (!cliArgs.includes(model)) {
+    throw new Error(
+      `${runtime?.id ?? normalizedId} adapter did not propagate requested model ${model}`,
+    );
+  }
+  const modelConfiguration = {
+    schema: "tura.benchmark.model-configuration.v1" as const,
+    requested_model: model,
+    effective_model: model,
+    provider: profile.provider ?? "unknown",
+    agent_id: runtime?.id ?? normalizedId,
+    sources: {
+      requested_model: selectedModel.source,
+      effective_model: selectedModel.source,
+    },
+    overrides: modelCandidates.slice(1).map((candidate) => ({
+      source: candidate.source,
+      value: candidate.value,
+      selected: false as const,
+    })),
+    declared_difference: null,
+  };
   return {
     agentId: runtime?.id ?? normalizedId,
     agentName: profile.agentName,
@@ -216,7 +249,13 @@ export function resolveBenchmarkAgentCli(
     releaseSha256:
       readEnv(env, profile.releaseSha256Env) ?? profile.releaseSha256,
     appendInstruction: options.appendInstruction ?? profile.appendInstruction,
-    env: materializeEnv(profile.defaultEnv),
+    env: materializeEnv({
+      ...profile.defaultEnv,
+      ...(profile.modelEnv ? { [profile.modelEnv]: model } : {}),
+      TURA_BENCHMARK_MODEL: model,
+      TURA_BENCHMARK_MODEL_CONFIGURATION: JSON.stringify(modelConfiguration),
+    }),
+    modelConfiguration,
   };
 }
 
@@ -238,6 +277,7 @@ export function agentCliConfigSummary(
     defaultAgents: [...config.defaultAgents],
     agents: config.agents.map((profile) => ({
       id: profile.id,
+      provider: profile.provider ?? null,
       aliases: profile.aliases,
       commandEnv: profile.commandEnv,
       defaultCommand: profile.defaultCommand,
@@ -246,6 +286,14 @@ export function agentCliConfigSummary(
       defaultModel: profile.defaultModel ?? null,
     })),
   };
+}
+
+function configuredValue(
+  value: string | undefined,
+  source: string | undefined,
+): { value: string; source: string } | undefined {
+  const normalized = value?.trim();
+  return normalized && source ? { value: normalized, source } : undefined;
 }
 
 function readEnv(env: NodeJS.ProcessEnv, name?: string): string | undefined {
