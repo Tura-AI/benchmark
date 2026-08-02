@@ -195,6 +195,40 @@ def validate_intake(root: Path, errors: list[str]) -> dict[str, int]:
     return counts
 
 
+def result_version_states(root: Path, errors: list[str]) -> dict[str, int]:
+    states = {
+        "canonical": 0,
+        "canonical historical": 0,
+        "pending normalization": 0,
+        "unsupported version": 0,
+        "rejected": 0,
+    }
+    known_historical = {
+        "tura.benchmark.normalized-summary.v1",
+        "tura.business-test.summary.v1",
+        "tura.benchmark.raw-agent-summary.v1",
+    }
+    paths = sorted(root.glob("results/**/metadata/summary.json"))
+    paths += sorted((root / "raw").glob("**/agent-summary.json"))
+    for result_path in paths:
+        try:
+            result = load_json(result_path)
+            version = result.get("schema_version")
+            if version in {"1.0.0", "2.0.0"}:
+                states["canonical"] += 1
+            elif version:
+                states["unsupported version"] += 1
+                errors.append(f"{result_path} [schema_version]: unsupported version {version!r}")
+            elif result.get("schema") in known_historical:
+                states["canonical historical"] += 1
+            else:
+                states["pending normalization"] += 1
+        except Exception as exc:  # noqa: BLE001
+            states["rejected"] += 1
+            errors.append(f"{result_path}: {exc}")
+    return {f"result state {name}": count for name, count in states.items()}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark-data", type=Path, default=DEFAULT_BENCHMARK_DATA)
@@ -209,6 +243,7 @@ def main() -> int:
     check_schema_files(errors)
     counts = validate_normalized(args.benchmark_data.resolve(), errors)
     counts.update(validate_intake(args.benchmark_data.resolve(), errors))
+    counts.update(result_version_states(args.benchmark_data.resolve(), errors))
     counts["task declarations"] = validate_task_declarations(args.tura_root.resolve(), errors)
     if args.website_root:
         counts.update(validate_website(args.website_root.resolve(), errors, args.website_limit))
