@@ -55,12 +55,9 @@ const timeoutMs = Number(
 );
 const stamp = process.env.COMMAND_RUN_DESIGN_STAMP || timestamp();
 const runSuffix = optionalSuffix(process.env.COMMAND_RUN_DESIGN_RUN_SUFFIX);
-const batchRoot = path.join(
-  benchmarkRawRoot(),
-  "design",
-  safeSegment(taskId),
-  stamp,
-);
+const batchRoot = process.env.TURA_BENCHMARK_RUN_DIRECTORY
+  ? path.resolve(process.env.TURA_BENCHMARK_RUN_DIRECTORY)
+  : path.join(benchmarkRawRoot(), "design", safeSegment(taskId), stamp);
 const manifestName = runSuffix
   ? `batch-manifest${runSuffix}.json`
   : "batch-manifest.json";
@@ -113,7 +110,9 @@ console.log(
 process.exitCode = summary.ok ? 0 : 1;
 
 async function runAgent(agentId) {
-  const runRoot = path.join(batchRoot, safeSegment(`${agentId}${runSuffix}`));
+  const runRoot = process.env.TURA_BENCHMARK_RUN_DIRECTORY
+    ? batchRoot
+    : path.join(batchRoot, safeSegment(`${agentId}${runSuffix}`));
   const workspace = path.join(runRoot, "workspace");
   const agentDir = path.join(runRoot, "metadata");
   const turaHome = path.join(runRoot, "home", "tura");

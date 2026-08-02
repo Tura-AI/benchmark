@@ -14,6 +14,10 @@ import {
   runIsolatedBatch,
   writeBatchSummary,
 } from "../lib/batch_execution.mjs";
+import {
+  allocateRunDirectory,
+  finalizeRunDirectory,
+} from "../lib/run_directory.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
@@ -109,37 +113,82 @@ async function runJobs(jobs, concurrency) {
 }
 
 function runJob(job) {
+  const allocation = allocateRunDirectory(job.env.TURA_BENCHMARK_RAW_ROOT, {
+    runId: job.runId,
+    task: job.task,
+    agent: job.agent,
+    replicate: job.replicate,
+  });
+  const isolatedJob = {
+    ...job,
+    attempt: allocation.attempt,
+    artifactPath: allocation.runDirectory,
+    env: {
+      ...job.env,
+      TURA_BENCHMARK_ATTEMPT: String(allocation.attempt),
+      TURA_BENCHMARK_RUN_DIRECTORY: allocation.runDirectory,
+    },
+  };
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [job.runner], {
+    let settled = false;
+    const child = spawn(process.execPath, [isolatedJob.runner], {
       cwd: root,
-      env: { ...process.env, ...job.env },
+      env: { ...process.env, ...isolatedJob.env },
       stdio: "inherit",
-      timeout: Number(job.env.COMMAND_RUN_AGENT_TIMEOUT_MS),
+      timeout: Number(isolatedJob.env.COMMAND_RUN_AGENT_TIMEOUT_MS),
       windowsHide: true,
     });
-    child.once("error", (error) =>
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      finalizeRunDirectory(allocation.runDirectory, "quarantined", {
+        failure_class: "setup",
+        error: String(error.stack || error),
+      });
       reject(
         new AttemptFailure(String(error.message || error), {
           failureClass: "setup",
           cause: error,
+          artifacts: {
+            raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
+            run_id: isolatedJob.runId,
+            run_directory: allocation.runDirectory,
+          },
         }),
-      ),
-    );
+      );
+    });
     child.once("exit", (code, signal) => {
-      if (code === 0) resolve();
-      else
+      if (settled) return;
+      settled = true;
+      if (code === 0) {
+        const contract = finalizeRunDirectory(
+          allocation.runDirectory,
+          "completed",
+        );
+        resolve({
+          artifact_path: contract.artifact_path,
+          attempt: allocation.attempt,
+        });
+      } else {
+        finalizeRunDirectory(allocation.runDirectory, "quarantined", {
+          failure_class: "execution",
+          exit_code: code,
+          signal,
+        });
         reject(
           new AttemptFailure(
-            `${job.task}/${job.agent} exited with ${code ?? signal ?? "unknown status"}`,
+            `${isolatedJob.task}/${isolatedJob.agent} exited with ${code ?? signal ?? "unknown status"}; artifacts quarantined at ${allocation.runDirectory}`,
             {
               failureClass: "execution",
               artifacts: {
-                raw_root: job.env.TURA_BENCHMARK_RAW_ROOT,
-                run_id: job.runId,
+                raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
+                run_id: isolatedJob.runId,
+                run_directory: allocation.runDirectory,
               },
             },
           ),
         );
+      }
     });
   });
 }
