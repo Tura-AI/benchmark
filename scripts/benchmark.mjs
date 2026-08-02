@@ -23,6 +23,12 @@ import {
   interventionPlan,
   loadIntervention,
 } from "../lib/intervention.mjs";
+import {
+  assertCohortExecution,
+  createPilotCohort,
+  loadCohortContract,
+  storeFrozenCohort,
+} from "../lib/cohort_contract.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
@@ -46,6 +52,10 @@ const tasks = discoverTasks();
 const intervention = args.intervention
   ? loadIntervention(String(args.intervention), root)
   : null;
+const cohortSource = args.cohort
+  ? loadCohortContract(String(args.cohort), root)
+  : null;
+let activeCohort = cohortSource?.contract || null;
 
 if (command === "help" || args.help) printHelp();
 else if (command === "list")
@@ -77,6 +87,21 @@ async function execute(mode) {
       config.defaults.concurrency,
     "concurrency",
   );
+  if (!activeCohort && args.pilot)
+    activeCohort = createPilotCohort(
+      selected.map((task) => task.id),
+      replicates,
+    );
+  if (activeCohort)
+    assertCohortExecution(
+      activeCohort,
+      selected.map((task) => task.id),
+      replicates,
+    );
+  if (mode === "run" && !activeCohort)
+    throw new Error(
+      "full benchmark runs require --cohort FILE; use --pilot for an explicitly marked pilot",
+    );
   const jobs = selected.flatMap((task) =>
     agents.flatMap((agent) =>
       Array.from({ length: replicates }, (_, index) => {
@@ -93,9 +118,15 @@ async function execute(mode) {
     return print({
       config: configPath,
       agentConfig: agentConfigPath,
+      cohort: activeCohort,
       concurrency,
       jobs,
     });
+  const cohortPath = storeFrozenCohort(
+    jobs[0]?.env.TURA_BENCHMARK_RAW_ROOT || resolvePath(config.rawRoot),
+    activeCohort,
+  );
+  for (const job of jobs) job.env.TURA_BENCHMARK_COHORT_PATH = cohortPath;
   await runJobs(jobs, concurrency);
 }
 
@@ -267,6 +298,10 @@ function buildJob(task, agent, replicate, interventionArm = null) {
     env.TURA_BENCHMARK_INTERVENTION_ARM = interventionArm;
     if (interventionArm === "treatment")
       Object.assign(env, intervention.environment || {});
+  }
+  if (activeCohort) {
+    env.TURA_BENCHMARK_COHORT_REVISION = activeCohort.selection_plan_revision;
+    env.TURA_BENCHMARK_COHORT_PILOT = String(activeCohort.pilot);
   }
   // Bash is part of the DeepSWE Tura configuration, not a user-tunable
   // convenience. Reassert it after --env parsing so plans and live runs agree.
@@ -492,5 +527,7 @@ Options:
   --results-root DIR     Published result root
   --env KEY=VALUE        Additional runner environment; repeatable
   --intervention FILE    Run paired baseline/treatment with a v1 intervention
+  --cohort FILE          Frozen cohort contract required for a full run
+  --pilot                Run with an auto-frozen reduced pilot contract
   --dry-run              Resolve a run without executing it`);
 }
