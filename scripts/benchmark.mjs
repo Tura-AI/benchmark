@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 
 import { projectPython } from "../lib/python_runtime.mjs";
 import { resolveModelConfiguration } from "../lib/model_configuration.mjs";
+import {
+  AttemptFailure,
+  batchExitCode,
+  runIsolatedBatch,
+  writeBatchSummary,
+} from "../lib/batch_execution.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
@@ -77,22 +83,29 @@ async function execute(mode) {
 }
 
 async function runJobs(jobs, concurrency) {
-  let next = 0;
-  let failure = null;
-  async function worker() {
-    while (!failure && next < jobs.length) {
-      const job = jobs[next++];
-      try {
-        await runJob(job);
-      } catch (error) {
-        failure = error;
-      }
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, jobs.length) }, worker),
+  const summary = await runIsolatedBatch(jobs, runJob, {
+    concurrency,
+    onAttemptComplete(attempt) {
+      const label = `${attempt.job.task}/${attempt.job.agent}/${attempt.job.replicate}`;
+      console.log(
+        `[batch] ${label} ${attempt.status}${attempt.failure_class ? ` (${attempt.failure_class})` : ""}`,
+      );
+    },
+  });
+  const rawRoot =
+    jobs[0]?.env.TURA_BENCHMARK_RAW_ROOT || resolvePath(config.rawRoot);
+  const batchId =
+    args["run-id"] ||
+    process.env.TURA_BENCHMARK_RUN_ID ||
+    `batch-${Date.now()}`;
+  const summaryPath = writeBatchSummary(
+    path.join(rawRoot, "batch-summaries", `${safeSegment(batchId)}.json`),
+    summary,
   );
-  if (failure) throw failure;
+  print({ ...summary, summaryPath });
+  process.exitCode = batchExitCode(summary, {
+    failOnAttemptFailure: config.batchPolicy?.failOnAttemptFailure !== false,
+  });
 }
 
 function runJob(job) {
@@ -104,13 +117,27 @@ function runJob(job) {
       timeout: Number(job.env.COMMAND_RUN_AGENT_TIMEOUT_MS),
       windowsHide: true,
     });
-    child.once("error", reject);
+    child.once("error", (error) =>
+      reject(
+        new AttemptFailure(String(error.message || error), {
+          failureClass: "setup",
+          cause: error,
+        }),
+      ),
+    );
     child.once("exit", (code, signal) => {
       if (code === 0) resolve();
       else
         reject(
-          new Error(
+          new AttemptFailure(
             `${job.task}/${job.agent} exited with ${code ?? signal ?? "unknown status"}`,
+            {
+              failureClass: "execution",
+              artifacts: {
+                raw_root: job.env.TURA_BENCHMARK_RAW_ROOT,
+                run_id: job.runId,
+              },
+            },
           ),
         );
     });
@@ -345,6 +372,15 @@ function positiveInteger(value, label) {
     `${label} must be a positive integer`,
   );
   return number;
+}
+
+function safeSegment(value) {
+  const segment = String(value)
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  assert(segment, `invalid path segment: ${value}`);
+  return segment;
 }
 
 function resolvePath(value) {
