@@ -18,6 +18,11 @@ import {
   allocateRunDirectory,
   finalizeRunDirectory,
 } from "../lib/run_directory.mjs";
+import {
+  assertInterventionPair,
+  interventionPlan,
+  loadIntervention,
+} from "../lib/intervention.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
@@ -38,6 +43,9 @@ const agentConfigPath = resolvePath(
 );
 const agentConfig = readJson(agentConfigPath);
 const tasks = discoverTasks();
+const intervention = args.intervention
+  ? loadIntervention(String(args.intervention), root)
+  : null;
 
 if (command === "help" || args.help) printHelp();
 else if (command === "list")
@@ -71,9 +79,14 @@ async function execute(mode) {
   );
   const jobs = selected.flatMap((task) =>
     agents.flatMap((agent) =>
-      Array.from({ length: replicates }, (_, index) =>
-        buildJob(task, agent, index + 1),
-      ),
+      Array.from({ length: replicates }, (_, index) => {
+        const replicate = index + 1;
+        if (!intervention) return [buildJob(task, agent, replicate)];
+        const baseline = buildJob(task, agent, replicate, "baseline");
+        const treatment = buildJob(task, agent, replicate, "treatment");
+        assertInterventionPair(baseline, treatment, intervention);
+        return [baseline, treatment];
+      }).flat(),
     ),
   );
   if (mode === "plan" || args["dry-run"])
@@ -193,12 +206,13 @@ function runJob(job) {
   });
 }
 
-function buildJob(task, agent, replicate) {
+function buildJob(task, agent, replicate, interventionArm = null) {
   const variant = selectVariant(task);
-  const runId =
+  const baseRunId =
     args["run-id"] ||
     process.env.TURA_BENCHMARK_RUN_ID ||
     `${task.id}-${agent.id}-r${String(replicate).padStart(2, "0")}`;
+  const runId = interventionArm ? `${baseRunId}-${interventionArm}` : baseRunId;
   const modelConfiguration = resolveModelConfiguration({
     agentId: agent.id,
     provider: agent.provider,
@@ -245,6 +259,15 @@ function buildJob(task, agent, replicate) {
   env.TURA_BENCHMARK_MODEL = model;
   assert(agent.modelEnv, `missing model environment mapping for ${agent.id}`);
   env[agent.modelEnv] = model;
+  const interventionRecord = interventionArm
+    ? interventionPlan(intervention, interventionArm)
+    : null;
+  if (interventionRecord) {
+    env.TURA_BENCHMARK_INTERVENTION = JSON.stringify(intervention);
+    env.TURA_BENCHMARK_INTERVENTION_ARM = interventionArm;
+    if (interventionArm === "treatment")
+      Object.assign(env, intervention.environment || {});
+  }
   // Bash is part of the DeepSWE Tura configuration, not a user-tunable
   // convenience. Reassert it after --env parsing so plans and live runs agree.
   if (task.id === "deep-swe-v1.1" && agent.kind === "tura")
@@ -258,6 +281,7 @@ function buildJob(task, agent, replicate) {
     runId,
     runner: variant.runner,
     modelConfiguration,
+    intervention: interventionRecord,
     env,
   };
 }
@@ -467,5 +491,6 @@ Options:
   --raw-root DIR         Local run artifact root
   --results-root DIR     Published result root
   --env KEY=VALUE        Additional runner environment; repeatable
+  --intervention FILE    Run paired baseline/treatment with a v1 intervention
   --dry-run              Resolve a run without executing it`);
 }
