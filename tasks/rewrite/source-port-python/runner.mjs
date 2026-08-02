@@ -37,9 +37,11 @@ import {
   refreshContextAndCallArchiveWithRetry as refreshGenericContextArchiveWithRetry,
   usageForAgent as genericUsageForAgent,
 } from "../../../lib/generic_agent_cli.mjs";
+import { projectPython } from "../../../lib/python_runtime.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..", "..", "..", "..");
+const pythonExecutable = projectPython(repoRoot);
 const homeDir = process.env.USERPROFILE || process.env.HOME || "";
 const runId =
   process.env.COMMAND_RUN_AGENT_RUN_ID || `source-port-suite-${Date.now()}`;
@@ -1083,7 +1085,7 @@ function ensurePypiReferenceCommand(task) {
   if (!fs.existsSync(script)) {
     fs.rmSync(stableDir, { recursive: true, force: true });
     mkdirp(stableDir);
-    runOk(process.env.PYTHON || "python", ["-m", "venv", venvDir], {
+    runOk(pythonExecutable, ["-m", "venv", venvDir], {
       timeoutMs: 5 * 60_000,
     });
     const pip = path.join(
@@ -3178,7 +3180,7 @@ function collectPatch(workspace, agentDir) {
 function evaluateWorkspace(workspace, agentDir, task, binary) {
   if (!runEval) return { ran: false, reason: "SOURCE_PORT_RUN_EVAL is not 1" };
   const harnessPath = writeHarness(task);
-  const result = run(process.env.PYTHON || "python", [harnessPath, workspace], {
+  const result = run(pythonExecutable, [harnessPath, workspace], {
     cwd: workspace,
     timeoutMs: Number(process.env.SOURCE_PORT_EVAL_TIMEOUT_MS || 10 * 60_000),
     env: {
