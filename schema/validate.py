@@ -112,6 +112,7 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
         "DeepSWE local batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-local-r*/manifest.json"),
         "DeepSWE Codex High batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-codex-cli-high-r*/manifest.json"),
         "DeepSWE Tura pair High batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-tura-pair-high-r*/manifest.json"),
+        "DeepSWE Mini pair High batch manifests": ("deepswe-local-batch.schema.json", "results/debug/report-deepswe-v1.1-gpt56-sol-mini-pair-high-r*/manifest.json"),
         "DeepSWE import audits": ("deepswe-import-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-import-audit.json"),
         "DeepSWE local audits": ("deepswe-local-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-local-audit.json"),
         "DeepSWE Codex High audits": ("deepswe-codex-high-audit.schema.json", "results/debug/deepswe-v1.1-gpt56-sol-codex-cli-high-audit.json"),

