@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { npmInvocation } from "../lib/npm_runtime.mjs";
-import { projectPython } from "../lib/python_runtime.mjs";
+import { resolvePythonInterpreter } from "../lib/python_runtime.mjs";
 import { findCodexCliExe } from "../lib/generic_agent_cli.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,11 +28,22 @@ const checks = [];
 checkVersion("Node.js", process.execPath, ["--version"], 20);
 const npm = npmInvocation();
 checkVersion("npm", npm.command, [...npm.args, "--version"], 9);
-checkVersion("Python", projectPython(root), ["--version"], 3, 11);
-checkCommand("Python packages", projectPython(root), [
-  "-c",
-  "import jsonschema, referencing; print('jsonschema and referencing available')",
-]);
+let python = null;
+try {
+  python = resolvePythonInterpreter(root);
+  record(
+    "Python",
+    true,
+    `${python.path} - Python ${python.version} - ${python.source}`,
+  );
+} catch (error) {
+  record("Python", false, String(error.message || error));
+}
+if (python)
+  checkCommand("Python packages", python.path, [
+    "-c",
+    "import jsonschema, referencing; print('jsonschema and referencing available')",
+  ]);
 checkVersion("Git", "git", ["--version"], 2);
 checkFile("Node lockfile", path.join(root, "package-lock.json"));
 checkFile("Python requirements", path.join(root, "requirements.txt"));

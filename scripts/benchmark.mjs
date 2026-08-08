@@ -7,6 +7,28 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { projectPython } from "../lib/python_runtime.mjs";
+import { resolveModelConfiguration } from "../lib/model_configuration.mjs";
+import {
+  AttemptFailure,
+  batchExitCode,
+  runIsolatedBatch,
+  writeBatchSummary,
+} from "../lib/batch_execution.mjs";
+import {
+  allocateRunDirectory,
+  finalizeRunDirectory,
+} from "../lib/run_directory.mjs";
+import {
+  assertInterventionPair,
+  interventionPlan,
+  loadIntervention,
+} from "../lib/intervention.mjs";
+import {
+  assertCohortExecution,
+  createPilotCohort,
+  loadCohortContract,
+  storeFrozenCohort,
+} from "../lib/cohort_contract.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const args = parseArgs(process.argv.slice(2));
@@ -27,6 +49,13 @@ const agentConfigPath = resolvePath(
 );
 const agentConfig = readJson(agentConfigPath);
 const tasks = discoverTasks();
+const intervention = args.intervention
+  ? loadIntervention(String(args.intervention), root)
+  : null;
+const cohortSource = args.cohort
+  ? loadCohortContract(String(args.cohort), root)
+  : null;
+let activeCohort = cohortSource?.contract || null;
 
 if (command === "help" || args.help) printHelp();
 else if (command === "list")
@@ -58,72 +87,173 @@ async function execute(mode) {
       config.defaults.concurrency,
     "concurrency",
   );
+  if (!activeCohort && args.pilot)
+    activeCohort = createPilotCohort(
+      selected.map((task) => task.id),
+      replicates,
+    );
+  if (activeCohort)
+    assertCohortExecution(
+      activeCohort,
+      selected.map((task) => task.id),
+      replicates,
+    );
+  if (mode === "run" && !activeCohort)
+    throw new Error(
+      "full benchmark runs require --cohort FILE; use --pilot for an explicitly marked pilot",
+    );
   const jobs = selected.flatMap((task) =>
     agents.flatMap((agent) =>
-      Array.from({ length: replicates }, (_, index) =>
-        buildJob(task, agent, index + 1),
-      ),
+      Array.from({ length: replicates }, (_, index) => {
+        const replicate = index + 1;
+        if (!intervention) return [buildJob(task, agent, replicate)];
+        const baseline = buildJob(task, agent, replicate, "baseline");
+        const treatment = buildJob(task, agent, replicate, "treatment");
+        assertInterventionPair(baseline, treatment, intervention);
+        return [baseline, treatment];
+      }).flat(),
     ),
   );
   if (mode === "plan" || args["dry-run"])
     return print({
       config: configPath,
       agentConfig: agentConfigPath,
+      cohort: activeCohort,
       concurrency,
       jobs,
     });
+  const cohortPath = storeFrozenCohort(
+    jobs[0]?.env.TURA_BENCHMARK_RAW_ROOT || resolvePath(config.rawRoot),
+    activeCohort,
+  );
+  for (const job of jobs) job.env.TURA_BENCHMARK_COHORT_PATH = cohortPath;
   await runJobs(jobs, concurrency);
 }
 
 async function runJobs(jobs, concurrency) {
-  let next = 0;
-  let failure = null;
-  async function worker() {
-    while (!failure && next < jobs.length) {
-      const job = jobs[next++];
-      try {
-        await runJob(job);
-      } catch (error) {
-        failure = error;
-      }
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, jobs.length) }, worker),
+  const summary = await runIsolatedBatch(jobs, runJob, {
+    concurrency,
+    onAttemptComplete(attempt) {
+      const label = `${attempt.job.task}/${attempt.job.agent}/${attempt.job.replicate}`;
+      console.log(
+        `[batch] ${label} ${attempt.status}${attempt.failure_class ? ` (${attempt.failure_class})` : ""}`,
+      );
+    },
+  });
+  const rawRoot =
+    jobs[0]?.env.TURA_BENCHMARK_RAW_ROOT || resolvePath(config.rawRoot);
+  const batchId =
+    args["run-id"] ||
+    process.env.TURA_BENCHMARK_RUN_ID ||
+    `batch-${Date.now()}`;
+  const summaryPath = writeBatchSummary(
+    path.join(rawRoot, "batch-summaries", `${safeSegment(batchId)}.json`),
+    summary,
   );
-  if (failure) throw failure;
+  print({ ...summary, summaryPath });
+  process.exitCode = batchExitCode(summary, {
+    failOnAttemptFailure: config.batchPolicy?.failOnAttemptFailure !== false,
+  });
 }
 
 function runJob(job) {
+  const allocation = allocateRunDirectory(job.env.TURA_BENCHMARK_RAW_ROOT, {
+    runId: job.runId,
+    task: job.task,
+    agent: job.agent,
+    replicate: job.replicate,
+  });
+  const isolatedJob = {
+    ...job,
+    attempt: allocation.attempt,
+    artifactPath: allocation.runDirectory,
+    env: {
+      ...job.env,
+      TURA_BENCHMARK_ATTEMPT: String(allocation.attempt),
+      TURA_BENCHMARK_RUN_DIRECTORY: allocation.runDirectory,
+    },
+  };
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [job.runner], {
+    let settled = false;
+    const child = spawn(process.execPath, [isolatedJob.runner], {
       cwd: root,
-      env: { ...process.env, ...job.env },
+      env: { ...process.env, ...isolatedJob.env },
       stdio: "inherit",
-      timeout: Number(job.env.COMMAND_RUN_AGENT_TIMEOUT_MS),
+      timeout: Number(isolatedJob.env.COMMAND_RUN_AGENT_TIMEOUT_MS),
       windowsHide: true,
     });
-    child.once("error", reject);
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      finalizeRunDirectory(allocation.runDirectory, "quarantined", {
+        failure_class: "setup",
+        error: String(error.stack || error),
+      });
+      reject(
+        new AttemptFailure(String(error.message || error), {
+          failureClass: "setup",
+          cause: error,
+          artifacts: {
+            raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
+            run_id: isolatedJob.runId,
+            run_directory: allocation.runDirectory,
+          },
+        }),
+      );
+    });
     child.once("exit", (code, signal) => {
-      if (code === 0) resolve();
-      else
+      if (settled) return;
+      settled = true;
+      if (code === 0) {
+        const contract = finalizeRunDirectory(
+          allocation.runDirectory,
+          "completed",
+        );
+        resolve({
+          artifact_path: contract.artifact_path,
+          attempt: allocation.attempt,
+        });
+      } else {
+        finalizeRunDirectory(allocation.runDirectory, "quarantined", {
+          failure_class: "execution",
+          exit_code: code,
+          signal,
+        });
         reject(
-          new Error(
-            `${job.task}/${job.agent} exited with ${code ?? signal ?? "unknown status"}`,
+          new AttemptFailure(
+            `${isolatedJob.task}/${isolatedJob.agent} exited with ${code ?? signal ?? "unknown status"}; artifacts quarantined at ${allocation.runDirectory}`,
+            {
+              failureClass: "execution",
+              artifacts: {
+                raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
+                run_id: isolatedJob.runId,
+                run_directory: allocation.runDirectory,
+              },
+            },
           ),
         );
+      }
     });
   });
 }
 
-function buildJob(task, agent, replicate) {
+function buildJob(task, agent, replicate, interventionArm = null) {
   const variant = selectVariant(task);
-  const runId =
+  const baseRunId =
     args["run-id"] ||
     process.env.TURA_BENCHMARK_RUN_ID ||
     `${task.id}-${agent.id}-r${String(replicate).padStart(2, "0")}`;
-  const model =
-    args.model || process.env.TURA_BENCHMARK_MODEL || agent.defaultModel || "";
+  const runId = interventionArm ? `${baseRunId}-${interventionArm}` : baseRunId;
+  const modelConfiguration = resolveModelConfiguration({
+    agentId: agent.id,
+    provider: agent.provider,
+    modelEnv: agent.modelEnv,
+    cliModel: args.model,
+    configModel: config.defaults.model,
+    defaultModel: agent.defaultModel,
+    env: process.env,
+  });
+  const model = modelConfiguration.effective_model;
   const reasoning =
     args.reasoning ||
     process.env.TURA_BENCHMARK_REASONING ||
@@ -155,10 +285,23 @@ function buildJob(task, agent, replicate) {
         process.env.TURA_BENCHMARK_TIMEOUT_MS ||
         config.defaults.timeoutMs,
     ),
+    TURA_BENCHMARK_MODEL_CONFIGURATION: JSON.stringify(modelConfiguration),
   };
-  if (model) {
-    env.TURA_BENCHMARK_MODEL = model;
-    if (agent.modelEnv) env[agent.modelEnv] = model;
+  env.TURA_BENCHMARK_MODEL = model;
+  assert(agent.modelEnv, `missing model environment mapping for ${agent.id}`);
+  env[agent.modelEnv] = model;
+  const interventionRecord = interventionArm
+    ? interventionPlan(intervention, interventionArm)
+    : null;
+  if (interventionRecord) {
+    env.TURA_BENCHMARK_INTERVENTION = JSON.stringify(intervention);
+    env.TURA_BENCHMARK_INTERVENTION_ARM = interventionArm;
+    if (interventionArm === "treatment")
+      Object.assign(env, intervention.environment || {});
+  }
+  if (activeCohort) {
+    env.TURA_BENCHMARK_COHORT_REVISION = activeCohort.selection_plan_revision;
+    env.TURA_BENCHMARK_COHORT_PILOT = String(activeCohort.pilot);
   }
   // Bash is part of the DeepSWE Tura configuration, not a user-tunable
   // convenience. Reassert it after --env parsing so plans and live runs agree.
@@ -172,6 +315,8 @@ function buildJob(task, agent, replicate) {
     replicate,
     runId,
     runner: variant.runner,
+    modelConfiguration,
+    intervention: interventionRecord,
     env,
   };
 }
@@ -337,6 +482,15 @@ function positiveInteger(value, label) {
   return number;
 }
 
+function safeSegment(value) {
+  const segment = String(value)
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  assert(segment, `invalid path segment: ${value}`);
+  return segment;
+}
+
 function resolvePath(value) {
   return path.resolve(root, String(value));
 }
@@ -372,5 +526,8 @@ Options:
   --raw-root DIR         Local run artifact root
   --results-root DIR     Published result root
   --env KEY=VALUE        Additional runner environment; repeatable
+  --intervention FILE    Run paired baseline/treatment with a v1 intervention
+  --cohort FILE          Frozen cohort contract required for a full run
+  --pilot                Run with an auto-frozen reduced pilot contract
   --dry-run              Resolve a run without executing it`);
 }

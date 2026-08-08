@@ -40,21 +40,24 @@ const prompt = fs
 assert(prompt, "task prompt is empty");
 
 const agents = parseGenericAgents(process.env.COMMAND_RUN_AGENT_AGENTS);
-const model = process.env.COMMAND_RUN_AGENT_CODEX_MODEL || "gpt-5.6-sol";
+const model =
+  process.env.TURA_BENCHMARK_MODEL ||
+  process.env.COMMAND_RUN_AGENT_CODEX_MODEL ||
+  "gpt-5.6-sol";
 const turaModel = process.env.COMMAND_RUN_AGENT_TURA_MODEL || `openai/${model}`;
 const reasoning = process.env.COMMAND_RUN_AGENT_REASONING_EFFORT || "high";
 const serviceTier = process.env.COMMAND_RUN_AGENT_SERVICE_TIER || "default";
+const modelConfiguration = process.env.TURA_BENCHMARK_MODEL_CONFIGURATION
+  ? JSON.parse(process.env.TURA_BENCHMARK_MODEL_CONFIGURATION)
+  : null;
 const timeoutMs = Number(
   process.env.COMMAND_RUN_AGENT_TIMEOUT_MS || 2 * 60 * 60_000,
 );
 const stamp = process.env.COMMAND_RUN_DESIGN_STAMP || timestamp();
 const runSuffix = optionalSuffix(process.env.COMMAND_RUN_DESIGN_RUN_SUFFIX);
-const batchRoot = path.join(
-  benchmarkRawRoot(),
-  "design",
-  safeSegment(taskId),
-  stamp,
-);
+const batchRoot = process.env.TURA_BENCHMARK_RUN_DIRECTORY
+  ? path.resolve(process.env.TURA_BENCHMARK_RUN_DIRECTORY)
+  : path.join(benchmarkRawRoot(), "design", safeSegment(taskId), stamp);
 const manifestName = runSuffix
   ? `batch-manifest${runSuffix}.json`
   : "batch-manifest.json";
@@ -72,6 +75,7 @@ writeJson(path.join(batchRoot, manifestName), {
   turaModel,
   reasoning,
   serviceTier,
+  modelConfiguration,
   startedAt,
   batchRoot,
 });
@@ -106,7 +110,9 @@ console.log(
 process.exitCode = summary.ok ? 0 : 1;
 
 async function runAgent(agentId) {
-  const runRoot = path.join(batchRoot, safeSegment(`${agentId}${runSuffix}`));
+  const runRoot = process.env.TURA_BENCHMARK_RUN_DIRECTORY
+    ? batchRoot
+    : path.join(batchRoot, safeSegment(`${agentId}${runSuffix}`));
   const workspace = path.join(runRoot, "workspace");
   const agentDir = path.join(runRoot, "metadata");
   const turaHome = path.join(runRoot, "home", "tura");
@@ -189,6 +195,7 @@ async function runAgent(agentId) {
       rounds_directory: result.rounds_directory,
       rounds_jsonl_path: result.rounds_jsonl_path,
       round_contract_validation: result.round_contract_validation,
+      model_configuration: result.model_configuration,
       events: result.events || {},
       patch: artifactSummary(workspace),
       home:
@@ -219,6 +226,7 @@ async function runAgent(agentId) {
       elapsed_ms: Date.now() - started,
       exit_code: null,
       error: String(error?.stack || error),
+      model_configuration: modelConfiguration,
       usage: {},
       events: {},
       patch: artifactSummary(workspace),
