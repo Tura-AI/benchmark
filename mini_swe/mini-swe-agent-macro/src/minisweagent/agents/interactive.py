@@ -13,6 +13,7 @@ from typing import Literal, NoReturn
 from rich.console import Console
 from rich.rule import Rule
 
+from minisweagent import AGENT_DISPLAY_NAME
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.utils.prompt_user import _multiline_prompt, prompt_session
 from minisweagent.exceptions import LimitsExceeded, Submitted, TimeExceeded, UserInterruption
@@ -46,7 +47,8 @@ class InteractiveAgent(DefaultAgent):
             role, content = msg.get("role") or msg.get("type", "unknown"), get_content_string(msg)
             if role == "assistant":
                 console.print(
-                    f"\n[red][bold]mini-swe-agent[/bold] (step [bold]{self.n_calls}[/bold], [bold]${self.cost:.2f}[/bold]):[/red]\n",
+                    f"\n[red][bold]{AGENT_DISPLAY_NAME}[/bold] "
+                    f"(step [bold]{self.n_calls}[/bold], [bold]${self.cost:.2f}[/bold]):[/red]\n",
                     end="",
                     highlight=False,
                 )

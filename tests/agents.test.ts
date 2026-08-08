@@ -145,6 +145,7 @@ test("mini profiles resolve their renamed local projects", async () => {
   assert.ok(
     plain.cliArgs?.includes("model.model_kwargs.reasoning_effort=high"),
   );
+  assert.equal(macro.agentName, "Mini SWE Agent (tura_runtime)");
   assert.equal(macro.cliLaunchCommandName, "uv");
   assert.ok(
     macro.cliArgs?.includes(`${repoRoot}/mini_swe/mini-swe-agent-macro`),

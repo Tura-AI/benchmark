@@ -9,6 +9,7 @@ This file provides:
 """
 
 __version__ = "2.4.6+macro"
+AGENT_DISPLAY_NAME = "Mini SWE Agent (tura_runtime)"
 
 import os
 from pathlib import Path
@@ -29,7 +30,8 @@ global_config_file = Path(global_config_dir) / ".env"
 
 if not os.getenv("MSWEA_SILENT_STARTUP"):
     Console().print(
-        f"This is [bold green]mini-swe-agent[/bold green] version [bold green]{__version__}[/bold green].\n"
+        f"This is [bold green]{AGENT_DISPLAY_NAME}[/bold green] version "
+        f"[bold green]{__version__}[/bold green].\n"
         f"Check the [bold red]v2 migration guide[/] at [bold red]https://klieret.short.gy/mini-v2-migration[/]\n"
         f"Loading global config from [bold green]'{global_config_file}'[/bold green]",
     )
@@ -82,6 +84,7 @@ class Agent(Protocol):
 
 __all__ = [
     "Agent",
+    "AGENT_DISPLAY_NAME",
     "Model",
     "Environment",
     "package_dir",
