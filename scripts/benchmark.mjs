@@ -14,6 +14,7 @@ import {
   runIsolatedBatch,
   writeBatchSummary,
 } from "../lib/batch_execution.mjs";
+import { inspectBenchmarkAttempt } from "../lib/benchmark_result.mjs";
 import {
   allocateRunDirectory,
   finalizeRunDirectory,
@@ -131,8 +132,26 @@ async function execute(mode) {
 }
 
 async function runJobs(jobs, concurrency) {
+  const rawRoot =
+    jobs[0]?.env.TURA_BENCHMARK_RAW_ROOT || resolvePath(config.rawRoot);
+  const batchId =
+    args["run-id"] ||
+    process.env.TURA_BENCHMARK_RUN_ID ||
+    `batch-${Date.now()}`;
+  const summaryPath = path.join(
+    rawRoot,
+    "batch-summaries",
+    `${safeSegment(batchId)}.json`,
+  );
+  let summaryWrite = Promise.resolve();
   const summary = await runIsolatedBatch(jobs, runJob, {
     concurrency,
+    onSummary(current) {
+      summaryWrite = summaryWrite.then(() =>
+        writeBatchSummary(summaryPath, current),
+      );
+      return summaryWrite;
+    },
     onAttemptComplete(attempt) {
       const label = `${attempt.job.task}/${attempt.job.agent}/${attempt.job.replicate}`;
       console.log(
@@ -140,16 +159,7 @@ async function runJobs(jobs, concurrency) {
       );
     },
   });
-  const rawRoot =
-    jobs[0]?.env.TURA_BENCHMARK_RAW_ROOT || resolvePath(config.rawRoot);
-  const batchId =
-    args["run-id"] ||
-    process.env.TURA_BENCHMARK_RUN_ID ||
-    `batch-${Date.now()}`;
-  const summaryPath = writeBatchSummary(
-    path.join(rawRoot, "batch-summaries", `${safeSegment(batchId)}.json`),
-    summary,
-  );
+  await summaryWrite;
   print({ ...summary, summaryPath });
   process.exitCode = batchExitCode(summary, {
     failOnAttemptFailure: config.batchPolicy?.failOnAttemptFailure !== false,
@@ -204,33 +214,68 @@ function runJob(job) {
     child.once("exit", (code, signal) => {
       if (settled) return;
       settled = true;
-      if (code === 0) {
+      const completion = inspectBenchmarkAttempt(allocation.runDirectory, {
+        exitCode: code,
+        signal,
+      });
+      if (completion.status === "pass") {
         const contract = finalizeRunDirectory(
           allocation.runDirectory,
           "completed",
+          { outcome: "pass" },
         );
         resolve({
           artifact_path: contract.artifact_path,
           attempt: allocation.attempt,
+          benchmark_status: completion.result.status,
+          score: completion.result.score,
+          result_path: completion.resultPath,
         });
+      } else if (completion.failureClass === "evaluation") {
+        const contract = finalizeRunDirectory(
+          allocation.runDirectory,
+          "completed",
+          {
+            outcome: "fail",
+            failure_class: "evaluation",
+            exit_code: code,
+            signal,
+          },
+        );
+        reject(
+          new AttemptFailure(completion.message, {
+            failureClass: "evaluation",
+            artifacts: {
+              raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
+              run_id: isolatedJob.runId,
+              run_directory: contract.artifact_path,
+              result_path: completion.resultPath,
+            },
+            result: {
+              artifact_path: contract.artifact_path,
+              attempt: allocation.attempt,
+              benchmark_status: completion.result.status,
+              score: completion.result.score,
+              result_path: completion.resultPath,
+            },
+          }),
+        );
       } else {
         finalizeRunDirectory(allocation.runDirectory, "quarantined", {
-          failure_class: "execution",
+          failure_class: completion.failureClass,
           exit_code: code,
           signal,
         });
         reject(
-          new AttemptFailure(
-            `${isolatedJob.task}/${isolatedJob.agent} exited with ${code ?? signal ?? "unknown status"}; artifacts quarantined at ${allocation.runDirectory}`,
-            {
-              failureClass: "execution",
-              artifacts: {
-                raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
-                run_id: isolatedJob.runId,
-                run_directory: allocation.runDirectory,
-              },
+          new AttemptFailure(completion.message, {
+            failureClass: completion.failureClass,
+            artifacts: {
+              raw_root: isolatedJob.env.TURA_BENCHMARK_RAW_ROOT,
+              run_id: isolatedJob.runId,
+              run_directory: allocation.runDirectory,
+              result_path: completion.resultPath,
             },
-          ),
+          }),
         );
       }
     });

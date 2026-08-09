@@ -16,16 +16,24 @@ const TASK_TYPES = new Set<BenchmarkTaskType>([
   "build",
   "design",
   "debug",
+  "mcp",
   "rewrite",
 ]);
+const TASK_DIRECTORIES: ReadonlyArray<{
+  directory: string;
+  type: BenchmarkTaskType;
+}> = [
+  ...Array.from(TASK_TYPES, (type) => ({ directory: type, type })),
+  { directory: "mcp_workflow", type: "mcp" },
+];
 const TASKS_DIRECTORY = "tasks";
 
 export async function discoverTaskDeclarations(
   root: string,
 ): Promise<BenchmarkTaskDeclaration[]> {
   const declarations: BenchmarkTaskDeclaration[] = [];
-  for (const type of TASK_TYPES) {
-    const typeDirectory = path.join(root, TASKS_DIRECTORY, type);
+  for (const source of TASK_DIRECTORIES) {
+    const typeDirectory = path.join(root, TASKS_DIRECTORY, source.directory);
     if (!(await isDirectory(typeDirectory))) continue;
     for (const entry of await readdir(typeDirectory, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
@@ -35,7 +43,12 @@ export async function discoverTaskDeclarations(
         "benchmark.task.json",
       );
       if (!(await isFile(declarationPath))) continue;
-      declarations.push(await readTaskDeclaration(declarationPath));
+      const declaration = await readTaskDeclaration(declarationPath);
+      if (declaration.type !== source.type)
+        throw new Error(
+          `task directory ${source.directory} requires type ${source.type}: ${declaration.id}`,
+        );
+      declarations.push(declaration);
     }
   }
   return declarations.sort((left, right) => left.id.localeCompare(right.id));

@@ -79,6 +79,9 @@ def validate_normalized(root: Path, errors: list[str]) -> dict[str, int]:
     patterns = {
         "task.schema.json": "tasks/*/*/task.json",
         "task-harness.schema.json": "tasks/*/*/harness.json",
+        "mcp-agent-adapters.schema.json": "tasks/mcp*/*/adapters/manifest.json",
+        "mcp-workflow-scenario.schema.json": "tasks/mcp_workflow/*/scenario.json",
+        "mcp-workflow-batch.schema.json": "results/mcp/report-mcp-workflow-*/manifest.json",
         "run-summary.schema.json": "results/*/*/*/*/*/metadata/summary.json",
         "cli-metadata.schema.json": "results/*/*/*/*/*/metadata/contracts/cli-metadata.json",
         "harness-report.schema.json": "results/*/*/*/*/*/metadata/contracts/harness-report.json",
@@ -166,6 +169,7 @@ def validate_website(root: Path, errors: list[str], limit: int) -> dict[str, int
 
 
 def validate_raw(root: Path, errors: list[str]) -> dict[str, int]:
+    batch_summaries = sorted((root / "raw" / "batch-summaries").glob("*.json"))
     summaries = sorted((root / "raw").glob("**/agent-summary.json"))
     stdout = sorted((root / "raw").glob("**/stdout.jsonl")) + sorted((root / "raw").glob("**/agent.stdout.jsonl"))
     provider = sorted((root / "raw").glob("**/provider-calls-full.jsonl"))
@@ -175,7 +179,14 @@ def validate_raw(root: Path, errors: list[str]) -> dict[str, int]:
         validate_jsonl(path, "raw-agent-event.schema.json", errors)
     for path in provider:
         validate_jsonl(path, "provider-call.schema.json", errors)
-    return {"raw summaries": len(summaries), "raw stdout JSONL": len(stdout), "raw provider JSONL": len(provider)}
+    for path in batch_summaries:
+        validate_json(path, "batch-summary.schema.json", errors)
+    return {
+        "batch-summary.schema.json": len(batch_summaries),
+        "raw summaries": len(summaries),
+        "raw stdout JSONL": len(stdout),
+        "raw provider JSONL": len(provider),
+    }
 
 
 def validate_intake(root: Path, errors: list[str]) -> dict[str, int]:

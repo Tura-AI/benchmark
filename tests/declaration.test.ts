@@ -18,22 +18,53 @@ const repoRoot = path.resolve(benchmarkRoot, "..");
 test("discovers the current benchmark task declarations", async () => {
   const declarations = await discoverTaskDeclarations(benchmarkRoot);
 
-  assert.equal(declarations.length, 6);
+  assert.equal(declarations.length, 36);
   assert.deepEqual(countByType(declarations), {
     build: 0,
     design: 0,
     debug: 1,
+    mcp: 30,
     rewrite: 5,
   });
   assert.deepEqual(
     declarations.map((declaration) => declaration.id),
     [
       "deep-swe-v1.1",
+      "mcp-async-worker-pool",
+      "mcp-atomic-json-store",
+      "mcp-checkpoint-pipeline",
+      "mcp-circuit-breaker",
+      "mcp-config-precedence",
+      "mcp-cron-schedule-engine",
+      "mcp-dependency-graph-planner",
+      "mcp-hash-chained-audit-log",
+      "mcp-json-diff-patch",
+      "mcp-ordered-batch-executor",
+      "mcp-plugin-dependency-loader",
+      "mcp-priority-event-bus",
+      "mcp-recursive-secret-redaction",
+      "mcp-retry-policy",
+      "mcp-safe-query-language",
+      "mcp-schema-migration-registry",
+      "mcp-signed-cursor-pagination",
+      "mcp-targeted-feature-flags",
+      "mcp-token-bucket-limiter",
+      "mcp-ttl-lru-cache",
       "prompt-gallery-tanstack-fullstack-rebuild",
       "source-port-python-default-eza",
       "source-port-python-default-nushell",
       "source-port-python-default-xsv",
       "source-port-python-default-zip-password-finder",
+      "workflow-campaign-image-email",
+      "workflow-contract-signature",
+      "workflow-customer-onboarding",
+      "workflow-ecommerce-ad-package",
+      "workflow-event-promo-kit",
+      "workflow-incident-response",
+      "workflow-invoice-email-followup",
+      "workflow-product-demo-video",
+      "workflow-recruiting-interview-pack",
+      "workflow-social-thumbnail-approval",
     ],
   );
 });
@@ -77,6 +108,6 @@ function countByType(
       counts[declaration.type] += 1;
       return counts;
     },
-    { build: 0, design: 0, debug: 0, rewrite: 0 },
+    { build: 0, design: 0, debug: 0, mcp: 0, rewrite: 0 },
   );
 }

@@ -10,7 +10,8 @@ export const HARNESS_REPORT_SCHEMA = "tura.benchmark.harness-report.v1";
 export const HARNESS_REPORT_SCHEMA_V2 = "tura.benchmark.harness-report.v2";
 export const TASK_DECLARATION_SCHEMA = "tura.benchmark.task-declaration.v1";
 
-export type BenchmarkTaskType = "build" | "design" | "debug" | "rewrite";
+export type BenchmarkTaskType =
+  "build" | "design" | "debug" | "mcp" | "rewrite";
 
 export interface TokenUsage {
   inputTokens: number;

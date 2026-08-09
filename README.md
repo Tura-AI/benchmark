@@ -69,6 +69,29 @@ node scripts/benchmark.mjs run \
 Use `node scripts/benchmark.mjs list` for available task and agent IDs, and
 `node scripts/benchmark.mjs help` for all options.
 
+### Run the MCP benchmarks
+
+The repository includes two deterministic MCP suites: 20 repository-style
+tasks under `tasks/mcp/` and 10 stateful, multi-service workflows under
+`tasks/mcp_workflow/`. Each task provides a real MCP JSON-RPC stdio server,
+task-local state, Codex MCP configuration, a Tura command adapter, and
+script-only scoring. No LLM judge or human grading is used.
+
+List or plan the MCP tasks through the normal benchmark CLI:
+
+```sh
+node scripts/benchmark.mjs list
+node scripts/benchmark.mjs plan \
+  --task workflow-campaign-image-email \
+  --agents balanced,direct,codex-cli \
+  --replicates 3 \
+  --concurrency 9
+```
+
+See [MCP benchmark tasks and workflow harness](doc/mcp-benchmarks.md) for the
+task catalog, adapter formats, execution commands, scoring model, raw artifact
+layout, and deterministic results publication.
+
 ### Re-run the DeepSWE v1.1 subset
 
 Create the default cost-free plan:
@@ -115,6 +138,7 @@ quota.
 - [Token-saving plugins article](doc/blog-token-saving-plugins.md)
 - [Ponytail/RTK matched-run data](blog_data/token-saving-plugin-eza/README.md)
 - [Debug workspace recovery](doc/debug-workspace-recovery.md)
+- [MCP benchmark tasks and workflow harness](doc/mcp-benchmarks.md)
 
 Published, reproducible benchmark artifacts live under `results/`; focused
 public datasets used by articles live under `blog_data/`. Local logs, caches,

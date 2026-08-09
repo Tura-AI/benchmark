@@ -46,6 +46,41 @@ test("non-fatal execution and validation failures do not abort the matrix", asyn
   assert.equal(batchExitCode(summary, { failOnAttemptFailure: false }), 0);
 });
 
+test("progress summaries replace stale final state while a retry is running", async () => {
+  const summaries = [];
+  const summary = await runIsolatedBatch(
+    ["retry"],
+    async () => ({ artifact: "attempt-02" }),
+    {
+      onSummary(current) {
+        summaries.push(structuredClone(current));
+      },
+    },
+  );
+
+  assert.equal(summaries[0].status, "running");
+  assert.equal(summaries[0].completed, 0);
+  assert.equal(summaries[0].finished_at, null);
+  assert.equal(summaries.at(-1).status, "passed");
+  assert.equal(summaries.at(-1).completed, 1);
+  assert.ok(summaries.at(-1).finished_at);
+  assert.equal(summary.status, "passed");
+});
+
+test("evaluation failures retain their structured benchmark result", async () => {
+  const summary = await runIsolatedBatch(["answer"], async () => {
+    throw new AttemptFailure("score 3/4", {
+      failureClass: "evaluation",
+      result: { benchmark_status: "fail", score: { label: "3/4" } },
+    });
+  });
+
+  assert.equal(summary.status, "completed-with-failures");
+  assert.equal(summary.failures_by_stage.evaluation, 1);
+  assert.equal(summary.attempts[0].result.benchmark_status, "fail");
+  assert.equal(summary.attempts[0].result.score.label, "3/4");
+});
+
 test("fatal preflight stops the batch before any attempt starts", async () => {
   let executions = 0;
   const summary = await runIsolatedBatch(

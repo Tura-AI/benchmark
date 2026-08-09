@@ -15,6 +15,7 @@ import {
   parseGenericAgents,
   prepareCodexCliHomeForAgent,
   refreshContextAndCallArchive,
+  resolveTuraProjectRoot,
   runCodexCliSetupCommands,
   runGenericAgentCli,
   runLive,
@@ -58,6 +59,34 @@ test("codex-cli executable resolver honors an explicit spawnable binary", () => 
     if (previous === undefined)
       delete process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE;
     else process.env.COMMAND_RUN_AGENT_CODEX_CLI_EXE = previous;
+  }
+});
+
+test("Tura project resolution honors explicit roots and discovers a sibling checkout", () => {
+  const parent = tempAgentDir();
+  const benchmarkRoot = path.join(parent, "benchmark");
+  const siblingTuraRoot = path.join(parent, "tura");
+  const executable = path.join(
+    siblingTuraRoot,
+    "target",
+    "debug",
+    process.platform === "win32" ? "tura_exec.exe" : "tura_exec",
+  );
+  fs.mkdirSync(benchmarkRoot, { recursive: true });
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.writeFileSync(executable, "");
+  const previous = process.env.TURA_PROJECT_ROOT;
+  delete process.env.TURA_PROJECT_ROOT;
+  try {
+    assert.equal(resolveTuraProjectRoot(benchmarkRoot), siblingTuraRoot);
+    const explicit = path.join(parent, "explicit-tura");
+    assert.equal(
+      resolveTuraProjectRoot(benchmarkRoot, explicit),
+      path.resolve(explicit),
+    );
+  } finally {
+    if (previous === undefined) delete process.env.TURA_PROJECT_ROOT;
+    else process.env.TURA_PROJECT_ROOT = previous;
   }
 });
 

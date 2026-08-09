@@ -1,0 +1,29 @@
+Please use the FileSystem MCP tools to complete this repository-level engineering task.
+
+# Add resumable checkpointed pipelines
+
+## Context
+
+The working directory contains the `relaykit` Python package. Implement named multi-step pipelines with atomic checkpoints, resume validation, and rollback hooks.
+The current module is an intentionally incomplete starting point. Implement a
+production-quality solution using only the Python standard library.
+
+## Required behavior
+
+- Register uniquely named steps with run(context) and optional rollback(context) callables, then execute them in order.
+- After every successful step, atomically persist the completed names, JSON-compatible context, and a deterministic pipeline signature derived from the ordered step names.
+- resume=True skips completed steps only when the signature matches; malformed or incompatible checkpoints raise PipelineError.
+- On failure, invoke rollback hooks for steps completed during the current invocation in reverse order and retain a resumable checkpoint.
+- Preserve this public call shape: `CheckpointPipeline(checkpoint_path); add_step(name, run, rollback=None); run(context=None, *, resume=False) -> dict`.
+
+## Public API and compatibility
+
+- Implement the feature in `relaykit/pipeline.py`.
+- Export `CheckpointPipeline`, `PipelineError` from `relaykit/__init__.py` so callers can import them directly from `relaykit`.
+- Keep the package dependency-free and compatible with Python 3.11+.
+- Preserve existing public behavior outside this feature.
+- Do not add task-specific hard-coded outputs; the implementation must work for arbitrary valid inputs.
+
+You may reorganize internal code when useful. The result will be evaluated by
+behavioral tests, including edge cases and repeated calls, rather than by an
+expected patch or exact implementation structure.
