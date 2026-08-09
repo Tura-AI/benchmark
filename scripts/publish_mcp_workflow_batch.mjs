@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -20,6 +21,15 @@ if (!args.rawRoot || !args.output) {
 
 const rawRoot = resolveInsideRepo(args.rawRoot, "raw root");
 const outputPath = resolveInsideRepo(args.output, "output");
+const publishRoot = path.dirname(outputPath);
+const publishRelative = repoRelative(publishRoot);
+if (!publishRelative.startsWith("results/mcp/")) {
+  throw new Error("MCP workflow publication must stay below results/mcp/");
+}
+const temporaryRoot = path.join(
+  path.dirname(publishRoot),
+  `.${path.basename(publishRoot)}.tmp-${process.pid}`,
+);
 const taskReportPaths = findFiles(
   path.join(rawRoot, "runs"),
   "task-report.json",
@@ -92,6 +102,8 @@ const runRecords = taskReportPaths.map((taskReportPath) => {
   );
   const startedAt = taskReport.metadata?.startedAt;
   const endedAt = taskReport.metadata?.endedAt;
+  const publishedRunRoot = path.join(publishRoot, "runs", taskReport.runId);
+  const publishedRunPath = repoRelative(publishedRunRoot);
 
   return {
     run: {
@@ -116,8 +128,24 @@ const runRecords = taskReportPaths.map((taskReportPath) => {
       mcpToolCalls: integer(taskReport.mcp?.toolCallCount),
       durationMs: durationMs(startedAt, endedAt),
       costUsd: roundUsd(estimate.costUsd),
-      artifactPath: repoRelative(attemptDir),
+      artifactPath: publishedRunPath,
+      artifacts: {
+        task: `${publishedRunPath}/task.json`,
+        workspace: `${publishedRunPath}/workspace`,
+        rounds: `${publishedRunPath}/agent/rounds`,
+        agentRounds: `${publishedRunPath}/agent/agent-rounds.jsonl`,
+        stdout: `${publishedRunPath}/agent/stdout.jsonl`,
+        providerCalls: `${publishedRunPath}/agent/context-and-calls/provider-calls-full.jsonl`,
+        contracts: `${publishedRunPath}/metadata/contracts`,
+        mcpTrace: `${publishedRunPath}/mcp/trace.jsonl`,
+        mcpState: `${publishedRunPath}/mcp/state.json`,
+        harness: `${publishedRunPath}/harness`,
+        gitDiff: `${publishedRunPath}/git-diff.patch`,
+        result: `${publishedRunPath}/result.json`,
+      },
     },
+    attemptDir,
+    taskReport,
     harness,
     model,
     reasoning: uniqueRequired(
@@ -188,7 +216,7 @@ const startedAt = minTimestamp(runRecords.map((record) => record.startedAt));
 const completedAt = maxTimestamp(runRecords.map((record) => record.endedAt));
 const manifest = {
   schema: "tura.benchmark.mcp-workflow-batch.v1",
-  schemaVersion: "1.0.0",
+  schemaVersion: "1.1.0",
   id: path.basename(path.dirname(outputPath)),
   category: "mcp",
   benchmark: "tura/mcp-workflow",
@@ -198,6 +226,7 @@ const manifest = {
   generatedAt: completedAt,
   source: {
     rawRoot: repoRelative(rawRoot),
+    publishedRoot: publishRelative,
     batchSummaries: batchSummaryPaths.map(repoRelative).sort(),
     cohorts: cohortPaths.map(repoRelative).sort(),
     startedAt,
@@ -282,7 +311,9 @@ const manifest = {
   notes: [
     "Token totals are reconstructed from rounds[].usage because the legacy task-report usage aggregate records cacheInputTokens as zero even when round-level cache usage is present.",
     "cacheInputTokens is a subset of inputTokens, and reasoningTokens is a subset of outputTokens; neither subset is added again to totalTokens.",
-    "Every run links to its immutable raw attempt directory; raw artifacts were neither moved nor rewritten during publication.",
+    "Every run is self-contained below results/mcp with normalized rounds, provider calls, MCP trace and state, harness evidence, and its final workspace.",
+    "Published workspaces exclude local .git metadata and .tura runtime databases; normalized rounds and provider artifacts retain the auditable model and command history.",
+    "Raw artifacts remain unchanged under raw/ after publication.",
   ],
 };
 
@@ -292,11 +323,257 @@ for (const failure of manifest.failures) {
   }
 }
 
-fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+replaceDirectory(temporaryRoot);
+for (const record of runRecords) {
+  publishRunArtifacts(
+    record,
+    path.join(temporaryRoot, "runs", record.run.runId),
+  );
+}
+fs.writeFileSync(
+  path.join(temporaryRoot, path.basename(outputPath)),
+  `${JSON.stringify(manifest, null, 2)}\n`,
+  "utf8",
+);
+replacePublishedRoot(temporaryRoot, publishRoot);
 process.stdout.write(
   `${repoRelative(outputPath)}: ${runs.length} runs, ${passed} passed, ${failed} failed, ${usage.totalTokens} tokens, $${costUsd.toFixed(6)}\n`,
 );
+
+function publishRunArtifacts(record, targetRoot) {
+  const sourceRoot = record.attemptDir;
+  const taskSource = path.join(
+    repoRoot,
+    "tasks",
+    "mcp_workflow",
+    record.run.taskId,
+    "task.json",
+  );
+  copyRequiredFile(taskSource, path.join(targetRoot, "task.json"));
+  copyWorkspace(
+    path.join(sourceRoot, "workspace"),
+    path.join(targetRoot, "workspace"),
+  );
+
+  const sourceRoundsRoot = path.join(sourceRoot, "agent", "rounds");
+  const targetRoundsRoot = path.join(targetRoot, "agent", "rounds");
+  const roundFiles = jsonFiles(sourceRoundsRoot).sort();
+  if (roundFiles.length !== record.run.rounds) {
+    throw new Error(
+      `${record.run.runId} reports ${record.run.rounds} rounds but publishes ${roundFiles.length}`,
+    );
+  }
+  const publishedRounds = roundFiles.map((source) => {
+    const fileName = path.basename(source);
+    const round = normalizePublishedRound(
+      readJson(source),
+      fileName,
+      sourceRoot,
+    );
+    writeJson(path.join(targetRoundsRoot, fileName), round);
+    return round;
+  });
+  writeJsonLines(
+    path.join(targetRoot, "agent", "agent-rounds.jsonl"),
+    publishedRounds,
+  );
+
+  copyPortableRequiredFile(
+    path.join(sourceRoot, "agent", "stdout.jsonl"),
+    path.join(targetRoot, "agent", "stdout.jsonl"),
+    sourceRoot,
+  );
+  copyPortableOptionalFile(
+    path.join(sourceRoot, "agent", "stderr.log"),
+    path.join(targetRoot, "agent", "stderr.log"),
+    sourceRoot,
+  );
+  copyPortableRequiredFile(
+    path.join(
+      sourceRoot,
+      "agent",
+      "context-and-calls",
+      "provider-calls-full.jsonl",
+    ),
+    path.join(
+      targetRoot,
+      "agent",
+      "context-and-calls",
+      "provider-calls-full.jsonl",
+    ),
+    sourceRoot,
+  );
+
+  const contractsTarget = path.join(targetRoot, "metadata", "contracts");
+  for (const name of [
+    "cli-metadata.json",
+    "contract-manifest.json",
+    "harness-report.json",
+  ]) {
+    copyPortableRequiredFile(
+      path.join(sourceRoot, "metadata", "contracts", name),
+      path.join(contractsTarget, name),
+      sourceRoot,
+    );
+  }
+  const publishedTaskReport = {
+    ...record.taskReport,
+    startRepoSnapshot: {
+      ...record.taskReport.startRepoSnapshot,
+      repoRoot: "workspace",
+      snapshotPath: "workspace",
+    },
+    rounds: publishedRounds,
+  };
+  writeJson(
+    path.join(contractsTarget, "task-report.json"),
+    normalizePortableValue(publishedTaskReport, sourceRoot),
+  );
+
+  for (const name of ["stdout.log", "stderr.log"]) {
+    copyPortableOptionalFile(
+      path.join(sourceRoot, "harness", name),
+      path.join(targetRoot, "harness", name),
+      sourceRoot,
+    );
+  }
+  copyPortableRequiredFile(
+    path.join(sourceRoot, "mcp", "trace.jsonl"),
+    path.join(targetRoot, "mcp", "trace.jsonl"),
+    sourceRoot,
+  );
+  copyPortableRequiredFile(
+    path.join(sourceRoot, "mcp", "state.json"),
+    path.join(targetRoot, "mcp", "state.json"),
+    sourceRoot,
+  );
+  for (const name of ["git-diff.patch", "result.json", "run-directory.json"]) {
+    copyPortableRequiredFile(
+      path.join(sourceRoot, name),
+      path.join(targetRoot, name),
+      sourceRoot,
+    );
+  }
+}
+
+function normalizePublishedRound(round, fileName, sourceRoot) {
+  return normalizePortableValue(
+    {
+      ...round,
+      sources: {
+        stdoutPath: "agent/stdout.jsonl",
+        providerCallsPath: "agent/context-and-calls/provider-calls-full.jsonl",
+        codexRolloutPath: null,
+        providerLogPath: null,
+        summaryPath: null,
+      },
+      rawCallbackPath: `agent/rounds/${fileName}`,
+    },
+    sourceRoot,
+  );
+}
+
+function copyWorkspace(source, target) {
+  if (!fs.existsSync(source)) throw new Error(`Missing workspace: ${source}`);
+  fs.cpSync(source, target, {
+    recursive: true,
+    force: true,
+    filter(candidate) {
+      const relative = path.relative(source, candidate);
+      if (!relative) return true;
+      const first = relative.split(path.sep)[0];
+      return first !== ".git" && first !== ".tura";
+    },
+  });
+}
+
+function copyRequiredFile(source, target) {
+  if (!fs.existsSync(source)) throw new Error(`Missing artifact: ${source}`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.copyFileSync(source, target);
+}
+
+function copyPortableRequiredFile(source, target, sourceRoot) {
+  if (!fs.existsSync(source)) throw new Error(`Missing artifact: ${source}`);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const contents = fs.readFileSync(source, "utf8");
+  fs.writeFileSync(target, normalizePortableText(contents, sourceRoot), "utf8");
+}
+
+function copyPortableOptionalFile(source, target, sourceRoot) {
+  if (fs.existsSync(source)) {
+    copyPortableRequiredFile(source, target, sourceRoot);
+  }
+}
+
+function normalizePortableValue(value, sourceRoot) {
+  if (typeof value === "string") {
+    return normalizePortableText(value, sourceRoot);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizePortableValue(item, sourceRoot));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        normalizePortableValue(item, sourceRoot),
+      ]),
+    );
+  }
+  return value;
+}
+
+function normalizePortableText(value, sourceRoot) {
+  const replacements = [
+    [path.join(sourceRoot, "workspace"), "workspace"],
+    [sourceRoot, "."],
+    [repoRoot, "<benchmark-root>"],
+    [os.homedir(), "<user-home>"],
+  ];
+  let normalized = value;
+  for (const [localPath, portablePath] of replacements) {
+    const variants = [
+      localPath.replaceAll("\\", "\\\\"),
+      localPath,
+      localPath.replaceAll("\\", "/"),
+    ];
+    for (const variant of variants) {
+      normalized = normalized.replaceAll(variant, portablePath);
+    }
+  }
+  return normalized;
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+}
+
+function writeJsonLines(file, values) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(
+    file,
+    values.map((value) => JSON.stringify(value)).join("\n") + "\n",
+    "utf8",
+  );
+}
+
+function replaceDirectory(directory) {
+  if (fs.existsSync(directory)) fs.rmSync(directory, { recursive: true });
+  fs.mkdirSync(directory, { recursive: true });
+}
+
+function replacePublishedRoot(temporary, target) {
+  const expectedParent = path.resolve(repoRoot, "results", "mcp");
+  if (path.dirname(path.resolve(target)) !== expectedParent) {
+    throw new Error(
+      `Refusing to replace unexpected publication root: ${target}`,
+    );
+  }
+  if (fs.existsSync(target)) fs.rmSync(target, { recursive: true });
+  fs.renameSync(temporary, target);
+}
 
 function aggregate(id, selectedRuns) {
   const selectedUsage = sumUsage(selectedRuns.map((run) => run.usage));

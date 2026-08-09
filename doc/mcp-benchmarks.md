@@ -176,10 +176,34 @@ node scripts/publish_mcp_workflow_batch.mjs \
 
 The publisher reconstructs cache usage from per-round provider records,
 preserves reasoning tokens as an output subset, aggregates results by agent and
-task, records failed harness checks, estimates API-equivalent token cost, and
-links every run back to its immutable raw attempt directory. The output follows
-`schema/mcp-workflow-batch.schema.json` and is included in the repository-wide
-schema validation.
+task, records failed harness checks, and estimates API-equivalent token cost.
+It also creates a self-contained result tree for every run:
+
+```text
+results/mcp/report-mcp-workflow-<name>/runs/<run-id>/
+  task.json
+  workspace/
+  agent/rounds/*.json
+  agent/agent-rounds.jsonl
+  agent/context-and-calls/provider-calls-full.jsonl
+  metadata/contracts/
+  mcp/trace.jsonl
+  mcp/state.json
+  harness/
+  result.json
+```
+
+The round records preserve model input, model output, token usage, commands,
+tool calls, and source references. The MCP trace preserves the complete
+normalized JSON-RPC `initialize`, `tools/list`, and `tools/call` requests and
+responses. Published
+workspaces contain the task-visible repository state but exclude `.git`
+metadata and `.tura` runtime databases; the normalized agent records provide
+the execution history separately without local absolute paths. The ignored
+`raw/` source batch remains unchanged.
+
+The output follows `schema/mcp-workflow-batch.schema.json` and is included in
+the repository-wide schema validation.
 
 The published GPT-5.6 Sol Low batch contains 90 runs across the ten workflow
 tasks, three agents, and three replicates. Its manifest is available at
@@ -191,7 +215,8 @@ Run the focused MCP tests and the complete schema check before publication:
 
 ```sh
 node --test tests/mcp_tasks.test.mjs tests/mcp_workflow_tasks.test.mjs \
-  tests/mcp_stdio_broker.test.mjs tests/benchmark_result.test.mjs
+  tests/mcp_workflow_results.test.mjs tests/mcp_stdio_broker.test.mjs \
+  tests/benchmark_result.test.mjs
 npm run schema:check
 ```
 
