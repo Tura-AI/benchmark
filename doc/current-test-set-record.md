@@ -1,6 +1,6 @@
 # Current Benchmark Evidence Record
 
-Status: July 2026 four-configuration analysis
+Status: July 2026 four-configuration analysis, with August 2026 MCP workflow pilot
 
 ## 1. Analysis scope
 
@@ -15,7 +15,13 @@ configuration-level aggregates from cross-run regression analyses. Regression
 coefficients are descriptive associations unless a causal design is explicitly
 stated; no causal design is used here.
 
-Three analysis populations are used:
+A separate August 2026 pilot covers 90 stateful MCP workflow runs: ten tasks,
+three configurations, and three replicates, all using GPT-5.6 SOL at Low
+reasoning. The MCP pilot has a different task contract, reasoning setting, and
+configuration matrix. It is reported in Section 3.3 and is not added to the 280
+engineering runs, the 278-run relationship population, or any 25-task aggregate.
+
+Three analysis populations are used for the July engineering matrix:
 
 | Population                         | Tasks |       Runs | Use                                                                                                      |
 | ---------------------------------- | ----: | ---------: | -------------------------------------------------------------------------------------------------------- |
@@ -59,6 +65,16 @@ observations come from the 30-run
 and the 10-run
 [`report-20260714-codex-cli-0.144.1-gpt56-sol-high`](../results/rewrite/report-20260714-codex-cli-0.144.1-gpt56-sol-high/canonical-manifest.json).
 
+The MCP workflow observations come from the schema-validated
+[`report-mcp-workflow-gpt56-sol-low-20260809`](../results/mcp/report-mcp-workflow-gpt56-sol-low-20260809/manifest.json)
+manifest. It records 90 completed runs across Tura Balanced, Tura Direct, and
+Codex CLI, with three replicates per task and configuration. All runs use
+GPT-5.6 SOL Low and the default service tier. Each task uses a run-scoped mock
+service over real MCP JSON-RPC stdio; the mock server, scenario, verifier,
+normalized provider calls, MCP trace, final state, and retained workspace are
+published with the run. These are deterministic contract tests, not live
+vendor-account tests.
+
 Codex Medium used a locally instrumented build to retain command, timing, and
 provenance fields. Its per-round contracts do not disclose input/output token
 components; run-level aggregate usage is therefore the token source. Codex High
@@ -84,9 +100,9 @@ Tura uses fewer aggregate rounds and tokens in this test
 set, while Tura Balanced also records the highest pass totals. One possible
 explanation is a different allocation of work per round; another is that build,
 reasoning, and runtime behavior jointly change when an agent stops. The aggregate
-tables alone cannot separate these explanations. The following tables use all
-published observations and report the configurations as observed. They use all
-280 published runs, including the two Tura Balanced
+tables alone cannot separate these explanations. The following DeepSWE and
+rewrite tables use all 280 published engineering observations and report the
+configurations as observed, including the two Tura Balanced
 long-tail observations excluded from relationship models.
 
 ### 3.1 DeepSWE
@@ -129,6 +145,35 @@ the five task-level rates.
 The Codex micro-rate difference is 0.2 percentage points. Codex High records
 301 additional rounds and 14,369,066 additional observed tokens. This is a
 configuration contrast, not an effort-only estimate.
+
+### 3.3 MCP workflow pilot
+
+The MCP workflow pilot records 84 passes in 90 completed runs. Direct passes
+all 30 runs, Balanced passes 29, and Codex CLI passes 25. The cost column is an
+API-equivalent estimate from recorded request-level usage and published
+GPT-5.6 SOL rates; it is not a Codex subscription billing statement.
+
+| Configuration | Passes | Pass rate | Requests | Observed tokens | Estimated cost |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Tura Direct | 30/30 | 100.0% | 108 | 1,876,781 | $4.664 |
+| Tura Balanced | 29/30 | 96.7% | 124 | 2,374,741 | $5.149 |
+| Codex CLI | 25/30 | 83.3% | 233 | 5,475,298 | $6.810 |
+| **Total** | **84/90** | **93.3%** | **465** | **9,726,820** | **$16.623** |
+
+All six failures are evaluation failures rather than infrastructure-invalid
+runs. MCP initialization and schema discovery passed, while the required-tool,
+dependency-order, and final-state checks failed together. The failures are one
+Balanced run on `workflow-event-promo-kit`; one Codex run each on
+`workflow-invoice-email-followup` and `workflow-recruiting-interview-pack`; and
+all three Codex runs on `workflow-social-thumbnail-approval`. Direct has no
+failure in this pilot.
+
+Cache input is a subset of input, and reasoning tokens are a subset of output;
+neither subset is added twice to the total. Across the batch, 7,711,744 of
+9,619,166 input tokens are cached, an 80.2% cache hit rate under the manifest's
+definition. The matrix is too small and too narrow to identify a runtime
+mechanism or generalize to live services, other models, or other reasoning
+levels.
 
 ## 4. Cross-run relationship models
 
@@ -387,7 +432,40 @@ heterogeneous harness granularity, six missing rewrite source bodies, one
 missing usage record, and the Codex build/effort boundary. Model-based intervals
 reported here do not resolve those design limitations.
 
-## 7. Conclusion
+## 7. Audit and reproducibility boundaries
+
+[Benchmark issue #1](https://github.com/Tura-AI/benchmark/issues/1) identified
+five evidence boundaries that do not change the recorded outcomes but do limit
+the claims that can be made from them.
+
+- The managed DeepSWE checkout defaults to upstream commit
+  `a40d7298b18999c2d9b0ded7d6928e3ee26b5524`, but the July per-run grader
+  metadata names the `v1.1` tag and does not retain a resolved verifier commit
+  plus container-image digest. The task base and recorded verdict are
+  inspectable; bit-for-bit grader identity is not fully demonstrated by the
+  published contract.
+- DeepSWE verifier code and hidden fixtures remain upstream. The receipt bundle
+  permits inspection of the submitted patch and reward, but this repository
+  alone cannot re-derive every reward from public fixtures.
+- The published schemas do not apply one universal start-state manifest and
+  automated off-task-state diff across DeepSWE, rewrite, and MCP workflows.
+  Retained workspaces, patches, traces, and final state support manual audit but
+  are not a general scored guard against unrelated damage.
+- The rewrite suite does not publish one known-good target build passing every
+  final harness. Pinned source behavior and individual assertions support the
+  checks, but complete harness satisfiability has not been demonstrated by a
+  retained reference run.
+- Tura-AI develops Tura, owns this benchmark, defines the Tura configurations,
+  and publishes comparisons against Codex. This direct conflict of interest is
+  not removed by open artifacts; independent reproduction remains stronger
+  evidence than a project-run result.
+
+The MCP pilot improves local inspectability because its task scenarios, mock
+server, verifier, MCP traces, state, and normalized agent records are published
+together. It still tests deterministic mocks rather than live services, and its
+five-check score does not claim to detect every unrelated workspace mutation.
+
+## 8. Conclusion
 
 Tura records fewer rounds, batches more command records
 per round, and allocates a larger cost share to output. Three configurations show
@@ -413,3 +491,10 @@ code-volume causal effect.
 Batching, cached-context reuse, productive extra diagnosis, and broader
 implementation coverage are all compatible with parts of the evidence, but none
 is isolated by this design.
+
+The separate MCP workflow pilot records 84 passes in 90 completed runs: 30/30
+for Direct, 29/30 for Balanced, and 25/30 for Codex CLI. Direct also records the
+fewest requests, observed tokens, and estimated API-equivalent cost in this
+pilot. These are configuration-level observations on ten deterministic mock
+workflows at Low reasoning, not a live-service result or a component-level
+causal estimate.
