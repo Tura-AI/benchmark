@@ -18,6 +18,20 @@ const pluginAbRuns = readJson("blog_data/token-saving-plugin-eza/runs.json");
 const pluginAbSummary = readJson(
   "blog_data/token-saving-plugin-eza/summary.json",
 );
+const pluginAbMethodology = readJson(
+  "blog_data/token-saving-plugin-eza/methodology.json",
+);
+const pluginAbActivationAudit = fs
+  .readFileSync(
+    path.join(
+      root,
+      "blog_data/token-saving-plugin-eza/round-activation-audit.jsonl",
+    ),
+    "utf8",
+  )
+  .trim()
+  .split(/\r?\n/)
+  .map((line) => JSON.parse(line));
 const pluginBlog = fs.readFileSync(
   path.join(root, "doc/blog-token-saving-plugins.md"),
   "utf8",
@@ -279,13 +293,15 @@ test("the plugin analysis is Codex-only and the English blog cites one primary p
 });
 
 test("the public plugin A/B package is complete and matches the article", () => {
-  assert.equal(pluginAbRuns.runs.length, 6);
+  assert.equal(pluginAbRuns.runs.length, 8);
   assert.equal(
     pluginAbRuns.runs.filter((run) => run.arm !== "no-plugin").length,
-    4,
+    6,
   );
   assert.ok(pluginAbRuns.runs.every((run) => run.codex_exit_code === 0));
   assert.deepEqual(pluginAbRuns.runs.map((run) => run.run).sort(), [
+    "caveman-r1",
+    "caveman-r2",
     "no-plugin-high-r1",
     "no-plugin-high-r2",
     "ponytail-r2",
@@ -295,7 +311,42 @@ test("the public plugin A/B package is complete and matches the article", () => 
   ]);
   assert.equal(pluginAbSummary.aggregates.ponytail.n, 2);
   assert.equal(pluginAbSummary.aggregates.rtk.n, 2);
+  assert.equal(pluginAbSummary.aggregates.caveman.n, 2);
+  assert.equal(pluginAbSummary.aggregates.caveman.mean_passed, 45);
+  assert.equal(pluginAbSummary.aggregates.caveman.mean_rounds, 57);
+  assert.equal(pluginAbSummary.aggregates.caveman.mean_cost_usd, 5.076112);
+  assert.ok(
+    Math.abs(
+      pluginAbSummary.deltas_vs_no_plugin_high.caveman.cost_percent +
+        3.8969349554122554,
+    ) < 1e-9,
+  );
   assert.equal(pluginAbSummary.aggregates["no-plugin"].n, 2);
+  assert.equal(pluginAbMethodology.activation.audited_plugin_rounds, 407);
+  assert.equal(pluginAbActivationAudit.length, 407);
+  assert.equal(
+    pluginAbActivationAudit.filter((record) => record.arm === "caveman").length,
+    114,
+  );
+  assert.ok(
+    pluginAbActivationAudit.every(
+      (record) => record.exclusive_activation_verdict === true,
+    ),
+  );
+  for (const runId of ["caveman-r1", "caveman-r2"]) {
+    const run = pluginAbRuns.runs.find((record) => record.run === runId);
+    const rounds = pluginAbActivationAudit.filter(
+      (record) => record.run === runId,
+    );
+    const cumulative = rounds.at(-1).cumulative_usage;
+    assert.deepEqual(cumulative, {
+      input_tokens: run.usage.input_tokens,
+      cached_input_tokens: run.usage.cached_input_tokens,
+      output_tokens: run.usage.output_tokens,
+      reasoning_output_tokens: run.usage.reasoning_tokens,
+      total_tokens: run.usage.total_tokens,
+    });
+  }
   assert.ok(
     Math.abs(
       pluginAbSummary.deltas_vs_no_plugin_high.ponytail.cost_percent +
@@ -331,7 +382,7 @@ test("the public plugin A/B package is complete and matches the article", () => 
   assert.match(pluginBlog, /51\.69%/);
   assert.match(pluginBlog, /30\.78%/);
   assert.match(pluginBlog, /43\.25%/);
-  assert.match(pluginBlog, /293-round activation audit/);
+  assert.match(pluginBlog, /407-round activation audit/);
   assert.doesNotMatch(pluginBlog, /Ponytail, all runs/i);
   assert.doesNotMatch(pluginBlog, /426-round activation audit/);
 });

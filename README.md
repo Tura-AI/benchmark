@@ -136,7 +136,7 @@ quota.
 - [Benchmark methodology](doc/benchmark-methodology.md)
 - [Current test-set evidence record](doc/current-test-set-record.md)
 - [Token-saving plugins article](doc/blog-token-saving-plugins.md)
-- [Ponytail/RTK matched-run data](blog_data/token-saving-plugin-eza/README.md)
+- [Ponytail/RTK/Caveman matched-run data](blog_data/token-saving-plugin-eza/README.md)
 - [Debug workspace recovery](doc/debug-workspace-recovery.md)
 - [MCP benchmark tasks and workflow harness](doc/mcp-benchmarks.md)
 
@@ -153,7 +153,7 @@ Use `npm run check:debug-workspaces` as a publication gate.
 
 Install the pinned analysis dependencies, then regenerate the configured
 relationship data, five cross-run figures, two submitted-code figures, the
-140-run token-savings scenarios, and the matched Ponytail/RTK eza report:
+140-run token-savings scenarios, and the matched Ponytail/RTK/Caveman eza report:
 
 ```sh
 python -m pip install -r scripts/model_run_statistics_requirements.txt

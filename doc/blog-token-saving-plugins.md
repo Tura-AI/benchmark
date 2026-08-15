@@ -13,7 +13,8 @@ This was not a toy prompt asking for one function. The task was to **rewrite the
 Every published run used **GPT-5.6-sol, High reasoning, and Codex CLI 0.144.1**. The comparison contains exactly two runs per arm:
 
 - Ponytail r2/r3, both with **full hook + skill** activation;
-- RTK r2/r3, both with isolated RTK activation; and
+- RTK r2/r3, both with isolated RTK activation;
+- Caveman r1/r2, with its 20-skill Codex package installed in separate isolated homes and its exact primary skill body loaded through global `AGENTS.md`; and
 - two previously published no-plugin runs with the same task, model, reasoning level, and CLI version.
 
 | Arm | n | Harness score | Total tokens | Modeled cost | Rounds | Duration |
@@ -21,10 +22,11 @@ Every published run used **GPT-5.6-sol, High reasoning, and Codex CLI 0.144.1**.
 | No plugin | 2 | 78.85% | 6.660M | $5.281946 | 62.5 | 895s |
 | Ponytail, full hook + skill | 2 | 80.77% | **-7.56%** | **-8.87%** | -9.60% | +13.51% |
 | RTK | 2 | 76.92% | **+13.20%** | **+7.18%** | **+44.00%** | **+40.69%** |
+| Caveman skill package | 2 | 86.54% | **-4.03%** | **-3.90%** | -8.80% | +2.29% |
 
-The complete public package is in the [matched plugin-run data directory](https://github.com/Tura-AI/benchmark/tree/main/blog_data/token-saving-plugin-eza). It contains sanitized per-run data, the computed summary, methodology, and a **293-round activation audit**. All six Codex processes exited 0 and produced complete usage and evaluator data. A run can still miss harness assertions; that is the score, not a crashed experiment.
+The complete public package is in the [matched plugin-run data directory](https://github.com/Tura-AI/benchmark/tree/main/blog_data/token-saving-plugin-eza). It contains sanitized per-run data, the computed summary, methodology, and a **407-round activation audit**. All eight Codex processes exited 0 and produced complete usage and evaluator data. A run can still miss harness assertions; that is the score, not a crashed experiment.
 
-Ponytail looks 8.87% cheaper. RTK looks 7.18% more expensive. If this were a plugin landing page, this is where somebody would choose the flattering row, enlarge the percentage, and quietly send the error bars on vacation.
+Ponytail looks 8.87% cheaper, RTK 7.18% more expensive, and Caveman 3.90% cheaper with a 7.69-point higher harness score. None of those two-run means is an effect estimate.
 
 ## The "saving" is smaller than ordinary run variance
 
@@ -35,14 +37,15 @@ The same agent, model, task, and configuration did not produce remotely stable b
 | No plugin | $4.139647 - $6.424245 | **43.25%** | 53.02% | 40.00% |
 | Ponytail | $3.569452 - $6.057281 | **51.69%** | 57.36% | 47.79% |
 | RTK | $4.789893 - $6.532388 | **30.78%** | 39.75% | 26.67% |
+| Caveman | $5.029889 - $5.122335 | **1.82%** | 2.92% | 17.54% |
 
 Here, "range / mean" is the gap between the two runs divided by their mean. It is not a confidence interval; with n=2, pretending to have one would be statistical cosplay.
 
 But the scale still matters. Ponytail's apparent **8.87%** cost saving sits inside a **51.69%** within-arm cost swing. RTK's apparent **7.18%** cost increase sits inside a **30.78%** swing. Even the no-plugin pair moves **43.25%** without any plugin to praise or blame.
 
-These data therefore do **not** identify a plugin effect. They show that natural trajectory variance is a much more plausible explanation for these small mean differences until a larger repeated experiment separates signal from noise. Declaring victory from two runs while ignoring a within-group swing four to six times larger is not benchmarking. It is numerology with a README.
+The Caveman pair happened to be much tighter than the earlier arms, but two observations do not establish a stable variance or causal effect. Its baseline is historical rather than a same-day randomized pair, and activation was deliberately forced while preserving the task prompt. These data therefore do **not** identify a plugin effect; a larger paired experiment is still needed.
 
-What the experiment does establish is simpler: a local compression claim does not reliably predict the complete-task bill. Ponytail's mean moved modestly down; RTK's moved up. Neither result resembles the giant percentage printed on the local optimization.
+What the experiment does establish is simpler: a local compression claim does not reliably predict the complete-task bill. Ponytail and Caveman moved modestly down; RTK moved up. None resembles the giant percentage printed on a local optimization.
 
 ## Here is the actual coding-agent bill
 
@@ -56,7 +59,9 @@ The broader repository dataset contains **140 Codex CLI Medium and High runs**: 
 
 The complete calculation is in the [plugin token-savings analysis directory](https://github.com/Tura-AI/benchmark/tree/main/assets/plugin-token-savings). Under the repository pricing model, uncached input costs $5/M, cached input $0.50/M, and output $30/M. Cached input is one tenth the price of new input.
 
-The four published plugin runs had the same shape: cached input was **96.74%** of Ponytail tokens and **97.27%** of RTK tokens. Apparently the denominator did not install the plugin.
+The six published plugin runs had the same shape: cached input was **96.74%** of Ponytail tokens, **97.27%** of RTK tokens, and **96.52%** of Caveman tokens.
+
+Caveman's current README distinguishes its output-style skill from its proxy. For a Codex ChatGPT login, the upstream proxy path is currently metering-only, so our arm measures the installed skill package and its behavioral guidance, not proxy input compression. That boundary matters when comparing these results with Caveman's separate proxy benchmark claims.
 
 A coding agent repeatedly carries prompt, history, commands, and command results into later rounds. Shortening one fragment can produce an impressive local percentage while barely touching the expensive complete trajectory.
 
@@ -90,7 +95,7 @@ Our repository separates three questions:
 
 | Evidence | Scope | What it can support |
 | -------- | ----- | ------------------- |
-| **Matched plugin runs** | 4 plugin runs + 2 same-configuration no-plugin runs on one Rust-to-Python repository rewrite | A small end-to-end observation. Mean differences are smaller than within-arm variation and cannot establish causality. |
+| **Matched plugin runs** | 6 plugin runs + 2 same-configuration no-plugin runs on one Rust-to-Python repository rewrite | A small end-to-end observation. Two-run arm means cannot establish causality; activation and proxy boundaries are reported separately. |
 | **Broad cost distribution** | 140 Codex Medium/High runs across the published benchmark | Where tokens and modeled cost sit in coding-agent trajectories. |
 | **Claim-rate scenarios** | Ponytail prompt/LOC and RTK command payloads mapped onto those 140 runs | Upper bounds and arithmetic counterexamples, not A/B outcomes. |
 

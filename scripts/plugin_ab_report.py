@@ -7,6 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config" / "analysis.json"
+ARM_ORDER = ["no-plugin", "ponytail", "rtk", "caveman"]
+PLUGIN_ARMS = ["ponytail", "rtk", "caveman"]
 
 
 def read_json(path: Path):
@@ -101,7 +103,7 @@ def build_readme(summary: dict) -> str:
         "# Token-saving plugin eza runs",
         "",
         "This directory is the public, credential-free evidence package for the "
-        "Ponytail/RTK comparison cited by the token-saving-plugins article.",
+        "Ponytail/RTK/Caveman comparison cited by the token-saving-plugins article.",
         "",
         "All formal runs used the `source-port-python-default-eza` task, "
         "`gpt-5.6-sol`, High reasoning, and Codex CLI 0.144.1. The task asks "
@@ -115,7 +117,7 @@ def build_readme(summary: dict) -> str:
         "| Arm | n | Harness score | Total tokens | Modeled cost | Rounds | Duration | Cached token share |",
         "| --- | -: | ------------: | -----------: | -----------: | -----: | -------: | -----------------: |",
     ]
-    for name in ["no-plugin", "ponytail", "rtk"]:
+    for name in ARM_ORDER:
         group = groups[name]
         lines.append(
             f"| {name} | {group['n']} | {group['mean_score'] * 100:.2f}% | "
@@ -130,7 +132,7 @@ def build_readme(summary: dict) -> str:
         "| Arm | Score | Total tokens | Modeled cost | Rounds | Duration |",
         "| --- | ----: | -----------: | -----------: | -----: | -------: |",
     ]
-    for name in ["ponytail", "rtk"]:
+    for name in PLUGIN_ARMS:
         change = deltas[name]
         lines.append(
             f"| {name} | {change['score_percentage_points']:+.2f}pp | "
@@ -148,7 +150,7 @@ def build_readme(summary: dict) -> str:
         "| Arm | Token range / mean | Cost range / mean | Round range / mean |",
         "| --- | -----------------: | ----------------: | -----------------: |",
     ]
-    for name in ["no-plugin", "ponytail", "rtk"]:
+    for name in ARM_ORDER:
         variation = summary["within_arm_variation"][name]
         lines.append(
             f"| {name} | {variation['total_tokens']['range_percent_of_mean']:.2f}% | "
@@ -160,14 +162,20 @@ def build_readme(summary: dict) -> str:
         "Both Ponytail runs use full hook-and-skill activation. The matched RTK "
         "runs use the same plugin-run indices, r2/r3. Ponytail r1 was excluded "
         "because it was skill-only; RTK r1 was excluded by the same replicate-index "
-        "rule rather than by its outcome. Within-arm variation is "
-        "larger than the reported mean cost differences versus baseline. The "
+        "rule rather than by its outcome. Both Caveman runs use 20 skills in separate "
+        "isolated Codex homes plus the exact upstream primary skill body in global "
+        "AGENTS.md, keeping the task prompt unchanged while guaranteeing activation. "
+        "Caveman's Codex ChatGPT-login proxy path is metering-only, so this arm tests "
+        "the skill package, not proxy input compression. The original Ponytail/RTK "
+        "mean cost differences remain smaller than their within-arm variation; "
+        "Caveman's two costs are closer together, but n=2 is still too small for "
+        "an effect estimate. The "
         "samples are small, so these are descriptive "
         "differences, not significance or general-performance claims.",
         "",
         "## Files",
         "",
-        "- `runs.json`: sanitized per-run observations for four plugin runs and two matched baselines.",
+        "- `runs.json`: sanitized per-run observations for six plugin runs and two matched baselines.",
         "- `summary.json`: deterministic group means and baseline deltas generated from `runs.json`.",
         "- `methodology.json`: versions, pricing, isolation conditions, activation caveats, and provenance.",
         "- `round-activation-audit.jsonl`: one activation verdict per internal plugin-run round.",
@@ -180,7 +188,7 @@ def build_readme(summary: dict) -> str:
         "",
         "The outer source-port suite records `ok: false` whenever any harness "
         "assertion fails. That is a score outcome, not a crashed agent run: all "
-        "six Codex processes exited 0 and produced complete usage and evaluator data.",
+        "eight Codex processes exited 0 and produced complete usage and evaluator data.",
         "",
     ]
     return "\n".join(lines)
@@ -202,6 +210,8 @@ def main() -> None:
         "ponytail-r3",
         "rtk-r2",
         "rtk-r3",
+        "caveman-r1",
+        "caveman-r2",
         "no-plugin-high-r1",
         "no-plugin-high-r2",
     }
@@ -210,11 +220,8 @@ def main() -> None:
     assert all(record["codex_exit_code"] == 0 for record in records)
 
     grouped = {
-        "ponytail": [record for record in records if record["arm"] == "ponytail"],
-        "rtk": [record for record in records if record["arm"] == "rtk"],
-        "no-plugin": [
-            record for record in records if record["arm"] == "no-plugin"
-        ],
+        name: [record for record in records if record["arm"] == name]
+        for name in ARM_ORDER
     }
     aggregates = {
         name: aggregate(group, prices) for name, group in grouped.items()
@@ -225,7 +232,7 @@ def main() -> None:
     baseline = aggregates["no-plugin"]
     deltas = {
         name: delta(aggregates[name], baseline)
-        for name in ["ponytail", "rtk"]
+        for name in PLUGIN_ARMS
     }
     summary = {
         "schema": "tura.token-saving-plugin-eza-summary.v1",
@@ -240,6 +247,7 @@ def main() -> None:
         "limitations": [
             "Each plugin arm and the matched baseline have n=2.",
             "Ponytail and RTK use matched replicate indices r2 and r3.",
+            "Caveman uses both formal runs, r1 and r2, with forced primary-skill activation and no proxy compression.",
             "Results are descriptive and task-specific, not statistical significance claims.",
         ],
     }
