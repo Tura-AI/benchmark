@@ -2,15 +2,17 @@
 
 ## 1. Purpose and scope
 
-This benchmark evaluates coding agents on three complementary forms of long-horizon work:
+This benchmark evaluates coding agents on five complementary forms of long-horizon work:
 
 1. **DeepSWE subset (20 tasks):** repository-level software-engineering tasks selected from DeepSWE v1.1, with balanced language coverage and difficulty stratification.
 2. **Rewrite subset (5 tasks):** four open-source command-line tools rewritten from Rust to Python, plus one single-page HTML reference rebuilt as a full-stack TanStack Start application.
 3. **Design subset (2 tasks):** open-ended visual and interactive HTML deliverables. These tasks are executed and archived, but are intentionally excluded from the automated scoring harness.
+4. **Repository-style MCP subset (20 tasks):** self-contained implementation tasks derived from a pinned MCPMark filesystem snapshot and exposed through real MCP JSON-RPC over stdio.
+5. **Stateful MCP workflow subset (10 tasks):** deterministic multi-service workflows that require schema discovery, dependency-safe tool calls, and verified final service state.
 
-The resulting suite contains **27 tasks in total**. Of these, **25 are harness-scored** and **2 are design-mode tasks without a harness**. The three subsets measure different capabilities and should be reported separately. A single aggregate score is not the primary result because binary repository repair, behavioral compatibility, full-stack reconstruction, and visual design are not commensurate measurements.
+The resulting inventory contains **57 tasks in total**. Of these, **55 have programmatic harnesses** and **2 are design-mode tasks without a harness**. The July engineering matrix covers the original 25 harness-scored tasks; the August MCP workflow pilot covers a separate 10-task matrix. Repository-style MCP tasks do not yet have a canonical result publication. These subsets measure different capabilities and must be reported separately. A single aggregate score is not the primary result because binary repository repair, behavioral compatibility, full-stack reconstruction, visual design, repository work through MCP, and cross-service state transitions are not commensurate measurements.
 
-This document describes the task-selection criteria, data normalization rules, evaluation boundaries, known anomalies, and limitations. The task inventory, executable contracts, selection logic, and published result artifacts are maintained in this repository; the [current test-set evidence record](current-test-set-record.md) applies the methodology to the July 2026 artifacts.
+This document describes the task-selection criteria, data normalization rules, evaluation boundaries, known anomalies, and limitations. The task inventory, executable contracts, selection logic, and published result artifacts are maintained in this repository; the [current test-set evidence record](current-test-set-record.md) applies the methodology to the July 2026 engineering artifacts and the August 2026 MCP workflow pilot.
 
 ### 1.1 Research questions and estimands
 
@@ -25,6 +27,7 @@ it does not estimate an isolated runtime-component effect.[^tura-repository]
 | Additional reasoning effort      | Codex High-minus-Medium configuration contrast                                                                 | Build and effort differ simultaneously; the contrast is not an effort-only effect                                                                       |
 | Round and command associations   | Q1-to-Q3 difference in fitted success probability                                                              | Descriptive binomial models; task difficulty and stopping behavior remain uncontrolled                                                                  |
 | Submitted production-code volume | Within-task association between code additions and run-level harness success ratio across all 25 harness tasks | Equal run weights; task fixed effects; task-clustered uncertainty; configuration-adjusted and subset sensitivity models; missing source remains missing |
+| MCP workflow outcome             | Completed workflows / valid runs, plus task- and agent-level pass proportions                                 | Keep the MCP pilot separate from the engineering matrix; report model, effort, contract revision, replicates, requests, usage, and failed check IDs      |
 
 Tura Balanced operationalizes the verification-reinvestment configuration and
 Tura Direct operationalizes the token-and-round-reduction configuration. Their
@@ -44,7 +47,7 @@ The suite follows six principles.
 
 - **Behavior before implementation shape.** Where an automated verifier is available, success is based on observable behavior rather than matching a reference patch or reproducing internal symbol names. This follows the behavioral-verifier rationale described by DeepSWE and the broader repository-level evaluation setup established by SWE-bench.[^deepswe-methodology] [^swebench-paper]
 - **Coverage before convenience.** DeepSWE sampling is stratified by programming language and estimated difficulty rather than drawn only from the easiest or most common tasks.
-- **Pinned, auditable inputs.** Rewrite tasks identify the source repository, commit, tag, target language, and stable harness items. Run artifacts retain task, agent, model, and runtime metadata.
+- **Pinned, auditable inputs.** Rewrite tasks identify the source repository, commit, tag, target language, and stable harness items. MCPMark source is commit-pinned, and each workflow scenario retains its vendor-contract source and revision date. Run artifacts retain task, agent, model, and runtime metadata.
 - **No invented evidence.** Missing logs, assertion text, token fields, or scores remain missing. They are not reconstructed from model summaries or inferred from nearby runs.
 - **Separate objective and subjective evaluation.** Deterministic or programmatic checks belong in the harness. Design quality remains outside the harness until a validated human-review or multimodal-evaluation protocol is defined.
 - **Strategy before feature attribution.** Interpret each agent configuration as a complete budget-and-verification policy. Do not relabel a system-level result as evidence that one architectural component caused it.
@@ -53,14 +56,28 @@ These choices are also consistent with reproducible benchmark practice: the expe
 
 ## 3. Dataset composition
 
-| Subset              |  Tasks | Primary capability                                                      | Evaluation mode                                      | Included in harness aggregate |
-| ------------------- | -----: | ----------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------- |
-| DeepSWE v1.1 subset |     20 | Repository exploration, implementation, debugging, and verification     | Official program-based verifier; binary task outcome | Yes                           |
-| Rewrite subset      |      5 | Behavioral compatibility, source porting, and full-stack reconstruction | Task-specific multi-item harness                     | Yes                           |
-| Design subset       |      2 | Visual communication, research, interaction, and artifact quality       | Artifact capture and separate review                 | No                            |
-| **Total**           | **27** | Mixed long-horizon agent work                                           | Mixed                                                | **25 scored, 2 unscored**     |
+| Subset                       |  Tasks | Primary capability                                                      | Evaluation mode                                           | Publication boundary                    |
+| ---------------------------- | -----: | ----------------------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------- |
+| DeepSWE v1.1 subset          |     20 | Repository exploration, implementation, debugging, and verification     | Official program-based verifier; binary task outcome      | July 25-task engineering matrix         |
+| Rewrite subset               |      5 | Behavioral compatibility, source porting, and full-stack reconstruction | Task-specific multi-item harness                          | July 25-task engineering matrix         |
+| Design subset                |      2 | Visual communication, research, interaction, and artifact quality       | Artifact capture and separate review                      | Separate, non-harness review            |
+| Repository-style MCP subset  |     20 | Repository implementation through an MCP filesystem surface             | Task-specific deterministic verifier                      | No canonical result publication yet     |
+| Stateful MCP workflow subset |     10 | Cross-service orchestration and final-state correctness                  | Five deterministic protocol, order, and state checks      | August 10-task pilot; reported separately |
+| **Total**                    | **57** | Mixed long-horizon agent work                                           | Mixed                                                     | No single aggregate                       |
 
 The suite is a **curated capability sample**, not a random sample of all software-engineering work. Results therefore support comparison on this fixed suite; they do not directly estimate performance on all repositories, languages, or development tasks.
+
+### 3.1 Repository-style MCP tasks
+
+The 20 tasks under [`tasks/mcp`](../tasks/mcp/) are derived from the filesystem scenarios in MCPMark commit `cd45b7f57923b9b3985467f5139927575f83141c`. Each task packages its own fixture, task contract, stdio MCP server, adapter declarations, runner, and deterministic verifier. They test repository implementation through MCP rather than live external services. Because no canonical result cohort is currently published for this subset, these tasks belong to the benchmark inventory but not to the current evidence tables.
+
+### 3.2 Stateful MCP workflow tasks
+
+The 10 tasks under [`tasks/mcp_workflow`](../tasks/mcp_workflow/) model multi-step work across vendor-aligned service contracts. They use real MCP JSON-RPC lifecycle and tool-result envelopes against deterministic, run-scoped mock state. The mocks never contact a live user account. Every scenario embeds the selected contract source, revision date, tool schemas, initial state, required calls, dependency graph, and expected final state. A tool is labeled `official-mcp` only when its exercised surface comes from a published provider MCP contract; otherwise it is labeled `vendor-api-adapter`.
+
+Each workflow run receives five checks: initialization, `tools/list` discovery, completion of required operations, dependency-safe call order, and independent verification of final state and generated artifacts. Rejected calls remain in the trace and do not fail a later corrected workflow. Scoring is entirely programmatic; no LLM judge or human rating contributes to the result.
+
+The August pilot manifest at [`results/mcp/report-mcp-workflow-gpt56-sol-low-20260809/manifest.json`](../results/mcp/report-mcp-workflow-gpt56-sol-low-20260809/manifest.json) contains 90 runs: ten tasks, three configurations, and three replicates, all using GPT-5.6 SOL at Low reasoning. It is an exploratory pilot and is not pooled with the July engineering matrix. The detailed task and adapter contract is documented in [MCP benchmark tasks and workflow harness](mcp-benchmarks.md).
 
 ## 4. DeepSWE subset
 
@@ -165,6 +182,10 @@ Each selected task had between 159 and 164 eligible official trials in the captu
 
 Each run starts from the task's pinned base commit and isolated environment. The agent receives the task instruction and edits the workspace. The official task verifier then evaluates the resulting repository state. Pier provides the upstream workspace-and-trace execution model for Harbor tasks, while the local benchmark repository normalizes agent runs and verifier artifacts into its own contracts.[^pier-repository] A valid verifier report with reward `1` is a pass; a valid report with reward `0` is a task failure.
 
+The managed DeepSWE checkout defaults to upstream commit `a40d7298b18999c2d9b0ded7d6928e3ee26b5524`. The July published `harness.json` and `harness-report.json` files nevertheless identify the upstream grader location with the tag `v1.1`, not a verifier commit SHA and container-image digest. Those artifacts therefore preserve the recorded patch and verdict but do not independently prove bit-for-bit verifier identity. Future canonical cohorts must record the resolved grader commit and verifier image digest in each run contract.
+
+The DeepSWE grader and its hidden fixtures execute from the upstream corpus rather than a complete vendored copy in this repository. A reader can inspect the published patch, normalized report, and reward, but cannot re-derive every reward from this repository alone when the upstream test fixture is not public. This is a reproduction limit, not a reason to recode a valid verifier failure as infrastructure-invalid. The distinction and the other audit boundaries below respond to [benchmark issue #1](https://github.com/Tura-AI/benchmark/issues/1).
+
 For DeepSWE, every Tura configuration uses the Bash tool surface and launches as
 `tura exec bash --json`. This setting is mandatory rather than an optional CLI
 preference: disabling Bash can severely reduce Tura's effectiveness on
@@ -235,6 +256,8 @@ The 10-run Codex High source is
 Per-run prompts, normalized rounds, aggregate usage, retained workspaces, and
 harness reports remain under those report directories.
 
+The published rewrite tasks do not include a benchmark-owned known-good target implementation executed through each final harness. The four CLI harnesses compare selected behavior with pinned source programs, and the HTML harness checks a benchmark-owned reference specification, but neither path is a substitute for a recorded reference target passing every assertion. Until such reference runs are published, harness satisfiability is supported by individual checks and source behavior rather than demonstrated by one complete known-good build.
+
 
 ## 6. Design subset
 
@@ -255,7 +278,7 @@ Simple existence checks such as “`index.html` was created” are useful integr
 
 ### 7.1 Immutable task identity
 
-Every task is keyed by a stable task ID. Repository tasks additionally retain the repository URL and base commit. Rewrite tasks retain their source tag/commit and target runtime. Results from different task revisions must not be merged under one ID without a revision field or migration record.
+Every task is keyed by a stable task ID. Repository tasks additionally retain the repository URL and base commit. Rewrite tasks retain their source tag/commit and target runtime. MCP tasks retain the scenario or source snapshot revision and adapter-contract provenance. When an external verifier is used, canonical identity also requires the resolved verifier commit and executable image digest; a floating tag is descriptive provenance, not an immutable identity. Results from different task or verifier revisions must not be merged under one ID without a revision field or migration record.
 
 ### 7.2 Run identity and repeats
 
@@ -268,7 +291,7 @@ A run record should include at least:
 - replicate number;
 - start/end state and bounded timeout;
 - source commit or reference snapshot;
-- harness version and report path, when applicable;
+- harness version and report path, plus resolved verifier commit and image digest when applicable;
 - observable token/usage fields without imputation;
 - infrastructure status and retry lineage.
 
@@ -296,7 +319,13 @@ configurations separate in every table and fit. The build boundary is a
 confounder; do not attribute a High-versus-Medium difference solely to
 reasoning effort.
 
-### 7.4 Missing and malformed data
+### 7.4 Workspace integrity boundary
+
+Harness success means that the declared checks passed. It does not imply that every unrelated file or external object remained unchanged. The July engineering reports and August MCP workflow schema retain final workspaces, diffs or state traces where available, but they do not publish a universal agent-handoff manifest followed by an automated off-task-state diff for every task family. Reviewers may inspect retained artifacts, but manual inspectability is not the same as a scored guard.
+
+Future canonical harnesses should record the task-visible workspace and relevant service-state manifest at handoff, declare allowed mutation paths or objects, and fail or separately flag undeclared changes. This guard must be scoped carefully: build products, caches, logs, and task-authorized generated files should not become accidental failures.
+
+### 7.5 Missing and malformed data
 
 Use explicit states rather than coercing all anomalies to zero:
 
@@ -314,7 +343,7 @@ Use explicit states rather than coercing all anomalies to zero:
 | Design artifact missing or entry path wrong                                        | Mark invalid artifact; do not manufacture a design score              |
 | External link unavailable during design review                                     | Record link-check time and failure separately from artifact rendering |
 
-### 7.5 Analysis populations and declared exclusion
+### 7.6 Analysis populations and declared exclusion
 
 Configuration-level result tables use all 280 published harness-scored runs.
 Cross-run relationship figures use a 278-run population after excluding exactly
@@ -336,11 +365,13 @@ missing-source records.
 
 ### 8.1 Primary metrics
 
-Report the three subsets separately:
+Report the five subsets separately:
 
 - **DeepSWE:** passes / valid task runs and pass rate, with replicate-level results retained;
 - **Rewrite:** assertion score per task, the five-task macro average, and the separately labeled assertion-weighted micro rate;
 - **Design:** artifact validity and separate rubric dimensions or qualitative findings, explicitly labeled non-harness.
+- **Repository-style MCP:** passes / valid task runs when a canonical cohort exists; do not infer a result from task availability alone.
+- **Stateful MCP workflow:** completed workflows / valid runs, with the five check IDs, task- and agent-level rates, requests, token components, estimated cost, and failed-run evidence retained.
 
 For every strategy comparison, report these outcome metrics beside observed total model tokens, model rounds, and computed cost when the provider usage record supports it. Also retain task-level distributions and severe long tails; aggregate savings alone can hide expensive failures. Verification activity may be summarized from traceable test, build, lint, browser, link, source, or rerun evidence, but raw command counts must not be treated as equal atomic work units across runtimes with different batching granularity.
 
@@ -380,7 +411,7 @@ by build and reasoning effort.
 
 ### 8.3 Optional overall summaries
 
-If an overall engineering score is required, use a task-level macro average over the **25 harness-scored tasks** so that each task contributes equally after its own harness has produced a task score. Label the formula and keep the subset scores adjacent. Do not include the two design tasks unless a separate, predeclared scoring protocol exists.
+If an overall engineering score is required for the July matrix, use a task-level macro average over the **25 harness-scored tasks** so that each task contributes equally after its own harness has produced a task score. Label the formula and keep the subset scores adjacent. Do not include the two design tasks unless a separate, predeclared scoring protocol exists. Do not append the MCP pilot to that score: its task shape, reasoning setting, configuration matrix, and five-check workflow contract define a different estimand.
 
 ### 8.4 Uncertainty
 
@@ -440,6 +471,8 @@ DeepSWE covers five languages but excludes major ecosystems such as Java and C++
 
 The rewrite subset is small and intentionally heterogeneous. All four CLI ports begin with Rust sources and target Python, so the result should not be generalized to arbitrary language pairs. The HTML task tests one framework and one product shape.
 
+The MCP workflow subset uses deterministic mocks and ten authored scenarios. It measures protocol use and orchestration against the declared contract, not authentication, rate limits, permission drift, latency, partial outages, undocumented provider behavior, or safety constraints in live accounts. Passing a mock workflow is not evidence of complete vendor MCP conformance.
+
 ### 10.3 Selection bias
 
 The DeepSWE subset is stratified, not random. It overrepresents Rust and JavaScript relative to their available task pools and chooses deterministic band-edge examples. The rebuild and design tasks were purposefully selected for breadth and evaluability. Reported performance is conditional on this curation.
@@ -471,6 +504,10 @@ they do not estimate an individual mechanism's causal effect. A controlled
 ablation must hold the build, task set, model, effort, timeout, service tier,
 network policy, and retry policy constant.
 
+### 10.9 Ownership and conflict-of-interest disclosure
+
+Tura-AI develops the Tura runtime, owns this benchmark repository, defines the Tura Balanced and Tura Direct configurations, and publishes comparisons against Codex. This is a direct conflict of interest. Public prompts, contracts, traces, workspaces, usage records, and verifier reports make the claims auditable, but they do not provide independent task authorship, execution, or replication. Readers should weight the results accordingly, and independent reproduction should be reported separately from project-run evidence.
+
 ## 11. Reproduction checklist
 
 Before publishing or comparing a run:
@@ -480,15 +517,19 @@ Before publishing or comparing a run:
 - record the official task/trial artifact URLs and retrieval time;
 - validate all task declarations and harness schemas;
 - pin source commits, dependency lockfiles, container images, locale, and runtime versions;
+- record the resolved grader commit and verifier image digest rather than only a tag;
 - publish the agent/model/effort matrix, replicate count, timeout, concurrency, and network policy;
 - preserve raw events, normalized rounds, repository diffs, verifier output, and retry lineage;
+- publish a start-state manifest and an automated off-task-state comparison where the task contract permits one;
 - distinguish valid task failures from infrastructure-invalid runs;
-- report DeepSWE, rewrite, and design results separately;
+- run a known-good reference target through each rewrite harness and retain the result;
+- report DeepSWE, rewrite, design, repository MCP, and workflow MCP results separately;
 - include counts and denominators with every rate;
 - identify the published, relationship-model, and observed-code populations;
 - publish every regression formula, estimand, adjustment set, and interval assumption;
 - keep design tasks outside harness aggregation;
 - document every exclusion, rerun, harness revision, and manual judgment.
+- disclose benchmark ownership, configuration authorship, and other material conflicts of interest.
 
 ## 12. References
 
